@@ -1,0 +1,439 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/instrument-sans/index.css';
+@import '@fontsource-variable/instrument-sans/wght-italic.css';
+@import '@fontsource-variable/newsreader/opsz.css';
+@import '@fontsource-variable/newsreader/opsz-italic.css';
+@import '@fontsource-variable/jetbrains-mono/index.css';
+@import '@fontsource-variable/jetbrains-mono/wght-italic.css';
+/* Optional faces for Settings › Appearance. Files download only when a face is used. */
+@import '@fontsource-variable/literata/opsz.css';
+@import '@fontsource-variable/literata/opsz-italic.css';
+@import '@fontsource-variable/source-serif-4/opsz.css';
+@import '@fontsource-variable/source-serif-4/opsz-italic.css';
+@import '@fontsource-variable/inter/opsz.css';
+@import '@fontsource-variable/inter/opsz-italic.css';
+@import '@fontsource-variable/geist/index.css';
+@import '@fontsource-variable/geist/wght-italic.css';
+@import '@fontsource-variable/geist-mono/index.css';
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/400-italic.css';
+@import '@fontsource/ibm-plex-sans/500.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/400-italic.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+/*
+ * Ink & paper. Warm neutrals, one ember accent used only for the primary
+ * action, focus, and recording. Every text/surface pair here (muted on --hover included) is >= 4.5:1.
+ */
+:root,
+[data-theme='light'] {
+  --bg: #f7f5f0;
+  --side: #efebe3;
+  --surface: #fdfcf9;
+  --hover: #e9e5dc;
+  --line: #e1dcd1;
+  --fg: #1d1b18;
+  --fg-2: #4b463f;
+  --muted: #69625a;
+  --accent: #b9502a;
+  --on-accent: #ffffff;
+  --accent-wash: #b9502a14;
+  --danger: #a83a2c;
+  --code-bg: #f1eee7;
+  --scrim: #1d1b1859;
+  --shadow: 0 1px 2px #1d1b180d, 0 8px 24px -8px #1d1b1826;
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  --bg: #171614;
+  --side: #121110;
+  --surface: #211f1c;
+  --hover: #2a2824;
+  --line: #2d2a26;
+  --fg: #ede8e0;
+  --fg-2: #bdb5a9;
+  --muted: #9a9286;
+  --accent: #e5703f;
+  --on-accent: #1b0e08;
+  --accent-wash: #e5703f1a;
+  --danger: #e2735f;
+  --code-bg: #1c1b18;
+  --scrim: #0000008c;
+  --shadow: 0 1px 2px #0000004d, 0 12px 32px -12px #00000099;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-side: var(--side);
+  --color-surface: var(--surface);
+  --color-hover: var(--hover);
+  --color-line: var(--line);
+  --color-fg: var(--fg);
+  --color-fg-2: var(--fg-2);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-on-accent: var(--on-accent);
+  --color-accent-wash: var(--accent-wash);
+  --color-danger: var(--danger);
+  --color-scrim: var(--scrim);
+  --shadow-float: var(--shadow);
+  /* Font roles follow Settings › Appearance (lib/appearance.svelte.ts). */
+  --font-sans: var(--font-ui);
+  --font-serif: var(--font-reading);
+  --font-mono: var(--font-code);
+}
+
+:root {
+  --font-reading: 'Newsreader Variable', Georgia, serif;
+  --font-ui: 'Instrument Sans Variable', system-ui, sans-serif;
+  --font-code: 'JetBrains Mono Variable', ui-monospace, Consolas, monospace;
+  --reading-size: 16.5px;
+}
+
+@theme {
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-optical-sizing: auto;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  transition:
+    background-color 200ms var(--ease-out),
+    color 200ms var(--ease-out);
+}
+
+::selection {
+  background: var(--accent-wash);
+  color: var(--fg);
+}
+[data-theme='dark'] ::selection {
+  background: #e5703f40;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+button {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: default;
+}
+
+/* Fields show focus on their container; controls get a ring. */
+:where(button, a, [role='switch'], [role='tab'], [role='radio'], summary):focus-visible {
+  outline: 1.5px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Quiet icon button used across the app. */
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  padding: 5px;
+  transition:
+    color 120ms var(--ease-out),
+    background-color 120ms var(--ease-out);
+}
+.icon-btn:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--hover);
+}
+.icon-btn:disabled {
+  opacity: 0.35;
+}
+
+/* Rendered assistant prose: an editorial serif at a readable measure. */
+.prose-chat {
+  font-family: var(--font-reading);
+  font-size: var(--reading-size);
+  line-height: 1.68;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+  font-optical-sizing: auto;
+}
+.prose-chat > :first-child {
+  margin-top: 0;
+}
+.prose-chat > :last-child {
+  margin-bottom: 0;
+}
+.prose-chat p,
+.prose-chat ul,
+.prose-chat ol,
+.prose-chat blockquote,
+.prose-chat table {
+  margin: 0.75em 0;
+}
+.prose-chat ul {
+  list-style: none;
+  padding-left: 1.1em;
+}
+.prose-chat ul > li {
+  position: relative;
+}
+.prose-chat ul > li::before {
+  content: '';
+  position: absolute;
+  left: -0.85em;
+  top: 0.78em;
+  width: 0.32em;
+  height: 1.5px;
+  background: var(--muted);
+}
+.prose-chat ol {
+  list-style: decimal;
+  padding-left: 1.4em;
+}
+.prose-chat ol > li::marker {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.prose-chat li {
+  margin: 0.3em 0;
+}
+.prose-chat h1,
+.prose-chat h2,
+.prose-chat h3,
+.prose-chat h4 {
+  font-weight: 560;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  margin: 1.4em 0 0.45em;
+}
+.prose-chat h1 {
+  font-size: 1.5em;
+}
+.prose-chat h2 {
+  font-size: 1.28em;
+}
+.prose-chat h3 {
+  font-size: 1.1em;
+}
+.prose-chat strong {
+  font-weight: 620;
+}
+.prose-chat a {
+  color: var(--fg);
+  text-decoration: underline;
+  text-decoration-color: var(--muted);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  transition: text-decoration-color 120ms;
+}
+.prose-chat a:hover {
+  text-decoration-color: var(--accent);
+}
+.prose-chat blockquote {
+  border-left: 2px solid var(--line);
+  padding-left: 1em;
+  color: var(--fg-2);
+  font-style: italic;
+}
+.prose-chat hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 1.6em 0;
+}
+.prose-chat :not(pre) > code {
+  font-family: var(--font-code);
+  font-size: 0.8em;
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 0.12em 0.36em;
+}
+.prose-chat table {
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+}
+.prose-chat th,
+.prose-chat td {
+  border-bottom: 1px solid var(--line);
+  padding: 0.5em 1em 0.5em 0;
+  text-align: left;
+}
+.prose-chat th {
+  font-weight: 600;
+  color: var(--fg-2);
+}
+.prose-chat img {
+  max-width: 100%;
+  border-radius: var(--radius-md);
+}
+
+.code-block {
+  margin: 1em 0;
+  border-radius: var(--radius-md);
+  background: var(--code-bg);
+  overflow: hidden;
+}
+.code-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 8px 0 14px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--muted);
+}
+.copy-code {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--muted);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  transition:
+    color 120ms,
+    background-color 120ms;
+}
+.copy-code:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+.code-block pre {
+  margin: 0;
+  padding: 8px 14px 14px;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.code-block code.hljs,
+code.hljs {
+  font-family: var(--font-code);
+  background: transparent;
+  padding: 0;
+  color: var(--fg);
+}
+
+/* Syntax colours tuned to the palette (no third-party theme). */
+.hljs-comment,
+.hljs-quote {
+  color: var(--muted);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-name {
+  color: #9a4f8c;
+}
+.hljs-string,
+.hljs-attr,
+.hljs-template-tag {
+  color: #4f7a3a;
+}
+.hljs-number,
+.hljs-literal,
+.hljs-symbol {
+  color: #7d5f18;
+}
+.hljs-title,
+.hljs-title.function_,
+.hljs-section {
+  color: #2f6a8a;
+}
+.hljs-tag,
+.hljs-meta,
+.hljs-variable {
+  color: var(--fg-2);
+}
+[data-theme='dark'] .hljs-keyword,
+[data-theme='dark'] .hljs-selector-tag,
+[data-theme='dark'] .hljs-built_in,
+[data-theme='dark'] .hljs-name {
+  color: #d39bc6;
+}
+[data-theme='dark'] .hljs-string,
+[data-theme='dark'] .hljs-attr,
+[data-theme='dark'] .hljs-template-tag {
+  color: #a7c48e;
+}
+[data-theme='dark'] .hljs-number,
+[data-theme='dark'] .hljs-literal,
+[data-theme='dark'] .hljs-symbol {
+  color: #d9b56a;
+}
+[data-theme='dark'] .hljs-title,
+[data-theme='dark'] .hljs-title.function_,
+[data-theme='dark'] .hljs-section {
+  color: #8fbcd6;
+}
+
+/* Theme swaps flip every colour in one frame instead of easing each element separately. */
+.theme-swap,
+.theme-swap * {
+  transition: none !important;
+}
+
+/* "Thinking" label with a slow light sweep. */
+@keyframes sweep {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+.thinking {
+  background: linear-gradient(90deg, var(--muted) 0%, var(--muted) 40%, var(--fg) 50%, var(--muted) 60%, var(--muted) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: sweep 1.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Indeterminate progress sliver for artifacts that are still being written. */
+@keyframes slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+
+@keyframes rec-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}

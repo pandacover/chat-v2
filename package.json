@@ -1,0 +1,50 @@
+{
+  "name": "chat-v2",
+  "version": "0.1.0",
+  "description": "Desktop chatbot: OpenRouter chat, ElevenLabs STT, branching sessions, artifacts",
+  "main": "./out/main/index.js",
+  "author": "pandacover",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && svelte-check --tsconfig ./tsconfig.web.json",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@fontsource-variable/geist": "^5.3.0",
+    "@fontsource-variable/geist-mono": "^5.3.0",
+    "@fontsource-variable/instrument-sans": "^5.3.0",
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource-variable/literata": "^5.3.0",
+    "@fontsource-variable/newsreader": "^5.3.0",
+    "@fontsource-variable/source-serif-4": "^5.3.1",
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@fontsource/ibm-plex-sans": "^5.3.0",
+    "dompurify": "^3.4.17",
+    "effect": "^4.0.5",
+    "highlight.js": "^11.12.0",
+    "marked": "^18.1.1"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "@tailwindcss/vite": "^4.3.3",
+    "@tsconfig/svelte": "^5.0.8",
+    "@types/bun": "^1.4.3",
+    "@types/node": "^26.6.5",
+    "electron": "^44.7.2",
+    "electron-vite": "^6.0.0",
+    "svelte": "^5.57.2",
+    "svelte-check": "^4.7.6",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^6.0.0",
+    "vite": "^8.3.4"
+  },
+  "trustedDependencies": [
+    "electron",
+    "esbuild"
+  ]
+}
