@@ -43,7 +43,7 @@
   let tick: ReturnType<typeof setInterval> | undefined
 
   const busy = $derived(app.streaming)
-  const canSend = $derived((text.trim() !== '' || app.draftAttachments.length > 0) && uploading === 0 && !busy)
+  const canSend = $derived((text.trim() !== '' || app.draftAttachments.length > 0) && uploading === 0 && app.analyzing.size === 0 && !busy)
 
   export const focus = () => textarea?.focus()
 
@@ -57,10 +57,14 @@
     for (const file of files) {
       uploading += 1
       try {
-        const added = await app.attempt(async () =>
-          window.api.attachments.add({ name: file.name || 'pasted-image.png', mime: file.type, data: await file.arrayBuffer() })
+        const data = await file.arrayBuffer()
+        const added = await app.attempt(() =>
+          window.api.attachments.add({ name: file.name || 'pasted-image.png', mime: file.type, data })
         )
-        if (added) app.addDraftAttachment(added)
+        if (added) {
+          app.addDraftAttachment(added)
+          if (added.kind === 'audio') void app.analyzeDraft(added, data)
+        }
       } finally {
         uploading -= 1
       }
@@ -223,6 +227,7 @@
     <div class="flex flex-wrap items-center gap-1.5 px-3 pt-3">
       {#each app.draftAttachments as a (a.id)}<AttachmentChip attachment={a} onremove={() => removeAttachment(a)} />{/each}
       {#if uploading > 0}<span class="px-1 text-[12px] text-muted" in:fade>Uploading…</span>{/if}
+      {#if app.analyzing.size > 0}<span class="thinking px-1 text-[12px]" in:fade>Finding the beat…</span>{/if}
     </div>
   {/if}
 

@@ -37,6 +37,7 @@ const api: Api = {
   attachments: {
     add: (input) => call('attachments:add', input),
     discard: (id) => call('attachments:discard', id),
+    setAnalysis: (id, analysis) => call('attachments:setAnalysis', id, analysis),
     url: (id) => `attachment://${id}/`
   },
   settings: {

@@ -4,11 +4,15 @@ import { readFile, rm, writeFile } from 'node:fs/promises'
 import { Context, Effect, Layer } from 'effect'
 import type { Attachment, AttachmentKind, NewAttachmentInput } from '@shared/types'
 import { type DbError, FileError, InvalidInput, NotFound, errorMessage } from '../errors'
+import { describeAudio } from '@shared/audio-prompt'
 import type { ContentPart } from './OpenRouter'
 import { AppPaths } from './AppPaths'
 import { Db, type StoredAttachment } from './Db'
 
 export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+/** Uncompressed WAV runs about 10 MB a minute, so audio gets more room. */
+export const MAX_AUDIO_BYTES = 100 * 1024 * 1024
+const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'ogg', 'oga', 'opus', 'flac', 'm4a', 'aac', 'aiff', 'aif', 'weba'])
 const MAX_TEXT_CHARS = 200_000
 
 const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
@@ -22,6 +26,7 @@ const TEXT_EXTENSIONS = new Set(
 export const classify = (name: string, mime: string): AttachmentKind | null => {
   const ext = extname(name).slice(1).toLowerCase()
   if (IMAGE_MIMES.has(mime) || ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) return 'image'
+  if (mime.startsWith('audio/') || AUDIO_EXTENSIONS.has(ext)) return 'audio'
   if (mime === 'application/pdf' || ext === 'pdf') return 'pdf'
   if (mime.startsWith('text/') || mime === 'application/json' || TEXT_EXTENSIONS.has(ext)) return 'text'
   if (!ext && !mime) return 'text'
@@ -61,14 +66,16 @@ export class Attachments extends Context.Service<
         const bytes = new Uint8Array(input.data)
         const kind = classify(input.name, input.mime)
         if (!kind) return yield* new InvalidInput({ message: `${input.name}: unsupported file type` })
-        if (bytes.byteLength > MAX_ATTACHMENT_BYTES)
-          return yield* new InvalidInput({ message: `${input.name} is larger than 25 MB` })
+        const limit = kind === 'audio' ? MAX_AUDIO_BYTES : MAX_ATTACHMENT_BYTES
+        if (bytes.byteLength > limit)
+          return yield* new InvalidInput({ message: `${input.name} is larger than ${limit / 1024 / 1024} MB` })
         if (kind === 'text' && looksBinary(bytes))
           return yield* new InvalidInput({ message: `${input.name} looks like a binary file` })
         const ext = extname(input.name).toLowerCase().replace(/[^.\w]/g, '')
         const path = join(paths.attachmentsDir, `${randomUUID()}${ext}`)
         yield* Effect.tryPromise({ try: () => writeFile(path, bytes), catch: fileError('Could not save file') })
-        const mime = kind === 'image' ? imageMime(input.name, input.mime) : input.mime || 'text/plain'
+        const mime =
+          kind === 'image' ? imageMime(input.name, input.mime) : input.mime || (kind === 'audio' ? 'audio/mpeg' : 'text/plain')
         const stored = yield* db.use((d) =>
           d.insertAttachment({ name: input.name, mime, size: bytes.byteLength, kind, path })
         )
@@ -96,6 +103,11 @@ export class Attachments extends Context.Service<
         const parts: ContentPart[] = []
         let hasPdf = false
         for (const a of attachments) {
+          // Audio goes to the model as its measurements, so the file is never read here.
+          if (a.kind === 'audio') {
+            parts.push({ type: 'text', text: describeAudio(a.name, a.analysis) })
+            continue
+          }
           const data = yield* Effect.tryPromise({
             try: () => readFile(a.path),
             catch: fileError(`Attachment ${a.name} is missing`)

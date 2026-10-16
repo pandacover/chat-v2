@@ -96,6 +96,25 @@ class AppState {
     this.draftAttachments.push(attachment)
   }
 
+  /** Audio uploads being measured; sending waits for these. */
+  analyzing = new SvelteSet<string>()
+
+  /** Measures tempo and beats of an audio upload, then stores the result with it. */
+  async analyzeDraft(attachment: Attachment, data: ArrayBuffer) {
+    this.analyzing.add(attachment.id)
+    try {
+      const { analyzeAudio } = await import('./analyzeAudio')
+      const analysis = await analyzeAudio(data)
+      await api.attachments.setAnalysis(attachment.id, analysis)
+      const draft = this.draftAttachments.find((a) => a.id === attachment.id)
+      if (draft) draft.analysis = analysis
+    } catch (e) {
+      this.toast(`Couldn't analyse ${attachment.name}: ${describe(e)}`)
+    } finally {
+      this.analyzing.delete(attachment.id)
+    }
+  }
+
   private onBrowserEvent(e: BrowserEvent) {
     if (e.type === 'open') this.openBrowser()
     else if (e.type === 'control') {

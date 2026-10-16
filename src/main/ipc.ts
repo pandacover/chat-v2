@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { app, ipcMain, shell } from 'electron'
 import { Cause, Effect, type ManagedRuntime } from 'effect'
-import type { IpcResult, NewAttachmentInput, SettingsPatch } from '@shared/types'
+import type { AudioAnalysis, IpcResult, NewAttachmentInput, SettingsPatch } from '@shared/types'
 import { errorMessage } from './errors'
 import { checkForUpdates, installUpdate, updateState } from './updater'
 import { publishArtifact } from './protocols'
@@ -112,6 +112,8 @@ const handlers: Record<string, Handler> = {
       a.add({ name: str(input.name, 'name'), mime: typeof input.mime === 'string' ? input.mime : '', data: input.data })
     ),
   'attachments:discard': (id) => Attachments.use((a) => a.discard(str(id, 'id'))),
+  'attachments:setAnalysis': (id, analysis: AudioAnalysis) =>
+    Db.use((db) => db.use((d) => d.setAnalysis(str(id, 'id'), analysis))),
 
   'settings:get': () => SettingsStore.use((s) => s.view),
   'settings:update': (patch: SettingsPatch) => SettingsStore.use((s) => s.update(patch)),

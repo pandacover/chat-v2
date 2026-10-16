@@ -8,6 +8,7 @@ import type {
   MessageStatus,
   PathNode,
   Role,
+  AudioAnalysis,
   Session,
   Usage
 } from '@shared/types'
@@ -56,7 +57,9 @@ const MIGRATIONS: string[] = [
   // Per-chat switch that gives the model browser tools.
   `alter table sessions add column browser_enabled integer not null default 0;`,
   // Token and credit totals per reply, as JSON.
-  `alter table messages add column usage text;`
+  `alter table messages add column usage text;`,
+  // Tempo/beat analysis of audio uploads, as JSON.
+  `alter table attachments add column analysis text;`
 ]
 
 interface SessionRow {
@@ -95,6 +98,7 @@ interface AttachmentRow {
   kind: string
   path: string
   created_at: number
+  analysis: string | null
 }
 
 export interface StoredAttachment extends Attachment {
@@ -121,10 +125,20 @@ const toAttachment = (r: AttachmentRow): StoredAttachment => ({
   size: r.size,
   kind: r.kind as AttachmentKind,
   path: r.path,
-  createdAt: r.created_at
+  createdAt: r.created_at,
+  analysis: parseJson<AudioAnalysis>(r.analysis)
 })
 
 const publicAttachment = ({ path: _path, ...a }: StoredAttachment): Attachment => a
+
+const parseJson = <T>(raw: string | null): T | null => {
+  if (!raw) return null
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    return null
+  }
+}
 
 const parseUsageJson = (raw: string | null): Usage | null => {
   if (!raw) return null
@@ -344,8 +358,8 @@ export const makeDb = (file: string) => {
         )
         for (const a of stored.get(m.id) ?? []) {
           run(
-            `insert into attachments (id, message_id, name, mime, size, kind, path, created_at)
-             values (?, ?, ?, ?, ?, ?, ?, ?)`,
+            `insert into attachments (id, message_id, name, mime, size, kind, path, created_at, analysis)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             randomUUID(),
             copy.id,
             a.name,
@@ -353,7 +367,8 @@ export const makeDb = (file: string) => {
             a.size,
             a.kind,
             a.path,
-            a.createdAt
+            a.createdAt,
+            a.analysis ? JSON.stringify(a.analysis) : null
           )
         }
         parentId = copy.id
@@ -450,7 +465,7 @@ export const makeDb = (file: string) => {
     /** Crash recovery: anything still `streaming` at startup was cut off. */
     markInterrupted: (): number =>
       Number(run(`update messages set status = 'interrupted' where status = 'streaming'`).changes),
-    insertAttachment: (a: Omit<StoredAttachment, 'id' | 'messageId' | 'createdAt'>): StoredAttachment => {
+    insertAttachment: (a: Omit<StoredAttachment, 'id' | 'messageId' | 'createdAt' | 'analysis'>): StoredAttachment => {
       const id = randomUUID()
       const now = Date.now()
       run(
@@ -464,7 +479,7 @@ export const makeDb = (file: string) => {
         a.path,
         now
       )
-      return { ...a, id, messageId: null, createdAt: now }
+      return { ...a, id, messageId: null, createdAt: now, analysis: null }
     },
     getAttachment: (id: string): StoredAttachment | undefined => {
       const row = one<AttachmentRow>('select * from attachments where id = ?', id)
@@ -480,8 +495,8 @@ export const makeDb = (file: string) => {
             run('update attachments set message_id = ? where id = ?', messageId, id)
           } else if (a.message_id !== messageId) {
             run(
-              `insert into attachments (id, message_id, name, mime, size, kind, path, created_at)
-               values (?, ?, ?, ?, ?, ?, ?, ?)`,
+              `insert into attachments (id, message_id, name, mime, size, kind, path, created_at, analysis)
+               values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               randomUUID(),
               messageId,
               a.name,
@@ -489,12 +504,16 @@ export const makeDb = (file: string) => {
               a.size,
               a.kind,
               a.path,
-              a.created_at
+              a.created_at,
+              a.analysis
             )
           }
         }
       }),
     storedAttachmentsFor: (messageIds: readonly string[]) => attachmentsFor(messageIds),
+    setAnalysis: (id: string, analysis: AudioAnalysis) => {
+      run('update attachments set analysis = ? where id = ?', JSON.stringify(analysis), id)
+    },
     /** Removes a pending (unsent) attachment and reports whether its file is now unreferenced. */
     discardAttachment: (id: string): string | null => {
       const a = one<AttachmentRow>('select * from attachments where id = ? and message_id is null', id)

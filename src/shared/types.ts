@@ -5,7 +5,23 @@ export type Role = 'root' | 'system' | 'user' | 'assistant'
 /** Lifecycle of an assistant message. `interrupted` means the app stopped mid-stream. */
 export type MessageStatus = 'complete' | 'streaming' | 'interrupted' | 'stopped' | 'error'
 
-export type AttachmentKind = 'image' | 'pdf' | 'text'
+export type AttachmentKind = 'image' | 'pdf' | 'text' | 'audio'
+
+/** Tempo and beats of an audio upload, measured on this device. */
+export interface AudioAnalysis {
+  duration: number
+  sampleRate: number
+  channels: number
+  /** From the app's own analysis (onset autocorrelation + beat tracking). */
+  bpm: number | null
+  confidence: number
+  beats: number[]
+  tempoMap: Array<{ start: number; bpm: number }>
+  peaks: number[]
+  /** Second opinion from web-audio-beat-detector; `offset` is the beat phase in seconds. */
+  library: { bpm: number; offset: number } | null
+  agreement: 'agree' | 'octave' | 'differ' | 'n/a'
+}
 
 export interface Attachment {
   id: string
@@ -15,6 +31,8 @@ export interface Attachment {
   size: number
   kind: AttachmentKind
   createdAt: number
+  /** Audio only: filled in once the file has been analysed. */
+  analysis: AudioAnalysis | null
 }
 
 /** Tokens and OpenRouter credits for one reply, summed over every request it made. */
@@ -162,6 +180,7 @@ export interface Api {
   }
   attachments: {
     add(input: NewAttachmentInput): Promise<Attachment>
+    setAnalysis(id: string, analysis: AudioAnalysis): Promise<void>
     discard(id: string): Promise<void>
     url(id: string): string
   }
