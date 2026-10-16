@@ -23,21 +23,34 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun test
 
-  build:
+  # Create the draft up front: if each platform job created its own, they would race
+  # and publish two releases with the same tag.
+  prepare:
     needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the draft release
+        run: |
+          gh release view "v${VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 ||
+            gh release create "v${VERSION}" --repo "${GITHUB_REPOSITORY}" --draft --title "${VERSION}" --target "${GITHUB_SHA}" --notes "Building…"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    needs: prepare
     strategy:
       fail-fast: true
       matrix:
         os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - name: Set version
