@@ -87,7 +87,7 @@
               <div class="flex min-w-0 flex-1 flex-col bg-side {resizing ? 'pointer-events-none' : ''}">
                 {#if app.browserOpen && app.hasArtifact}
                   <div class="flex shrink-0 gap-1 px-2 pt-2" role="tablist" aria-label="Panel">
-                    {#each [{ id: 'artifact', label: app.artifactVersions[0]?.block.title ?? 'Artifact', icon: 'window' }, { id: 'browser', label: app.browser.title || 'Browser', icon: 'globe' }] as t (t.id)}
+                    {#each [{ id: 'artifact', label: app.artifactVersions[0]?.block.title ?? 'Artifact', icon: app.artifactVersions[0]?.block.kind === 'moodboard' ? 'board' : 'window' }, { id: 'browser', label: app.browser.title || 'Browser', icon: 'globe' }] as t (t.id)}
                       <button
                         role="tab"
                         aria-selected={app.activeTab === t.id}
@@ -96,7 +96,7 @@
                           : 'text-fg-2 hover:bg-hover hover:text-fg'}"
                         onclick={() => (app.panelTab = t.id as 'artifact' | 'browser')}
                       >
-                        <Icon name={t.icon as 'window' | 'globe'} size={13} />
+                        <Icon name={t.icon as 'window' | 'globe' | 'board'} size={13} />
                         <span class="truncate">{t.label}</span>
                         {#if t.id === 'browser' && app.control.active}<span class="size-1.5 shrink-0 rounded-full bg-accent"></span>{/if}
                       </button>

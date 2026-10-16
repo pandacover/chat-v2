@@ -5,6 +5,8 @@ export interface ArtifactBlock {
   /** Stable identifier; the same id across messages means a new version of one artifact. */
   identifier: string
   title: string
+  /** `moodboard` artifacts hold shot JSON drawn on a canvas; everything else is an HTML document. */
+  kind: 'html' | 'moodboard'
   content: string
   /** False while the closing tag has not streamed in yet. */
   complete: boolean
@@ -26,6 +28,8 @@ const attr = (attrs: string, name: string): string | null => {
 }
 
 /** Strips a ```html fence some models wrap around the artifact body. */
+const kindOf = (attrs: string): ArtifactBlock['kind'] => (/moodboard/i.test(attr(attrs, 'type') ?? '') ? 'moodboard' : 'html')
+
 const unfence = (body: string): string => {
   const trimmed = body.trim()
   const m = /^```[\w-]*\n([\s\S]*?)\n?```$/.exec(trimmed)
@@ -49,20 +53,36 @@ export const parseContent = (content: string): ContentBlock[] => {
     counter += 1
     const identifier = attr(attrs, 'identifier') ?? attr(attrs, 'id') ?? `artifact-${counter}`
     const title = attr(attrs, 'title') ?? 'Untitled artifact'
+    const kind = kindOf(attrs)
     if (!close) {
-      blocks.push({ type: 'artifact', identifier, title, content: unfence(afterOpen), complete: false })
+      blocks.push({ type: 'artifact', identifier, title, kind, content: unfence(afterOpen), complete: false })
       break
     }
     blocks.push({
       type: 'artifact',
       identifier,
       title,
+      kind,
       content: unfence(afterOpen.slice(0, close.index)),
       complete: true
     })
     rest = afterOpen.slice(close.index + close[0].length)
   }
   return blocks.filter((b) => b.type === 'artifact' || b.content.trim() !== '')
+}
+
+/** Rewrites the body of complete artifacts; `replace` returns null to keep a body as it is. */
+export const replaceArtifacts = (
+  content: string,
+  replace: (a: { identifier: string; kind: ArtifactBlock['kind'] }) => string | null
+): string => {
+  let counter = 0
+  return content.replace(/(<artifact\b([^>]*)>)([\s\S]*?)(<\/artifact>)/gi, (whole, open: string, attrs: string, _body, close: string) => {
+    counter += 1
+    const identifier = attr(attrs, 'identifier') ?? attr(attrs, 'id') ?? `artifact-${counter}`
+    const next = replace({ identifier, kind: kindOf(attrs) })
+    return next === null ? whole : `${open}\n${next}\n${close}`
+  })
 }
 
 export const ARTIFACT_INSTRUCTIONS = `You can create interactive artifacts that the user's app renders live in a sandboxed panel.

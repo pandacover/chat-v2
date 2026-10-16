@@ -102,6 +102,8 @@ export interface Settings {
   artifactsEnabled: boolean
   /** Answers requests that contain images when the chat's model cannot see them; '' turns this off. */
   visionModel: string
+  /** Draws the sketches on mood boards (an OpenRouter image model). */
+  sketchModel: string
   /** Keeps the window above other apps on the same desktop. */
   alwaysOnTop: boolean
 }
@@ -125,6 +127,8 @@ export interface ModelInfo {
   name: string
   contextLength: number | null
   inputModalities: string[]
+  /** Set for image-generation models, which are priced per image rather than per token. */
+  image?: boolean
   /** Whether OpenRouter lists tool calling for this model (needed for browser control). */
   supportsTools: boolean
   /** USD per million tokens; null when unknown or variable (routers). */
@@ -193,6 +197,8 @@ export interface Api {
   }
   models: {
     list(): Promise<ModelInfo[]>
+    /** Models that generate images, for mood board sketches. */
+    images(): Promise<ModelInfo[]>
   }
   stt: {
     /** Asks for microphone access where the OS requires it (macOS); false when it is off. */
@@ -202,6 +208,15 @@ export interface Api {
   artifacts: {
     /** Registers HTML for the sandboxed artifact:// scheme and returns its URL. */
     publish(html: string): Promise<string>
+  }
+  boards: {
+    /** The hand-edited state of a mood board version, or null if it was never edited. */
+    get(messageId: string, identifier: string): Promise<unknown>
+    save(messageId: string, identifier: string, doc: unknown): Promise<void>
+    /** A pencil sketch for a shot as a data URL; cached, so the same prompt is drawn once. */
+    sketch(prompt: string, variant: number): Promise<string>
+    /** Asks where to save a PNG export and writes it; null when the user cancels. */
+    savePng(name: string, data: ArrayBuffer): Promise<string | null>
   }
   browser: BrowserApi
   updates: {

@@ -2,6 +2,7 @@
   import { tip } from '@/lib/tooltip'
   import { untrack } from 'svelte'
   import { parseContent, type ContentBlock } from '@shared/artifacts'
+  import { parseMoodboard } from '@shared/moodboard'
   import { splitSteps, type Step } from '@shared/steps'
   import StepList from './StepList.svelte'
   import type { PathNode } from '@shared/types'
@@ -91,6 +92,11 @@
     interrupted: 'Interrupted when the app closed.',
     stopped: 'Stopped.',
     error: 'Something went wrong.'
+  }
+
+  const shots = (json: string) => {
+    const n = parseMoodboard(json)?.shots.length ?? 0
+    return `${n} ${n === 1 ? 'shot' : 'shots'}`
   }
 
   const lines = (s: string) => {
@@ -199,11 +205,13 @@
           disabled={!block.complete}
           onclick={() => app.showArtifact({ identifier: block.identifier, messageId: message.id })}
         >
-          <span class="grid size-9 place-items-center rounded-md bg-hover text-fg-2"><Icon name="window" size={17} /></span>
+          <span class="grid size-9 place-items-center rounded-md bg-hover text-fg-2"><Icon name={block.kind === 'moodboard' ? 'board' : 'window'} size={17} /></span>
           <span class="min-w-0 flex-1">
             <span class="block truncate text-[13.5px] font-medium text-fg">{block.title}</span>
             <span class="block text-[12px] text-muted">
-              {#if block.complete}HTML · {lines(block.content)}{:else}Writing… {lines(block.content)}{/if}
+              {#if block.kind === 'moodboard'}
+                {#if block.complete}Mood board · {shots(block.content)}{:else}Planning shots…{/if}
+              {:else if block.complete}HTML · {lines(block.content)}{:else}Writing… {lines(block.content)}{/if}
             </span>
           </span>
           {#if block.complete}

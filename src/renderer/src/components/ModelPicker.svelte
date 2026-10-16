@@ -13,7 +13,8 @@
     block = false,
     placement = 'down',
     filter,
-    noneLabel
+    noneLabel,
+    source = 'chat'
   }: {
     value: string
     onchange: (id: string) => void
@@ -23,7 +24,12 @@
     filter?: (m: ModelInfo) => boolean
     /** Offers an empty choice with this label (value ''). */
     noneLabel?: string
+    /** Which list to pick from: chat models, or image models for sketches. */
+    source?: 'chat' | 'image'
   } = $props()
+
+  const all = $derived(source === 'image' ? app.imageModels : app.models)
+  const error = $derived(source === 'image' ? app.imageModelsError : app.modelsError)
 
   let open = $state(false)
   let query = $state('')
@@ -40,19 +46,19 @@
 
   const results = $derived.by(() => {
     const q = query.trim().toLowerCase()
-    const pool = filter ? app.models.filter(filter) : app.models
+    const pool = filter ? all.filter(filter) : all
     const list = q ? pool.filter((m) => m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)) : pool
     return list.slice(0, 100)
   })
 
   const current = $derived.by(() => {
     if (!value && noneLabel) return { provider: '', label: noneLabel }
-    const m = app.models.find((m) => m.id === value)
+    const m = all.find((m) => m.id === value)
     return split(value, m?.name ?? value.split('/').pop() ?? value)
   })
 
   const selectedPrice = $derived.by(() => {
-    const m = app.models.find((m) => m.id === value)
+    const m = all.find((m) => m.id === value)
     return m ? `${m.name}: ${priceDetail(m)}` : null
   })
 
@@ -65,7 +71,7 @@
   const toggle = async () => {
     open = !open
     cursor = Math.max(0, results.findIndex((m) => m.id === value))
-    if (open && app.models.length === 0) void app.loadModels()
+    if (open && all.length === 0) void (source === 'image' ? app.loadImageModels() : app.loadModels())
     await tick()
     list?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' })
   }
@@ -163,9 +169,9 @@
           </li>
         {:else}
           <li class="px-3 py-3 text-[13px] text-muted">
-            {#if app.modelsError}
-              {app.modelsError}
-            {:else if app.models.length === 0}
+            {#if error}
+              {error}
+            {:else if all.length === 0}
               <span class="thinking">Loading models</span>
             {:else if query.includes('/')}
               Press Enter to use <span class="text-fg">{query.trim()}</span>

@@ -59,7 +59,15 @@ const MIGRATIONS: string[] = [
   // Token and credit totals per reply, as JSON.
   `alter table messages add column usage text;`,
   // Tempo/beat analysis of audio uploads, as JSON.
-  `alter table attachments add column analysis text;`
+  `alter table attachments add column analysis text;`,
+  // Hand edits to a mood board, per version (the message that wrote it) and board identifier.
+  `create table boards (
+    message_id text not null references messages(id) on delete cascade,
+    identifier text not null,
+    data text not null,
+    updated_at integer not null,
+    primary key (message_id, identifier)
+  );`
 ]
 
 interface SessionRow {
@@ -371,6 +379,12 @@ export const makeDb = (file: string) => {
             a.analysis ? JSON.stringify(a.analysis) : null
           )
         }
+        run(
+          `insert into boards (message_id, identifier, data, updated_at)
+           select ?, identifier, data, updated_at from boards where message_id = ?`,
+          copy.id,
+          m.id
+        )
         parentId = copy.id
       }
       return getSession(fork.id)!
@@ -531,6 +545,35 @@ export const makeDb = (file: string) => {
         run('delete from attachments where message_id is null and created_at < ?', olderThan)
         return rows.map((r) => r.path).filter((p) => !one('select 1 from attachments where path = ?', p))
       }),
+    getBoard: (messageId: string, identifier: string): unknown =>
+      parseJson<unknown>(
+        one<{ data: string }>('select data from boards where message_id = ? and identifier = ?', messageId, identifier)?.data ?? null
+      ),
+    saveBoard: (messageId: string, identifier: string, data: unknown) => {
+      run(
+        `insert into boards (message_id, identifier, data, updated_at) values (?, ?, ?, ?)
+         on conflict (message_id, identifier) do update set data = excluded.data, updated_at = excluded.updated_at`,
+        messageId,
+        identifier,
+        JSON.stringify(data),
+        Date.now()
+      )
+    },
+    /** Every edited board on these messages, keyed by message id and then identifier. */
+    boardsFor: (messageIds: readonly string[]): Map<string, Map<string, unknown>> => {
+      const map = new Map<string, Map<string, unknown>>()
+      if (messageIds.length === 0) return map
+      const rows = all<{ message_id: string; identifier: string; data: string }>(
+        `select message_id, identifier, data from boards where message_id in (${messageIds.map(() => '?').join(',')})`,
+        ...messageIds
+      )
+      for (const r of rows) {
+        const boards = map.get(r.message_id) ?? new Map<string, unknown>()
+        boards.set(r.identifier, parseJson<unknown>(r.data))
+        map.set(r.message_id, boards)
+      }
+      return map
+    },
     close: () => db.close()
   }
 }

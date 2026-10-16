@@ -10,18 +10,23 @@ export class AppPaths extends Context.Service<
     readonly configFile: string
     readonly secretsFile: string
     readonly attachmentsDir: string
+    /** Generated mood board sketches, named by a hash of what was asked for. */
+    readonly sketchesDir: string
   }
 >()('chat-v2/AppPaths') {
   static readonly layer = (root: string) =>
     Layer.sync(AppPaths, () => {
       const attachmentsDir = join(root, 'attachments')
+      const sketchesDir = join(root, 'sketches')
       mkdirSync(attachmentsDir, { recursive: true })
+      mkdirSync(sketchesDir, { recursive: true })
       return AppPaths.of({
         root,
         dbFile: join(root, 'chat.db'),
         configFile: join(root, 'config.json'),
         secretsFile: join(root, 'secrets.json'),
-        attachmentsDir
+        attachmentsDir,
+        sketchesDir
       })
     })
 }

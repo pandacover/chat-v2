@@ -11,6 +11,7 @@ import { Db } from '../src/main/services/Db'
 import { type ChatDelta, type ChatRequest, OpenRouter } from '../src/main/services/OpenRouter'
 import { Browser, type BrowserApi, type PageSnapshot } from '../src/main/services/Browser'
 import { SettingsStore } from '../src/main/services/SettingsStore'
+import { layoutBoard, parseMoodboard } from '../src/shared/moodboard'
 
 type Script = (req: ChatRequest) => Stream.Stream<string | ChatDelta>
 
@@ -75,7 +76,9 @@ const setup = (
         requests.push(structuredClone(req))
         return script(req).pipe(Stream.map((d): ChatDelta => (typeof d === 'string' ? { type: 'text', text: d } : d)))
       },
-      listModels: Effect.succeed(models)
+      listModels: Effect.succeed(models),
+      listImageModels: Effect.succeed([]),
+      generateImage: () => Effect.succeed({ data: new Uint8Array([137, 80, 78, 71]), mime: 'image/png', cost: 0.008 })
     })
   )
   const providers = Layer.mergeAll(fakeOpenRouter, Attachments.layer).pipe(Layer.provideMerge(base))
@@ -331,6 +334,34 @@ describe('chat', () => {
     await t.waitForDone(1)
     const after = await t.run(Chat.use((c) => c.view(s.id)))
     expect(after.path[1]!.message).toMatchObject({ status: 'error', error: 'boom' })
+    await t.runtime.dispose()
+  })
+
+  test('a hand-edited mood board goes back to the model as edited, and forks keep the edits', async () => {
+    const board = JSON.stringify({ shots: [{ id: 'a', title: 'Wide', sketch: 'rooftop at dusk', steps: ['Tripod low'] }] })
+    const t = setup(() => Stream.make(`Here:\n<artifact type="moodboard" identifier="mv" title="MV">\n${board}\n</artifact>\n`))
+    const s = await t.run(newSession)
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'board please', attachmentIds: [] })))
+    await t.waitForDone(1)
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    const reply = view.path[1]!.message
+    const doc = layoutBoard(parseMoodboard(board)!)
+    const step = doc.items.find((i) => i.kind === 'note')!
+    if (step.kind === 'note') step.text = 'Handheld, chest height'
+    await t.run(Db.use((db) => db.use((d) => d.saveBoard(reply.id, 'mv', doc))))
+
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: reply.id, text: 'add a shot', attachmentIds: [] })))
+    await t.waitForDone(2)
+    const sent = t.requests[1]!.messages.find((m) => m.role === 'assistant')!.content as string
+    expect(sent).toContain('Handheld, chest height')
+    expect(sent).not.toContain('Tripod low')
+    expect(sent).toStartWith('Here:\n<artifact type="moodboard" identifier="mv" title="MV">')
+    expect(t.requests[1]!.messages[0]!.content).toContain('type="moodboard"')
+
+    const fork = await t.run(Db.use((db) => db.use((d) => d.forkSession(s.id, reply.id))))
+    const forked = await t.run(Chat.use((c) => c.view(fork.id)))
+    const copy = await t.run(Db.use((db) => db.use((d) => d.getBoard(forked.path[1]!.message.id, 'mv'))))
+    expect(copy).toEqual(doc)
     await t.runtime.dispose()
   })
 })

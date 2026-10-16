@@ -80,14 +80,14 @@ describe('artifacts', () => {
     )
     expect(blocks).toEqual([
       { type: 'text', content: 'Here you go:\n' },
-      { type: 'artifact', identifier: 'clock', title: 'Clock', content: '<!doctype html><p>hi</p>', complete: true },
+      { type: 'artifact', identifier: 'clock', title: 'Clock', kind: 'html', content: '<!doctype html><p>hi</p>', complete: true },
       { type: 'text', content: '\nEnjoy.' }
     ])
   })
 
   test('marks an unterminated artifact as incomplete and strips code fences', () => {
     const blocks = parseContent('<artifact identifier="a" title="A">\n```html\n<div>')
-    expect(blocks).toEqual([{ type: 'artifact', identifier: 'a', title: 'A', content: '```html\n<div>', complete: false }])
+    expect(blocks).toEqual([{ type: 'artifact', identifier: 'a', title: 'A', kind: 'html', content: '```html\n<div>', complete: false }])
     const fenced = parseContent('<artifact title="B">\n```html\n<b>x</b>\n```\n</artifact>')
     expect(fenced[0]).toMatchObject({ content: '<b>x</b>', identifier: 'artifact-1', complete: true })
   })

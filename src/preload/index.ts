@@ -46,7 +46,8 @@ const api: Api = {
     openConfigFile: () => call('settings:openConfigFile')
   },
   models: {
-    list: () => call('models:list')
+    list: () => call('models:list'),
+    images: () => call('models:images')
   },
   stt: {
     microphone: () => call('stt:microphone'),
@@ -54,6 +55,12 @@ const api: Api = {
   },
   artifacts: {
     publish: (html) => call('artifacts:publish', html)
+  },
+  boards: {
+    get: (messageId, identifier) => call('boards:get', messageId, identifier),
+    save: (messageId, identifier, doc) => call('boards:save', messageId, identifier, doc),
+    sketch: (prompt, variant) => call('boards:sketch', prompt, variant),
+    savePng: (name, data) => call('boards:savePng', name, data)
   },
   updates: {
     get: () => call('updates:get'),

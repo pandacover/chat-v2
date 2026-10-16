@@ -15,6 +15,7 @@ const isFree = (p: ModelInfo['pricing']) => p.input === 0 && p.output === 0
 
 /** One line for a picker row: "$3 in · $15 out · cache $0.30 / $3.75". */
 export const priceLine = (m: ModelInfo): string => {
+  if (m.image) return 'Priced per image'
   const p = m.pricing
   if (p.input === null && p.output === null) return 'Price varies'
   if (isFree(p)) return 'Free'
@@ -27,6 +28,7 @@ export const priceLine = (m: ModelInfo): string => {
 
 /** Spelled out for tooltips. */
 export const priceDetail = (m: ModelInfo): string => {
+  if (m.image) return 'Charged per generated image; see the model page on OpenRouter'
   const p = m.pricing
   if (p.input === null && p.output === null) return 'Price depends on the model OpenRouter routes to'
   if (isFree(p)) return 'Free'

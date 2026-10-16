@@ -6,6 +6,7 @@ import { type MainServices, pinWindow, registerIpc } from './ipc'
 import { handleProtocols, registerSchemes } from './protocols'
 import { initUpdater } from './updater'
 import { AppPaths } from './services/AppPaths'
+import { Sketches } from './services/Sketches'
 import { Attachments } from './services/Attachments'
 import { Browser } from './services/Browser'
 import { Broadcaster, Chat } from './services/Chat'
@@ -63,7 +64,8 @@ const makeRuntime = () => {
     Layer.provide(providers),
     Layer.provide(Layer.succeed(Broadcaster, broadcaster))
   )
-  return ManagedRuntime.make(Layer.mergeAll(chat, providers))
+  const sketches = Sketches.layer.pipe(Layer.provide(providers))
+  return ManagedRuntime.make(Layer.mergeAll(chat, sketches, providers))
 }
 
 let runtime: ManagedRuntime.ManagedRuntime<MainServices | AppPaths, unknown> | null = null
