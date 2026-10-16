@@ -93,10 +93,10 @@
   }}
 />
 
-<div class="relative {block ? 'w-full' : ''}" bind:this={root} data-model-picker>
+<div class="relative {block ? 'w-full' : 'min-w-0'}" bind:this={root} data-model-picker>
   <button
     type="button"
-    class="flex items-center gap-1.5 rounded-md text-[13px] transition-colors {block
+    class="flex max-w-full items-center gap-1.5 rounded-md text-[13px] transition-colors {block
       ? 'h-9 w-full bg-bg px-3 hover:bg-hover'
       : 'h-8 px-2.5 text-fg-2 hover:bg-hover hover:text-fg'} {open ? 'bg-hover text-fg' : ''}"
     onclick={toggle}
@@ -104,7 +104,11 @@
     aria-expanded={open}
     use:tip={open ? null : selectedPrice}
   >
-    {#if current.provider}<span class="text-muted">{current.provider}</span><span class="text-muted/60">/</span>{/if}
+    <!-- Inline (in the composer) the provider gives way first when space runs short. -->
+    {#if current.provider}
+      {@const narrow = block ? '' : 'hidden @md:inline'}
+      <span class="text-muted {narrow}">{current.provider}</span><span class="text-muted/60 {narrow}">/</span>
+    {/if}
     <span class="truncate text-fg">{current.label}</span>
     <Icon name="chevronDown" size={13} class="text-muted transition-transform duration-150 {open ? 'rotate-180' : ''} {block ? 'ml-auto' : ''}" />
   </button>

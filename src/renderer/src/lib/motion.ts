@@ -1,6 +1,6 @@
 // Svelte transitions don't honour prefers-reduced-motion on their own; these do.
-import { fade as svelteFade, fly as svelteFly, scale as svelteScale } from 'svelte/transition'
-import type { FadeParams, FlyParams, ScaleParams } from 'svelte/transition'
+import { fade as svelteFade, fly as svelteFly, scale as svelteScale, slide as svelteSlide } from 'svelte/transition'
+import type { FadeParams, FlyParams, ScaleParams, SlideParams } from 'svelte/transition'
 
 const reduce = window.matchMedia('(prefers-reduced-motion: reduce)')
 
@@ -14,5 +14,6 @@ const gate = <P extends { duration?: number }>(p: P): P => (reduce.matches ? { .
 
 export const fade = (node: Element, p: FadeParams = {}) => svelteFade(node, gate({ duration: 160, easing: ease, ...p }))
 export const fly = (node: Element, p: FlyParams = {}) => svelteFly(node, gate({ duration: 220, easing: ease, y: 6, ...p }))
+export const slide = (node: Element, p: SlideParams = {}) => svelteSlide(node, gate({ duration: 200, easing: ease, ...p }))
 export const pop = (node: Element, p: ScaleParams = {}) =>
   svelteScale(node, gate({ duration: 180, easing: ease, start: 0.97, opacity: 0, ...p }))

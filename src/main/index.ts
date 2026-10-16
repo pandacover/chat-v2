@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import { BrowserWindow, app, nativeTheme, safeStorage, session, shell, webContents } from 'electron'
 import { Effect, Layer, ManagedRuntime } from 'effect'
 import type { BrowserEvent, StreamEvent } from '@shared/types'
-import { type MainServices, registerIpc } from './ipc'
+import { type MainServices, pinWindow, registerIpc } from './ipc'
 import { handleProtocols, registerSchemes } from './protocols'
 import { initUpdater } from './updater'
 import { AppPaths } from './services/AppPaths'
@@ -27,19 +27,24 @@ const cipher: SecretCipher = {
       : Buffer.from(value.replace(/^b64:/, ''), 'base64').toString('utf8')
 }
 
-const broadcaster = Broadcaster.of({
-  send: (event: StreamEvent) => {
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) win.webContents.send('chat:event', event)
-    }
-  }
-})
+/**
+ * Set once quitting starts. From then on the window hears nothing more and its calls get no
+ * answer: shutting down interrupts replies, and a window that reacted to that would only call
+ * back into services that are already closed.
+ */
+let quitting = false
+const isQuitting = () => quitting
 
-const emitBrowser = (event: BrowserEvent) => {
+const sendAll = (channel: string, payload: unknown) => {
+  if (quitting) return
   for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.isDestroyed()) win.webContents.send('browser:event', event)
+    if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send(channel, payload)
   }
 }
+
+const broadcaster = Broadcaster.of({ send: (event: StreamEvent) => sendAll('chat:event', event) })
+
+const emitBrowser = (event: BrowserEvent) => sendAll('browser:event', event)
 
 /** The built-in browser keeps its own cookies and storage, apart from the app. */
 const BROWSER_PARTITION = 'persist:browser'
@@ -66,7 +71,10 @@ let runtime: ManagedRuntime.ManagedRuntime<MainServices | AppPaths, unknown> | n
 // For automated testing: the window is never shown but keeps rendering, so screenshots still work.
 const headless = process.env.CHAT_V2_HEADLESS === '1'
 
-const createWindow = () => {
+const createWindow = async () => {
+  const pinned = runtime
+    ? await runtime.runPromise(SettingsStore.use((s) => s.get)).then((s) => s.alwaysOnTop, () => false)
+    : false
   const win = new BrowserWindow({
     width: 1280,
     height: 840,
@@ -94,6 +102,7 @@ const createWindow = () => {
     prefs.partition = BROWSER_PARTITION
     if (params.src && params.src !== 'about:blank' && !isWebUrl(params.src)) event.preventDefault()
   })
+  pinWindow(win, pinned)
   if (!headless) win.once('ready-to-show', () => win.show())
   if (process.env.ELECTRON_RENDERER_URL) void win.loadURL(process.env.ELECTRON_RENDERER_URL)
   else void win.loadFile(join(__dirname, '../renderer/index.html'))
@@ -151,13 +160,13 @@ app.whenReady().then(async () => {
   browserSession.setPermissionRequestHandler((_wc, permission, callback) => callback(permission === 'clipboard-sanitized-write'))
   browserSession.setPermissionCheckHandler(() => false)
 
-  registerIpc(rt)
-  handleProtocols(rt)
-  createWindow()
+  registerIpc(rt, isQuitting)
+  handleProtocols(rt, isQuitting)
+  await createWindow()
   initUpdater()
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (BrowserWindow.getAllWindows().length === 0) void createWindow()
   })
 })
 
@@ -169,6 +178,7 @@ app.on('window-all-closed', () => {
 // so they can be continued on next launch.
 let disposed = false
 app.on('before-quit', (event) => {
+  quitting = true
   if (disposed || !runtime) return
   event.preventDefault()
   disposed = true

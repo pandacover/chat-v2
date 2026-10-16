@@ -38,7 +38,7 @@ export const registerSchemes = () => {
   ])
 }
 
-export const handleProtocols = (runtime: ManagedRuntime.ManagedRuntime<Attachments, unknown>) => {
+export const handleProtocols = (runtime: ManagedRuntime.ManagedRuntime<Attachments, unknown>, quitting: () => boolean) => {
   protocol.handle('artifact', (request) => {
     const id = new URL(request.url).pathname.replace(/^\//, '')
     const html = artifacts.get(id)
@@ -50,6 +50,7 @@ export const handleProtocols = (runtime: ManagedRuntime.ManagedRuntime<Attachmen
 
   protocol.handle('attachment', async (request) => {
     const id = new URL(request.url).hostname
+    if (quitting()) return new Response('The app is closing', { status: 503 })
     return runtime.runPromise(
       Effect.gen(function* () {
         const file = yield* (yield* Attachments).read(id)

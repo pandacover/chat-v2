@@ -184,6 +184,12 @@ class AppState {
     if (s) this.settings = s
   }
 
+  /** Keeps the window above other apps (saved, and applied by the main process). */
+  async setPinned(on: boolean) {
+    const view = await this.attempt(() => api.settings.update({ settings: { alwaysOnTop: on } }))
+    if (view) this.settings = view
+  }
+
   async loadModels() {
     try {
       this.models = await api.models.list()

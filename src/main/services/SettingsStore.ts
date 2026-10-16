@@ -13,7 +13,8 @@ export const DEFAULT_SETTINGS: Settings = {
   sttLanguage: '',
   pdfEngine: 'cloudflare-ai',
   artifactsEnabled: true,
-  visionModel: ''
+  visionModel: '',
+  alwaysOnTop: false
 }
 
 const PDF_ENGINES: ReadonlyArray<Settings['pdfEngine']> = ['cloudflare-ai', 'mistral-ocr', 'native']
@@ -33,7 +34,8 @@ export const normalizeSettings = (raw: unknown): Settings => {
     pdfEngine: pdfEngine ?? DEFAULT_SETTINGS.pdfEngine,
     artifactsEnabled:
       typeof input.artifactsEnabled === 'boolean' ? input.artifactsEnabled : DEFAULT_SETTINGS.artifactsEnabled,
-    visionModel: str('visionModel', DEFAULT_SETTINGS.visionModel).trim()
+    visionModel: str('visionModel', DEFAULT_SETTINGS.visionModel).trim(),
+    alwaysOnTop: typeof input.alwaysOnTop === 'boolean' ? input.alwaysOnTop : DEFAULT_SETTINGS.alwaysOnTop
   }
 }
 

@@ -189,7 +189,7 @@
       {#if block.type === 'text'}
         <Markdown source={block.content} streaming={streaming && i === blocks.length - 1} live={live && i === blocks.length - 1} />
       {:else if block.type === 'steps'}
-        <StepList steps={block.steps} {live} running={streaming && i === blocks.length - 1} />
+        <StepList steps={block.steps} {live} running={streaming && i === blocks.length - 1} done={!streaming} />
       {:else}
         {@const active = app.artifact?.identifier === block.identifier && app.artifact?.messageId === message.id}
         <button

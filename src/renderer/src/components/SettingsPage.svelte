@@ -315,6 +315,23 @@
             {@render segmented(themes, theme.pref, (v) => theme.set(v as ThemePref))}
           </div>
 
+          <label class="mt-5 flex cursor-pointer items-start gap-3">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={form.alwaysOnTop}
+              aria-label="Keep on top"
+              class="relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors duration-200 {form.alwaysOnTop ? 'bg-fg' : 'bg-line'}"
+              onclick={() => (form.alwaysOnTop = !form.alwaysOnTop)}
+            >
+              <span class="absolute top-0.5 left-0.5 size-4 rounded-full bg-surface shadow transition-transform duration-200 ease-out {form.alwaysOnTop ? 'translate-x-4' : ''}"></span>
+            </button>
+            <span>
+              <span class="block font-medium text-fg">Keep on top</span>
+              <span class="block text-muted">The window stays above other apps on this desktop. The pin in the chat header does the same.</span>
+            </span>
+          </label>
+
           <div class="mt-6">
             <span class="mb-1.5 block font-medium text-fg">Reading font <span class="font-normal text-muted">for replies</span></span>
             {@render fontPicker(READING_FONTS, appearance.prefs.reading, (id) => appearance.set('reading', id), 'Ag')}

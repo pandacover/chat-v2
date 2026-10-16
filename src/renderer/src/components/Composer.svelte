@@ -270,7 +270,8 @@
     {/if}
   </div>
 
-  <div class="flex items-center gap-0.5 px-2 pb-2">
+  <!-- A container, so the row can drop labels when the composer itself is narrow. -->
+  <div class="@container flex items-center gap-0.5 px-2 pb-2">
     <input
       bind:this={fileInput}
       type="file"
@@ -299,10 +300,11 @@
         : 'text-fg-2 hover:bg-hover hover:text-fg'}"
       role="switch"
       aria-checked={browserEnabled}
+      aria-label="Browser"
       use:tip={browserEnabled ? 'The assistant can use the browser in this chat' : 'Let the assistant use the browser in this chat'}
       onclick={onbrowser}
     >
-      <Icon name="globe" size={14} /> Browser
+      <Icon name="globe" size={14} /><span class="hidden @sm:inline">Browser</span>
     </button>
     <span class="ml-auto"></span>
     <button class="icon-btn relative" use:tip={'Instructions for this chat'} onclick={oninstructions}>

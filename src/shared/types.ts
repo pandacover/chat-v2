@@ -102,6 +102,8 @@ export interface Settings {
   artifactsEnabled: boolean
   /** Answers requests that contain images when the chat's model cannot see them; '' turns this off. */
   visionModel: string
+  /** Keeps the window above other apps on the same desktop. */
+  alwaysOnTop: boolean
 }
 
 export interface SettingsView {

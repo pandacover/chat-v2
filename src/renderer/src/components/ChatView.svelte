@@ -106,6 +106,17 @@
     {:else}
       <span class="flex-1"></span>
     {/if}
+    {#if app.settings}
+      {@const onTop = app.settings.settings.alwaysOnTop}
+      <button
+        class="icon-btn {onTop ? '!text-fg' : ''}"
+        aria-pressed={onTop}
+        use:tip={onTop ? 'Unpin window' : 'Keep on top of other apps'}
+        onclick={() => app.setPinned(!onTop)}
+      >
+        <Icon name="pin" size={16} class="transition-transform duration-200 {onTop ? '' : 'rotate-45'}" />
+      </button>
+    {/if}
     <button
       class="icon-btn relative {app.browserOpen ? '!text-fg' : ''}"
       use:tip={app.browserOpen ? 'Hide browser' : 'Open browser'}

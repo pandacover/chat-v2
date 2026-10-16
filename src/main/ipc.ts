@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { app, ipcMain, shell, systemPreferences } from 'electron'
+import { BrowserWindow, app, ipcMain, shell, systemPreferences } from 'electron'
 import { Cause, Effect, type ManagedRuntime } from 'effect'
 import type { AudioAnalysis, IpcResult, NewAttachmentInput, SettingsPatch } from '@shared/types'
 import { errorMessage } from './errors'
@@ -40,6 +40,14 @@ const microphoneAccess = async (): Promise<boolean> => {
   if (process.platform !== 'darwin') return true
   if (systemPreferences.getMediaAccessStatus('microphone') === 'not-determined') await systemPreferences.askForMediaAccess('microphone')
   return systemPreferences.getMediaAccessStatus('microphone') === 'granted'
+}
+
+/**
+ * Pins the window above other apps. On macOS the default 'floating' level stays on this
+ * desktop only and below full-screen apps; Windows has a single topmost band.
+ */
+export const pinWindow = (win: BrowserWindow, on: boolean) => {
+  if (!win.isDestroyed() && win.isAlwaysOnTop() !== on) win.setAlwaysOnTop(on)
 }
 
 const handlers: Record<string, Handler> = {
@@ -127,7 +135,14 @@ const handlers: Record<string, Handler> = {
     Db.use((db) => db.use((d) => d.setAnalysis(str(id, 'id'), analysis))),
 
   'settings:get': () => SettingsStore.use((s) => s.view),
-  'settings:update': (patch: SettingsPatch) => SettingsStore.use((s) => s.update(patch)),
+  'settings:update': (patch: SettingsPatch) =>
+    SettingsStore.use((s) => s.update(patch)).pipe(
+      Effect.tap((view) =>
+        Effect.sync(() => {
+          for (const win of BrowserWindow.getAllWindows()) pinWindow(win, view.settings.alwaysOnTop)
+        })
+      )
+    ),
   'settings:openConfigFile': () =>
     Effect.gen(function* () {
       const view = yield* (yield* SettingsStore).view
@@ -169,10 +184,13 @@ const handlers: Record<string, Handler> = {
   'browser:reveal': (path) => Effect.sync(() => shell.showItemInFolder(str(path, 'path')))
 }
 
-export const registerIpc = (runtime: ManagedRuntime.ManagedRuntime<MainServices, unknown>) => {
+/** Calls made while the app quits are never answered; the window closes before it could use one. */
+const unanswered = new Promise<never>(() => {})
+
+export const registerIpc = (runtime: ManagedRuntime.ManagedRuntime<MainServices, unknown>, quitting: () => boolean) => {
   for (const [channel, handler] of Object.entries(handlers)) {
     ipcMain.handle(channel, (_event, ...args: unknown[]): Promise<IpcResult<unknown>> =>
-      runtime.runPromise(
+      quitting() ? unanswered : runtime.runPromise(
         Effect.suspend(() => handler(...args)).pipe(
           Effect.map((value): IpcResult<unknown> => ({ ok: true, value })),
           Effect.catch((e) => Effect.succeed<IpcResult<unknown>>({ ok: false, error: { tag: e._tag, message: e.message } })),
@@ -183,7 +201,8 @@ export const registerIpc = (runtime: ManagedRuntime.ManagedRuntime<MainServices,
             })
           )
         )
-      )
+        // A call still running when quitting starts is cut off by the shutdown; that is no error.
+      ).catch((e: unknown) => (quitting() ? unanswered : Promise.reject(e)))
     )
   }
 }
