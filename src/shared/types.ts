@@ -193,6 +193,8 @@ export interface Api {
     list(): Promise<ModelInfo[]>
   }
   stt: {
+    /** Asks for microphone access where the OS requires it (macOS); false when it is off. */
+    microphone(): Promise<boolean>
     transcribe(audio: ArrayBuffer, mime: string): Promise<string>
   }
   artifacts: {

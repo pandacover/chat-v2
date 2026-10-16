@@ -71,7 +71,8 @@
     editing = false
     // Nothing changed: no new branch.
     if (unchanged()) return
-    await app.edit(message.id, draft, keptAttachments)
+    // A state proxy can't cross IPC ("An object could not be cloned").
+    await app.edit(message.id, draft, $state.snapshot(keptAttachments))
   }
 
   const autosize = (el: HTMLTextAreaElement) => {

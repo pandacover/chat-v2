@@ -40,6 +40,8 @@
   let transcribing = $state(false)
   let pressedAt = 0
   let startedAt = 0
+  // Set while the mic is opening, which includes any permission prompt.
+  let starting = false
   let tick: ReturnType<typeof setInterval> | undefined
 
   const busy = $derived(app.streaming)
@@ -109,19 +111,26 @@
   }
 
   const beginRecording = async () => {
-    if (recording || transcribing) return
+    if (recording || transcribing || starting) return
     if (!app.settings?.hasElevenLabsKey) {
       app.toast('Add an ElevenLabs key in Settings to use voice input.')
       app.settingsOpen = true
       return
     }
+    starting = true
     try {
+      if (!(await window.api.stt.microphone())) {
+        app.toast('Microphone access is off for chat-v2. Turn it on in System Settings → Privacy & Security → Microphone.')
+        return
+      }
       recording = await startRecording()
       startedAt = Date.now()
       elapsed = 0
       tick = setInterval(() => (elapsed = Math.floor((Date.now() - startedAt) / 1000)), 250)
     } catch (e) {
       app.toast(`Microphone unavailable: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      starting = false
     }
   }
 
@@ -178,6 +187,8 @@
   const onWindowKey = (e: KeyboardEvent) => {
     if (e.ctrlKey && e.key.toLowerCase() === 'm') {
       e.preventDefault()
+      // Holding the keys down must not flip the mic on and off.
+      if (e.repeat) return
       if (recording) void finishRecording()
       else void beginRecording()
     }

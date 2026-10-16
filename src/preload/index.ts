@@ -49,6 +49,7 @@ const api: Api = {
     list: () => call('models:list')
   },
   stt: {
+    microphone: () => call('stt:microphone'),
     transcribe: (audio, mime) => call('stt:transcribe', audio, mime)
   },
   artifacts: {

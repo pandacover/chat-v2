@@ -28,9 +28,16 @@ nsis:
 mac:
   icon: build/icon.png
   category: public.app-category.productivity
-  # Unsigned for now: CI disables identity discovery. Signing and notarising can be
-  # added later with a Developer ID certificate.
-  identity: null
+  # Ad-hoc signed: there is no Developer ID certificate yet (that would add notarising and
+  # in-place updates). Don't drop to unsigned: macOS then can't tie privacy choices to the
+  # app, and the microphone prompt comes back after every Allow or Don't Allow.
+  identity: "-"
+  # Signing turns on the hardened runtime, which blocks the microphone without the
+  # audio-input entitlement.
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: chat-v2 uses the microphone for voice input.
   target:
     - target: dmg
       arch: [universal]

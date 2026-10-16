@@ -46,7 +46,7 @@ Every push to `main` runs `.github/workflows/release.yml`. It tests, sets the ve
 Installed apps check for updates on launch and every 30 minutes. When one is out, an update button appears at the bottom of the sidebar:
 
 - **Windows:** downloads the update and restarts into it.
-- **macOS:** builds are unsigned, so the app downloads the new DMG and opens it; drag chat-v2 into Applications to replace the old one.
+- **macOS:** builds are only ad-hoc signed (no Developer ID), so the app downloads the new DMG and opens it; drag chat-v2 into Applications to replace the old one.
 
 The logo is generated: edit `src/shared/logo.ts`, then run `bun scripts/make-icons.ts`.
 

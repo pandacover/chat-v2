@@ -60,8 +60,21 @@ jobs:
         run: bunx electron-builder --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Unsigned builds for now.
+          # No certificates to find: Windows is unsigned, macOS ad-hoc signed (electron-builder.yml).
           CSC_IDENTITY_AUTO_DISCOVERY: false
+      # electron-builder can skip signing without failing, which shipped a Mac app that kept
+      # asking for the microphone. A bare linker signature still passes --verify; the
+      # identifier is what tells them apart. Failing here leaves the release a draft.
+      - name: Check the macOS signature
+        if: runner.os == 'macOS'
+        run: |
+          app=dist/mac-universal/chat-v2.app
+          codesign --verify --deep --strict --verbose=2 "$app"
+          info=$(codesign -dv --verbose=2 "$app" 2>&1)
+          echo "$info"
+          grep -qx 'Identifier=com.pandacover.chatv2' <<<"$info"
+          codesign -d --entitlements - "$app" 2>&1 | grep -q com.apple.security.device.audio-input
+          plutil -p "$app/Contents/Info.plist" | grep -q NSMicrophoneUsageDescription
 
   publish:
     needs: build

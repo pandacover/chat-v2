@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { app, ipcMain, shell } from 'electron'
+import { app, ipcMain, shell, systemPreferences } from 'electron'
 import { Cause, Effect, type ManagedRuntime } from 'effect'
 import type { AudioAnalysis, IpcResult, NewAttachmentInput, SettingsPatch } from '@shared/types'
 import { errorMessage } from './errors'
@@ -30,6 +30,17 @@ const rect = (v: unknown): Rect | undefined => {
 const stamp = () => new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
 
 const ids = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [])
+
+/**
+ * macOS asks for the microphone once and remembers the answer. Asking before the window opens
+ * the mic lets a refusal be explained. The status is read back rather than trusting the reply:
+ * opening the mic while macOS has no answer on record brings the prompt straight back.
+ */
+const microphoneAccess = async (): Promise<boolean> => {
+  if (process.platform !== 'darwin') return true
+  if (systemPreferences.getMediaAccessStatus('microphone') === 'not-determined') await systemPreferences.askForMediaAccess('microphone')
+  return systemPreferences.getMediaAccessStatus('microphone') === 'granted'
+}
 
 const handlers: Record<string, Handler> = {
   'sessions:list': () => Db.use((db) => db.use((d) => d.listSessions())),
@@ -125,6 +136,7 @@ const handlers: Record<string, Handler> = {
 
   'models:list': () => OpenRouter.use((o) => o.listModels),
 
+  'stt:microphone': () => Effect.promise(microphoneAccess),
   'stt:transcribe': (audio: ArrayBuffer, mime) =>
     ElevenLabs.use((e) => e.transcribe(new Uint8Array(audio), str(mime, 'mime'))),
 

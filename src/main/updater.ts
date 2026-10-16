@@ -1,6 +1,6 @@
 // App updates from this repository's GitHub releases (see electron-builder.yml).
-// Windows installs in place on restart. macOS builds are unsigned, which rules out
-// in-place updates there, so the new DMG is downloaded and opened instead.
+// Windows installs in place on restart. macOS builds are only ad-hoc signed, which rules
+// out in-place updates there, so the new DMG is downloaded and opened instead.
 import { createWriteStream } from 'node:fs'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
