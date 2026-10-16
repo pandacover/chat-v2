@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tip } from '@/lib/tooltip'
   import type { PathNode } from '@shared/types'
   import { app } from '@/lib/store.svelte'
   import Icon from './Icon.svelte'
@@ -12,7 +13,7 @@
 </script>
 
 {#if node.siblingIds.length > 1}
-  <div class="flex items-center text-[12px] text-muted tabular-nums" title="Branches">
+  <div class="flex items-center text-[12px] text-muted tabular-nums" use:tip={'Branches'}>
     <button class="icon-btn !p-1" aria-label="Previous branch" disabled={disabled || node.siblingIndex === 0} onclick={() => go(-1)}>
       <Icon name="chevronLeft" size={13} />
     </button>

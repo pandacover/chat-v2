@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tip } from '@/lib/tooltip'
   import hljs from 'highlight.js/lib/common'
   import { fade } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
@@ -55,7 +56,7 @@
 <svelte:window
   onkeydown={(e) => {
     // Yield to dialogs and to any handler that already used the key.
-    if (e.key !== 'Escape' || e.defaultPrevented || app.page !== 'chat' || document.querySelector('[aria-modal="true"]')) return
+    if (e.key !== 'Escape' || e.defaultPrevented || app.page !== 'chat' || app.activeTab !== 'artifact' || document.querySelector('[aria-modal="true"]')) return
     app.artifact = null
   }}
 />
@@ -63,7 +64,7 @@
 {#if current}
   <section class="flex h-full min-w-0 flex-col bg-side">
     <header class="flex h-12 shrink-0 items-center gap-1 pr-2 pl-4">
-      <h2 class="min-w-0 truncate font-serif text-[16px]" title={current.block.title}>{current.block.title}</h2>
+      <h2 class="min-w-0 truncate font-serif text-[16px]" use:tip={current.block.title}>{current.block.title}</h2>
       {#if versions.length > 1}
         <div class="ml-1 flex items-center text-[12px] text-muted tabular-nums">
           <button class="icon-btn !p-1" aria-label="Previous version" disabled={index === 0} onclick={() => select(index - 1)}>
@@ -90,10 +91,10 @@
       </div>
 
       <span class="mx-1 h-4 w-px bg-line"></span>
-      <button class="icon-btn" title="Reload" onclick={() => ((loading = true), reloadKey++)}><Icon name="refresh" size={15} /></button>
-      <button class="icon-btn" title={copied ? 'Copied' : 'Copy HTML'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={15} /></button>
-      <button class="icon-btn" title="Download .html" onclick={download}><Icon name="download" size={15} /></button>
-      <button class="icon-btn" title="Close (Esc)" onclick={() => (app.artifact = null)}><Icon name="x" size={15} /></button>
+      <button class="icon-btn" use:tip={'Reload'} onclick={() => ((loading = true), reloadKey++)}><Icon name="refresh" size={15} /></button>
+      <button class="icon-btn" use:tip={copied ? 'Copied' : 'Copy HTML'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={15} /></button>
+      <button class="icon-btn" use:tip={'Download .html'} onclick={download}><Icon name="download" size={15} /></button>
+      <button class="icon-btn" use:tip={{ text: 'Close', kbd: 'Esc' }} onclick={() => (app.artifact = null)}><Icon name="x" size={15} /></button>
     </header>
 
     <div class="relative min-h-0 flex-1 px-2 pb-2">

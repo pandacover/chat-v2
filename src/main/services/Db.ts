@@ -8,7 +8,8 @@ import type {
   MessageStatus,
   PathNode,
   Role,
-  Session
+  Session,
+  Usage
 } from '@shared/types'
 import { DbError, NotFound, errorMessage } from '../errors'
 
@@ -51,7 +52,11 @@ const MIGRATIONS: string[] = [
   );
   create index attachments_message on attachments(message_id);`,
   // Set when a reply stopped mid-line: its last line is partial and a continuation must join it.
-  `alter table messages add column tail_partial integer not null default 0;`
+  `alter table messages add column tail_partial integer not null default 0;`,
+  // Per-chat switch that gives the model browser tools.
+  `alter table sessions add column browser_enabled integer not null default 0;`,
+  // Token and credit totals per reply, as JSON.
+  `alter table messages add column usage text;`
 ]
 
 interface SessionRow {
@@ -61,6 +66,7 @@ interface SessionRow {
   system_prompt: string | null
   root_id: string
   forked_from_session_id: string | null
+  browser_enabled: number
   created_at: number
   updated_at: number
 }
@@ -76,6 +82,7 @@ interface MessageRow {
   line_count: number
   model: string | null
   error: string | null
+  usage: string | null
   created_at: number
 }
 
@@ -101,6 +108,7 @@ const toSession = (r: SessionRow): Session => ({
   systemPrompt: r.system_prompt,
   rootId: r.root_id,
   forkedFromSessionId: r.forked_from_session_id,
+  browserEnabled: r.browser_enabled === 1,
   createdAt: r.created_at,
   updatedAt: r.updated_at
 })
@@ -117,6 +125,15 @@ const toAttachment = (r: AttachmentRow): StoredAttachment => ({
 })
 
 const publicAttachment = ({ path: _path, ...a }: StoredAttachment): Attachment => a
+
+const parseUsageJson = (raw: string | null): Usage | null => {
+  if (!raw) return null
+  try {
+    return JSON.parse(raw) as Usage
+  } catch {
+    return null
+  }
+}
 
 export interface NewMessage {
   sessionId: string
@@ -187,7 +204,8 @@ export const makeDb = (file: string) => {
       model: r.model,
       error: r.error,
       createdAt: r.created_at,
-      attachments: (atts.get(r.id) ?? []).map(publicAttachment)
+      attachments: (atts.get(r.id) ?? []).map(publicAttachment),
+      usage: parseUsageJson(r.usage)
     }))
   }
 
@@ -303,6 +321,7 @@ export const makeDb = (file: string) => {
         systemPrompt: source.systemPrompt,
         forkedFromSessionId: source.id
       })
+      if (source.browserEnabled) run('update sessions set browser_enabled = 1 where id = ?', fork.id)
       let parentId = fork.rootId
       const stored = attachmentsFor(path.map((m) => m.id))
       for (const m of path) {
@@ -315,10 +334,11 @@ export const makeDb = (file: string) => {
           model: m.model
         })
         run(
-          `update messages set line_count = ?, error = ?,
+          `update messages set line_count = ?, error = ?, usage = ?,
              tail_partial = (select tail_partial from messages where id = ?) where id = ?`,
           m.lineCount,
           m.error,
+          m.usage ? JSON.stringify(m.usage) : null,
           m.id,
           copy.id
         )
@@ -356,7 +376,12 @@ export const makeDb = (file: string) => {
     listSessions: () => all<SessionRow>('select * from sessions order by updated_at desc').map(toSession),
     getSession,
     createSession,
-    updateSession: (id: string, patch: { title?: string; model?: string | null; systemPrompt?: string | null }) => {
+    updateSession: (
+      id: string,
+      patch: { title?: string; model?: string | null; systemPrompt?: string | null; browserEnabled?: boolean }
+    ) => {
+      if (patch.browserEnabled !== undefined)
+        run('update sessions set browser_enabled = ? where id = ?', patch.browserEnabled ? 1 : 0, id)
       if (patch.title !== undefined) run('update sessions set title = ? where id = ?', patch.title, id)
       if (patch.model !== undefined) run('update sessions set model = ? where id = ?', patch.model, id)
       if (patch.systemPrompt !== undefined)
@@ -394,6 +419,12 @@ export const makeDb = (file: string) => {
         tailPartial ? 1 : 0,
         messageId
       )
+    },
+    setUsage: (messageId: string, usage: Usage) => {
+      run('update messages set usage = ? where id = ?', JSON.stringify(usage), messageId)
+    },
+    setModel: (messageId: string, model: string) => {
+      run('update messages set model = ? where id = ?', model, messageId)
     },
     /**
      * Before continuing a reply that ended mid-line, takes the partial last line back

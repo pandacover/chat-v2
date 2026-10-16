@@ -1,0 +1,368 @@
+// Type-only: the Electron lookup is injected, so this module loads outside Electron (tests).
+import type { WebContents } from 'electron'
+import { Context, Effect, Layer, Schema } from 'effect'
+import type { BrowserEvent, ElementInfo } from '@shared/types'
+import { errorMessage } from '../errors'
+
+export class BrowserError extends Schema.TaggedError<BrowserError>()('BrowserError', {
+  message: Schema.String
+}) {}
+
+export interface PageSnapshot {
+  url: string
+  title: string
+  elements: string
+  text: string
+  scroll: { y: number; height: number; viewport: number }
+}
+
+export interface Shot {
+  /** JPEG data URL, downscaled for sending to a model. */
+  dataUrl: string
+  png: Uint8Array<ArrayBuffer>
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/** Runs in the page: tags visible interactive elements with refs and summarises the page. */
+const SNAPSHOT_JS = `(() => {
+  const MAX = 300
+  const visible = (el) => {
+    const r = el.getBoundingClientRect()
+    if (r.width < 2 || r.height < 2) return false
+    const s = getComputedStyle(el)
+    return s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0.05
+  }
+  const sel = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],[role=menuitem],[role=option],[role=switch],[role=combobox],[role=textbox],[contenteditable=""],[contenteditable=true],[onclick]'
+  document.querySelectorAll('[data-agent-ref]').forEach((e) => e.removeAttribute('data-agent-ref'))
+  const clip = (s, n) => String(s || '').trim().replace(/\\s+/g, ' ').slice(0, n)
+  let n = 0
+  const lines = []
+  for (const el of document.querySelectorAll(sel)) {
+    if (n >= MAX) break
+    if (!visible(el)) continue
+    const ref = 'e' + ++n
+    el.setAttribute('data-agent-ref', ref)
+    const tag = el.tagName.toLowerCase()
+    const role = el.getAttribute('role') || (tag === 'a' ? 'link' : tag === 'input' ? 'input:' + (el.type || 'text') : tag)
+    const name = clip(el.getAttribute('aria-label') || el.innerText || el.value || el.placeholder || el.title || el.alt || el.name, 80)
+    const extra = []
+    if ((tag === 'input' || tag === 'textarea') && el.value) extra.push('value="' + clip(el.value, 40) + '"')
+    if (el.placeholder) extra.push('placeholder="' + clip(el.placeholder, 40) + '"')
+    if (el.disabled) extra.push('disabled')
+    if (el.checked) extra.push('checked')
+    if (tag === 'a') extra.push('href="' + clip(el.getAttribute('href'), 80) + '"')
+    const r = el.getBoundingClientRect()
+    if (r.bottom < 0 || r.top > innerHeight) extra.push('offscreen')
+    lines.push('[' + ref + '] ' + role + ' "' + name + '"' + (extra.length ? ' ' + extra.join(' ') : ''))
+  }
+  return {
+    url: location.href,
+    title: document.title,
+    elements: lines.join('\\n'),
+    text: (document.body ? document.body.innerText : '').replace(/\\n{3,}/g, '\\n\\n').slice(0, 5000),
+    scroll: { y: Math.round(scrollY), height: document.documentElement.scrollHeight, viewport: innerHeight }
+  }
+})()`
+
+/** Scrolls a ref'd element into view and returns its centre in viewport CSS pixels. */
+const centerJs = (ref: string) => `(() => {
+  const el = document.querySelector('[data-agent-ref="${ref.replace(/[^\w-]/g, '')}"]')
+  if (!el) return null
+  el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
+  const r = el.getBoundingClientRect()
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2, editable: el.matches('input,textarea,[contenteditable],[contenteditable=true]') }
+})()`
+
+const selectAllJs = (ref: string) => `(() => {
+  const el = document.querySelector('[data-agent-ref="${ref.replace(/[^\w-]/g, '')}"]')
+  if (!el) return false
+  el.focus()
+  if (typeof el.select === 'function') el.select()
+  else document.execCommand('selectAll')
+  return true
+})()`
+
+const elementAtJs = (x: number, y: number) => `(() => {
+  const el = document.elementFromPoint(${x}, ${y})
+  if (!el) return null
+  const path = (node) => {
+    const parts = []
+    while (node && node.nodeType === 1 && parts.length < 6) {
+      let part = node.tagName.toLowerCase()
+      if (node.id) { parts.unshift(part + '#' + CSS.escape(node.id)); break }
+      const cls = [...node.classList].slice(0, 2).map((c) => '.' + CSS.escape(c)).join('')
+      const parent = node.parentElement
+      if (parent) {
+        const same = [...parent.children].filter((c) => c.tagName === node.tagName)
+        if (same.length > 1) part += ':nth-of-type(' + (same.indexOf(node) + 1) + ')'
+      }
+      parts.unshift(part + cls)
+      node = parent
+    }
+    return parts.join(' > ')
+  }
+  const r = el.getBoundingClientRect()
+  return {
+    selector: path(el),
+    tag: el.tagName.toLowerCase(),
+    text: (el.innerText || el.value || '').trim().replace(/\\s+/g, ' ').slice(0, 160),
+    html: el.outerHTML.slice(0, 1500),
+    rect: { x: r.left, y: r.top, width: r.width, height: r.height }
+  }
+})()`
+
+const KEYS: Record<string, { code: string; vk: number; text?: string }> = {
+  Enter: { code: 'Enter', vk: 13, text: '\r' },
+  Tab: { code: 'Tab', vk: 9 },
+  Escape: { code: 'Escape', vk: 27 },
+  Backspace: { code: 'Backspace', vk: 8 },
+  Delete: { code: 'Delete', vk: 46 },
+  ArrowUp: { code: 'ArrowUp', vk: 38 },
+  ArrowDown: { code: 'ArrowDown', vk: 40 },
+  ArrowLeft: { code: 'ArrowLeft', vk: 37 },
+  ArrowRight: { code: 'ArrowRight', vk: 39 },
+  Home: { code: 'Home', vk: 36 },
+  End: { code: 'End', vk: 35 },
+  PageUp: { code: 'PageUp', vk: 33 },
+  PageDown: { code: 'PageDown', vk: 34 },
+  Space: { code: 'Space', vk: 32, text: ' ' }
+}
+const MODIFIERS: Record<string, number> = { Alt: 1, Control: 2, Ctrl: 2, Meta: 4, Cmd: 4, Shift: 8 }
+
+export const normalizeUrl = (input: string): string => {
+  const s = input.trim()
+  if (/^https?:\/\//i.test(s)) return s
+  if (/^[\w-]+(\.[\w-]+)+(:\d+)?(\/.*)?$/.test(s) || /^localhost(:\d+)?(\/.*)?$/.test(s)) return `https://${s}`.replace('https://localhost', 'http://localhost')
+  return `https://duckduckgo.com/?q=${encodeURIComponent(s)}`
+}
+
+type Emit = (event: BrowserEvent) => void
+
+export interface BrowserApi {
+  readonly attach: (webContentsId: number) => Effect.Effect<void, BrowserError>
+  readonly navigate: (url: string) => Effect.Effect<PageSnapshot, BrowserError>
+  readonly history: (direction: 'back' | 'forward' | 'reload') => Effect.Effect<PageSnapshot, BrowserError>
+  readonly snapshot: Effect.Effect<PageSnapshot, BrowserError>
+  readonly click: (target: { ref?: string; x?: number; y?: number }) => Effect.Effect<PageSnapshot, BrowserError>
+  readonly type: (ref: string, text: string, submit: boolean) => Effect.Effect<PageSnapshot, BrowserError>
+  readonly press: (keys: string) => Effect.Effect<PageSnapshot, BrowserError>
+  readonly scroll: (dy: number) => Effect.Effect<PageSnapshot, BrowserError>
+  readonly screenshot: (rect?: { x: number; y: number; width: number; height: number }) => Effect.Effect<Shot, BrowserError>
+  readonly evaluate: (code: string) => Effect.Effect<string, BrowserError>
+  readonly elementAt: (x: number, y: number) => Effect.Effect<ElementInfo | null, BrowserError>
+  readonly screencast: (on: boolean) => Effect.Effect<void, BrowserError>
+  /** Marks the agent as driving (misty border on) and says what it is doing. */
+  readonly status: (label: string) => Effect.Effect<void>
+  /** Hands the browser back to the user. Safe to call when not in control. */
+  readonly release: Effect.Effect<void>
+}
+
+export class Browser extends Context.Service<Browser, BrowserApi>()('chat-v2/Browser') {
+  static readonly layer = (emit: Emit, fromId: (id: number) => WebContents | undefined) =>
+    Layer.sync(Browser, () => {
+      let guest: WebContents | null = null
+      let waiting: Array<() => void> = []
+      let casting = false
+
+      const fail = (message: string) => new BrowserError({ message })
+      const attempt = <A>(what: string, f: () => Promise<A>) =>
+        Effect.tryPromise({ try: f, catch: (cause) => fail(`${what}: ${errorMessage(cause)}`) })
+
+      const live = () => (guest && !guest.isDestroyed() ? guest : null)
+
+      /** The browser panel may be closed; ask the window to open it and wait for the page. */
+      const ensure = Effect.suspend(() => {
+        const wc = live()
+        if (wc) return Effect.succeed(wc)
+        emit({ type: 'open' })
+        return attempt('Opening the browser', () =>
+          new Promise<WebContents>((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error('the browser panel did not open')), 12000)
+            waiting.push(() => {
+              clearTimeout(timer)
+              resolve(live()!)
+            })
+          })
+        )
+      })
+
+      const cdp = (wc: WebContents, method: string, params: object = {}) =>
+        attempt(method, async () => {
+          if (!wc.debugger.isAttached()) wc.debugger.attach('1.3')
+          return (await wc.debugger.sendCommand(method, params)) as unknown
+        })
+
+      const exec = <A>(wc: WebContents, js: string) => attempt('Page script', () => wc.executeJavaScript(js, true) as Promise<A>)
+
+      const settle = (wc: WebContents, ms = 500) =>
+        attempt('Waiting for the page', async () => {
+          await sleep(ms)
+          const started = Date.now()
+          while (wc.isLoading() && Date.now() - started < 12000) await sleep(150)
+        })
+
+      const snapshotOf = (wc: WebContents) => exec<PageSnapshot>(wc, SNAPSHOT_JS)
+
+      // The overlay cursor glides to the point before the real event fires.
+      const moveCursor = (x: number, y: number) =>
+        Effect.promise(async () => {
+          emit({ type: 'cursor', x, y, click: false })
+          await sleep(360)
+        })
+
+      const mouseClick = (wc: WebContents, x: number, y: number) =>
+        Effect.gen(function* () {
+          yield* moveCursor(x, y)
+          yield* cdp(wc, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
+          yield* cdp(wc, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 })
+          emit({ type: 'cursor', x, y, click: true })
+          yield* cdp(wc, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 })
+        })
+
+      const center = (wc: WebContents, ref: string) =>
+        exec<{ x: number; y: number; editable: boolean } | null>(wc, centerJs(ref)).pipe(
+          Effect.flatMap((c) => (c ? Effect.succeed(c) : Effect.fail(fail(`No element ${ref}. Take a new snapshot.`))))
+        )
+
+      const pressKeys = (wc: WebContents, combo: string) =>
+        Effect.gen(function* () {
+          const parts = combo.split('+').map((p) => p.trim()).filter(Boolean)
+          const keyName = parts.pop() ?? ''
+          const modifiers = parts.reduce((m, p) => m | (MODIFIERS[p] ?? 0), 0)
+          const known = KEYS[keyName]
+          const key = known ? (keyName === 'Space' ? ' ' : keyName) : keyName
+          const code = known?.code ?? (key.length === 1 ? (/[a-z]/i.test(key) ? `Key${key.toUpperCase()}` : /\d/.test(key) ? `Digit${key}` : '') : key)
+          const vk = known?.vk ?? (key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0)
+          const text = modifiers & ~8 ? undefined : (known?.text ?? (key.length === 1 ? key : undefined))
+          const base = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers }
+          yield* cdp(wc, 'Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', ...base, ...(text ? { text, unmodifiedText: text } : {}) })
+          yield* cdp(wc, 'Input.dispatchKeyEvent', { type: 'keyUp', ...base })
+        })
+
+      const shoot = (wc: WebContents, rect?: { x: number; y: number; width: number; height: number }) =>
+        attempt('Screenshot', async () => {
+          const r = rect ? { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.max(1, Math.round(rect.width)), height: Math.max(1, Math.round(rect.height)) } : undefined
+          const image = await wc.capturePage(r)
+          const size = image.getSize()
+          const small = size.width > 1280 ? image.resize({ width: 1280 }) : image
+          return {
+            dataUrl: `data:image/jpeg;base64,${small.toJPEG(72).toString('base64')}`,
+            png: Uint8Array.from(image.toPNG())
+          }
+        })
+
+      const api: BrowserApi = {
+        attach: (id) =>
+          Effect.suspend(() => {
+            const wc = fromId(id)
+            if (!wc || wc.getType() !== 'webview') return Effect.fail(fail('Not a browser view'))
+            guest = wc
+            casting = false
+            wc.debugger.on('message', (_e, method, params) => {
+              if (method !== 'Page.screencastFrame') return
+              // Every frame must be acknowledged or Chromium stops sending them.
+              void wc.debugger.sendCommand('Page.screencastFrameAck', { sessionId: params.sessionId }).catch(() => undefined)
+              emit({ type: 'frame', data: params.data as string })
+            })
+            wc.once('destroyed', () => {
+              if (guest === wc) guest = null
+            })
+            for (const resolve of waiting.splice(0)) resolve()
+            return Effect.void
+          }),
+
+        navigate: (url) =>
+          Effect.gen(function* () {
+            const wc = yield* ensure
+            yield* attempt('Navigation', () => wc.loadURL(normalizeUrl(url)).catch((e: Error) => {
+              // Redirects abort the first load; the page still arrives.
+              if (!/ERR_ABORTED/.test(e.message)) throw e
+            }))
+            yield* settle(wc, 300)
+            return yield* snapshotOf(wc)
+          }),
+
+        history: (direction) =>
+          Effect.gen(function* () {
+            const wc = yield* ensure
+            if (direction === 'back' && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack()
+            else if (direction === 'forward' && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward()
+            else if (direction === 'reload') wc.reload()
+            yield* settle(wc)
+            return yield* snapshotOf(wc)
+          }),
+
+        snapshot: Effect.flatMap(ensure, snapshotOf),
+
+        click: (target) =>
+          Effect.gen(function* () {
+            const wc = yield* ensure
+            const point = target.ref
+              ? yield* center(wc, target.ref)
+              : target.x !== undefined && target.y !== undefined
+                ? { x: target.x, y: target.y }
+                : yield* Effect.fail(fail('click needs a ref or x and y'))
+            yield* mouseClick(wc, point.x, point.y)
+            yield* settle(wc)
+            return yield* snapshotOf(wc)
+          }),
+
+        type: (ref, text, submit) =>
+          Effect.gen(function* () {
+            const wc = yield* ensure
+            const point = yield* center(wc, ref)
+            yield* mouseClick(wc, point.x, point.y)
+            yield* exec(wc, selectAllJs(ref))
+            yield* cdp(wc, 'Input.insertText', { text })
+            if (submit) yield* pressKeys(wc, 'Enter')
+            yield* settle(wc, submit ? 700 : 150)
+            return yield* snapshotOf(wc)
+          }),
+
+        press: (keys) =>
+          Effect.gen(function* () {
+            const wc = yield* ensure
+            yield* pressKeys(wc, keys)
+            yield* settle(wc, 300)
+            return yield* snapshotOf(wc)
+          }),
+
+        scroll: (dy) =>
+          Effect.gen(function* () {
+            const wc = yield* ensure
+            const [w, h] = (yield* exec<[number, number]>(wc, '[innerWidth, innerHeight]'))
+            yield* moveCursor(w / 2, h / 2)
+            yield* cdp(wc, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x: w / 2, y: h / 2, deltaX: 0, deltaY: dy })
+            yield* settle(wc, 350)
+            return yield* snapshotOf(wc)
+          }),
+
+        screenshot: (rect) => Effect.flatMap(ensure, (wc) => shoot(wc, rect)),
+
+        evaluate: (code) =>
+          Effect.gen(function* () {
+            const wc = yield* ensure
+            const result = yield* exec<unknown>(wc, `(async () => { ${code} })()`)
+            const text = typeof result === 'string' ? result : JSON.stringify(result ?? null)
+            return text.length > 8000 ? `${text.slice(0, 8000)}…[truncated]` : text
+          }),
+
+        elementAt: (x, y) => Effect.flatMap(ensure, (wc) => exec<ElementInfo | null>(wc, elementAtJs(x, y))),
+
+        screencast: (on) =>
+          Effect.gen(function* () {
+            const wc = yield* ensure
+            if (on === casting) return
+            casting = on
+            if (on) yield* cdp(wc, 'Page.startScreencast', { format: 'jpeg', quality: 80, maxWidth: 1920, maxHeight: 1200, everyNthFrame: 1 })
+            else yield* cdp(wc, 'Page.stopScreencast')
+          }),
+
+        status: (label) => Effect.sync(() => emit({ type: 'control', active: true, label })),
+
+        release: Effect.sync(() => emit({ type: 'control', active: false, label: '' }))
+      }
+      return Browser.of(api)
+    })
+}

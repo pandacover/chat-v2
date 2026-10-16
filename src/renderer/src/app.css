@@ -437,3 +437,87 @@ code.hljs {
     opacity: 0.35;
   }
 }
+
+/* Shared tooltip (lib/tooltip.ts). */
+.app-tooltip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 100;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 280px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--fg);
+  color: var(--bg);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+  opacity: 0;
+  translate: 0 2px;
+  transition:
+    opacity 110ms var(--ease-out),
+    translate 110ms var(--ease-out);
+}
+.app-tooltip[data-side='bottom'] {
+  translate: 0 -2px;
+}
+.app-tooltip[data-open='true'] {
+  opacity: 1;
+  translate: 0 0;
+}
+.app-tooltip kbd {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+/* Built-in browser: the misty border while the assistant drives, and its cursor. */
+@keyframes mist {
+  0%,
+  100% {
+    opacity: 0.65;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.agent-mist {
+  border-radius: inherit;
+  box-shadow:
+    inset 0 0 0 1.5px color-mix(in oklab, var(--accent) 70%, transparent),
+    inset 0 0 18px 4px color-mix(in oklab, var(--accent) 38%, transparent),
+    inset 0 0 60px 10px color-mix(in oklab, var(--accent) 16%, transparent);
+  animation: mist 2.6s ease-in-out infinite;
+}
+.agent-cursor {
+  transition: transform 340ms var(--ease-out);
+  will-change: transform;
+}
+.agent-cursor svg {
+  filter: drop-shadow(0 1px 1.5px #0000004d);
+}
+@keyframes ripple {
+  from {
+    transform: translate(-50%, -50%) scale(0.2);
+    opacity: 0.9;
+  }
+  to {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 0;
+  }
+}
+.agent-ripple {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--accent) 45%, transparent);
+  animation: ripple 480ms var(--ease-out) forwards;
+}

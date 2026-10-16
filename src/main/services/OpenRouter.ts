@@ -1,5 +1,5 @@
 import { Context, Effect, Layer, Stream } from 'effect'
-import type { ModelInfo } from '@shared/types'
+import type { ModelInfo, Usage } from '@shared/types'
 import { type ConfigError, type MissingApiKey, ProviderError, errorMessage } from '../errors'
 import { parseSseLine } from '../sse'
 import { SettingsStore } from './SettingsStore'
@@ -12,9 +12,20 @@ export type ContentPart =
   | { type: 'image_url'; image_url: { url: string } }
   | { type: 'file'; file: { filename: string; file_data: string } }
 
-export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant'
-  content: string | ContentPart[]
+export interface ToolCall {
+  id: string
+  type: 'function'
+  function: { name: string; arguments: string }
+}
+
+export type ChatMessage =
+  | { role: 'system' | 'user'; content: string | ContentPart[] }
+  | { role: 'assistant'; content: string | ContentPart[] | null; tool_calls?: ToolCall[] }
+  | { role: 'tool'; tool_call_id: string; content: string }
+
+export interface ToolDefinition {
+  type: 'function'
+  function: { name: string; description: string; parameters: object }
 }
 
 export interface ChatRequest {
@@ -22,7 +33,14 @@ export interface ChatRequest {
   messages: ChatMessage[]
   temperature?: number
   plugins?: unknown[]
+  tools?: ToolDefinition[]
 }
+
+/** What a streamed completion yields: text, or a fragment of a tool call. */
+export type ChatDelta =
+  | { type: 'text'; text: string }
+  | { type: 'tool'; index: number; id?: string; name?: string; args?: string }
+  | { type: 'usage'; usage: Omit<Usage, 'requests'> }
 
 const headers = (key: string) => ({
   Authorization: `Bearer ${key}`,
@@ -30,6 +48,12 @@ const headers = (key: string) => ({
   'HTTP-Referer': 'https://github.com/pandacover/chat-v2',
   'X-Title': 'chat-v2'
 })
+
+/** OpenRouter prices are USD per token as strings; "-1" marks variable pricing (routers). */
+const perMillion = (v: unknown): number | null => {
+  const n = typeof v === 'string' || typeof v === 'number' ? Number(v) : NaN
+  return Number.isFinite(n) && n >= 0 ? Math.round(n * 1e6 * 1e6) / 1e6 : null
+}
 
 const providerError = (status: number | undefined, message: string) =>
   new ProviderError({ provider: 'OpenRouter', status, message })
@@ -49,8 +73,8 @@ const describeFailure = (status: number, body: string): string => {
 export class OpenRouter extends Context.Service<
   OpenRouter,
   {
-    /** Streams text deltas of a chat completion. Interrupting the stream aborts the request. */
-    readonly streamChat: (req: ChatRequest) => Stream.Stream<string, ProviderError | MissingApiKey | ConfigError>
+    /** Streams a chat completion. Interrupting the stream aborts the request. */
+    readonly streamChat: (req: ChatRequest) => Stream.Stream<ChatDelta, ProviderError | MissingApiKey | ConfigError>
     readonly listModels: Effect.Effect<ModelInfo[], ProviderError>
   }
 >()('chat-v2/OpenRouter') {
@@ -72,7 +96,12 @@ export class OpenRouter extends Context.Service<
                 fetch(`${BASE}/chat/completions`, {
                   method: 'POST',
                   headers: headers(key),
-                  body: JSON.stringify({ ...req, stream: true }),
+                  body: JSON.stringify({
+                    ...req,
+                    stream: true,
+                    // One action at a time keeps the browser's state predictable.
+                    ...(req.tools?.length ? { tool_choice: 'auto', parallel_tool_calls: false } : {})
+                  }),
                   signal: controller.signal
                 }),
               catch: (cause) => providerError(undefined, `Could not reach OpenRouter: ${errorMessage(cause)}`)
@@ -88,13 +117,18 @@ export class OpenRouter extends Context.Service<
             }).pipe(
               Stream.decodeText,
               Stream.splitLines,
-              Stream.map(parseSseLine),
+              Stream.flatMap((line) => Stream.fromIterable(parseSseLine(line))),
               Stream.takeWhile((e) => e.type !== 'done'),
-              Stream.mapEffect((e) =>
-                e.type === 'error' ? Effect.fail(providerError(undefined, e.message)) : Effect.succeed(e)
+              Stream.mapEffect((e): Effect.Effect<ChatDelta | null, ProviderError> =>
+                e.type === 'error'
+                  ? Effect.fail(providerError(undefined, e.message))
+                  : e.type === 'delta'
+                    ? Effect.succeed({ type: 'text', text: e.text })
+                    : e.type === 'tool' || e.type === 'usage'
+                      ? Effect.succeed(e)
+                      : Effect.succeed(null)
               ),
-              Stream.filter((e): e is Extract<typeof e, { type: 'delta' }> => e.type === 'delta'),
-              Stream.map((e) => e.text)
+              Stream.filter((e): e is ChatDelta => e !== null)
             )
           })
         )
@@ -116,7 +150,14 @@ export class OpenRouter extends Context.Service<
               id: String(m.id),
               name: String(m.name ?? m.id),
               contextLength: typeof m.context_length === 'number' ? m.context_length : null,
-              inputModalities: Array.isArray(m.architecture?.input_modalities) ? m.architecture.input_modalities : ['text']
+              inputModalities: Array.isArray(m.architecture?.input_modalities) ? m.architecture.input_modalities : ['text'],
+              supportsTools: Array.isArray(m.supported_parameters) && m.supported_parameters.includes('tools'),
+              pricing: {
+                input: perMillion(m.pricing?.prompt),
+                output: perMillion(m.pricing?.completion),
+                cacheRead: perMillion(m.pricing?.input_cache_read),
+                cacheWrite: perMillion(m.pricing?.input_cache_write)
+              }
             })
           )
           .sort((a, b) => a.name.localeCompare(b.name))

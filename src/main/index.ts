@@ -1,11 +1,13 @@
 import { join } from 'node:path'
-import { BrowserWindow, app, nativeTheme, safeStorage, session, shell } from 'electron'
+import { BrowserWindow, app, nativeTheme, safeStorage, session, shell, webContents } from 'electron'
 import { Effect, Layer, ManagedRuntime } from 'effect'
-import type { StreamEvent } from '@shared/types'
+import type { BrowserEvent, StreamEvent } from '@shared/types'
 import { type MainServices, registerIpc } from './ipc'
 import { handleProtocols, registerSchemes } from './protocols'
+import { initUpdater } from './updater'
 import { AppPaths } from './services/AppPaths'
 import { Attachments } from './services/Attachments'
+import { Browser } from './services/Browser'
 import { Broadcaster, Chat } from './services/Chat'
 import { Db } from './services/Db'
 import { ElevenLabs } from './services/ElevenLabs'
@@ -33,13 +35,25 @@ const broadcaster = Broadcaster.of({
   }
 })
 
+const emitBrowser = (event: BrowserEvent) => {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('browser:event', event)
+  }
+}
+
+/** The built-in browser keeps its own cookies and storage, apart from the app. */
+const BROWSER_PARTITION = 'persist:browser'
+const isWebUrl = (url: string) => /^https?:///i.test(url)
+
 const makeRuntime = () => {
   const root = app.getPath('userData')
   const paths = AppPaths.layer(root)
   const db = Db.layer(join(root, 'chat.db'))
   const settings = SettingsStore.layer(cipher).pipe(Layer.provide(paths))
   const base = Layer.mergeAll(db, settings, paths)
-  const providers = Layer.mergeAll(OpenRouter.layer, ElevenLabs.layer, Attachments.layer).pipe(Layer.provideMerge(base))
+  const providers = Layer.mergeAll(OpenRouter.layer, ElevenLabs.layer, Attachments.layer, Browser.layer(emitBrowser, (id) => webContents.fromId(id))).pipe(
+    Layer.provideMerge(base)
+  )
   const chat = Chat.layer.pipe(
     Layer.provide(providers),
     Layer.provide(Layer.succeed(Broadcaster, broadcaster))
@@ -67,8 +81,18 @@ const createWindow = () => {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      webviewTag: true,
       backgroundThrottling: !headless
     }
+  })
+  // Every <webview> gets locked-down preferences regardless of what the renderer asked for.
+  win.webContents.on('will-attach-webview', (event, prefs, params) => {
+    delete prefs.preload
+    prefs.nodeIntegration = false
+    prefs.contextIsolation = true
+    prefs.sandbox = true
+    prefs.partition = BROWSER_PARTITION
+    if (params.src && params.src !== 'about:blank' && !isWebUrl(params.src)) event.preventDefault()
   })
   if (!headless) win.once('ready-to-show', () => win.show())
   if (process.env.ELECTRON_RENDERER_URL) void win.loadURL(process.env.ELECTRON_RENDERER_URL)
@@ -79,6 +103,17 @@ const isAppUrl = (url: string) =>
   url.startsWith('file://') || (!!process.env.ELECTRON_RENDERER_URL && url.startsWith(process.env.ELECTRON_RENDERER_URL))
 
 app.on('web-contents-created', (_event, contents) => {
+  if (contents.getType() === 'webview') {
+    // The built-in browser: web pages only, and popups open in the same view.
+    contents.setWindowOpenHandler(({ url }) => {
+      if (isWebUrl(url)) void contents.loadURL(url)
+      return { action: 'deny' }
+    })
+    contents.on('will-navigate', (event, url) => {
+      if (!isWebUrl(url)) event.preventDefault()
+    })
+    return
+  }
   // Links open in the system browser; nothing navigates the app window away.
   contents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//.test(url)) void shell.openExternal(url)
@@ -111,10 +146,15 @@ app.whenReady().then(async () => {
     callback(permission === 'media' || permission === 'clipboard-sanitized-write')
   })
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => permission === 'media')
+  // Sites in the built-in browser get no camera, microphone, location or notifications.
+  const browserSession = session.fromPartition(BROWSER_PARTITION)
+  browserSession.setPermissionRequestHandler((_wc, permission, callback) => callback(permission === 'clipboard-sanitized-write'))
+  browserSession.setPermissionCheckHandler(() => false)
 
   registerIpc(rt)
   handleProtocols(rt)
   createWindow()
+  initUpdater()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

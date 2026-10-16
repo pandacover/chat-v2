@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { Api, IpcResult, StreamEvent } from '@shared/types'
+import type { Api, BrowserEvent, IpcResult, StreamEvent, UpdateState } from '@shared/types'
 
 /** Unwraps the main process's `IpcResult`, rethrowing failures with their tag. */
 const call = async <A>(channel: string, ...args: unknown[]): Promise<A> => {
@@ -52,6 +52,30 @@ const api: Api = {
   },
   artifacts: {
     publish: (html) => call('artifacts:publish', html)
+  },
+  updates: {
+    get: () => call('updates:get'),
+    check: () => call('updates:check'),
+    install: () => call('updates:install'),
+    onEvent: (listener) => {
+      const handler = (_event: unknown, state: UpdateState) => listener(state)
+      ipcRenderer.on('updates:event', handler)
+      return () => ipcRenderer.removeListener('updates:event', handler)
+    }
+  },
+  browser: {
+    attach: (id) => call('browser:attach', id),
+    screenshot: (rect) => call('browser:screenshot', rect),
+    capture: (rect) => call('browser:capture', rect),
+    elementAt: (x, y) => call('browser:elementAt', x, y),
+    screencast: (on) => call('browser:screencast', on),
+    saveRecording: (data) => call('browser:saveRecording', data),
+    reveal: (path) => call('browser:reveal', path),
+    onEvent: (listener) => {
+      const handler = (_event: unknown, payload: BrowserEvent) => listener(payload)
+      ipcRenderer.on('browser:event', handler)
+      return () => ipcRenderer.removeListener('browser:event', handler)
+    }
   }
 }
 

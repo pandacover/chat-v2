@@ -1,12 +1,15 @@
 import { Cause, Context, Effect, Exit, FiberMap, Layer, Stream } from 'effect'
 import { ARTIFACT_INSTRUCTIONS } from '@shared/artifacts'
 import { makeLineBuffer } from '@shared/lines'
-import type { Message, MessageStatus, SessionView, StreamEvent } from '@shared/types'
+import type { Message, MessageStatus, SessionView, StreamEvent, Usage } from '@shared/types'
 import { type DbError, InvalidInput, type NotFound, errorMessage } from '../errors'
 import { WRITING_GUIDELINES } from '../guidelines'
+import { BROWSER_INSTRUCTIONS, BROWSER_TOOLS, MAX_AGENT_STEPS, runTool } from '../agent'
+import { stepLine, summarizeSteps } from '@shared/steps'
 import { Attachments } from './Attachments'
 import { Db } from './Db'
-import { type ChatMessage, type ContentPart, OpenRouter } from './OpenRouter'
+import { type ChatMessage, type ChatRequest, type ContentPart, OpenRouter } from './OpenRouter'
+import { Browser } from './Browser'
 import { SettingsStore } from './SettingsStore'
 
 /** Pushes stream events to every open window. */
@@ -58,6 +61,7 @@ export class Chat extends Context.Service<
       const openRouter = yield* OpenRouter
       const attachments = yield* Attachments
       const broadcaster = yield* Broadcaster
+      const browser = yield* Browser
 
       // One fiber per streaming assistant message. Closing the layer (app quit)
       // interrupts them all, which marks their messages `interrupted`.
@@ -88,7 +92,8 @@ export class Chat extends Context.Service<
         const system = [
           session.systemPrompt ?? settings.systemPrompt,
           WRITING_GUIDELINES,
-          settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : ''
+          settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : '',
+          session.browserEnabled ? BROWSER_INSTRUCTIONS : ''
         ]
           .map((s) => s.trim())
           .filter(Boolean)
@@ -102,25 +107,49 @@ export class Chat extends Context.Service<
             const parts: ContentPart[] = [...files.parts, { type: 'text', text: m.content }]
             messages.push({ role: 'user', content: files.parts.length > 0 ? parts : m.content })
           } else if (m.role === 'assistant' && m.content.trim() !== '') {
-            messages.push({ role: 'assistant', content: m.content })
+            messages.push({ role: 'assistant', content: summarizeSteps(m.content) })
           }
         }
         // Assistant prefill: the model continues the partial reply instead of starting over.
         // Some providers reject a prefill ending in whitespace.
-        if (prefill) messages.push({ role: 'assistant', content: prefill.trimEnd() })
+        if (prefill) messages.push({ role: 'assistant', content: summarizeSteps(prefill).trimEnd() })
         return {
           model: assistant.model ?? session.model ?? settings.defaultModel,
           messages,
           temperature: settings.temperature,
-          ...(hasPdf ? { plugins: [{ id: 'file-parser', pdf: { engine: settings.pdfEngine } }] } : {})
-        }
+          ...(hasPdf ? { plugins: [{ id: 'file-parser', pdf: { engine: settings.pdfEngine } }] } : {}),
+          ...(session.browserEnabled ? { tools: BROWSER_TOOLS } : {})
+        } satisfies ChatRequest as ChatRequest
       })
 
-      const finish = (messageId: string, status: MessageStatus, error: string | null, tailPartial: boolean) =>
-        db.use((d) => d.setStatus(messageId, status, error, tailPartial)).pipe(
-          Effect.andThen(Effect.sync(() => broadcaster.send({ type: 'done', messageId, status, error }))),
-          Effect.ignore
+      const finish = (
+        messageId: string,
+        status: MessageStatus,
+        error: string | null,
+        tailPartial: boolean,
+        usage: Usage | null,
+        model: string | null
+      ) =>
+        db
+          .use((d) => {
+            d.setStatus(messageId, status, error, tailPartial)
+            if (usage) d.setUsage(messageId, usage)
+            if (model) d.setModel(messageId, model)
+          })
+          .pipe(
+            Effect.andThen(Effect.sync(() => broadcaster.send({ type: 'done', messageId, status, error, usage, model }))),
+            Effect.ignore
+          )
+
+      /** Whether a model accepts images, from OpenRouter's list (unknown models are assumed to). */
+      const seesImages = (model: string) =>
+        openRouter.listModels.pipe(
+          Effect.map((models) => models.find((m) => m.id === model)?.inputModalities.includes('image') ?? true),
+          Effect.orElseSucceed(() => true)
         )
+
+      const hasImages = (messages: ChatMessage[]) =>
+        messages.some((m) => Array.isArray(m.content) && m.content.some((p) => p.type === 'image_url'))
 
       /**
        * Streams a reply into `assistant`, durably: every completed line is appended
@@ -145,12 +174,92 @@ export class Chat extends Context.Service<
             Effect.map((index) => broadcaster.send({ type: 'line', messageId: assistant.id, index, text }))
           )
         }
+        // Flushes a half-finished text line so a step line never lands in the middle of it.
+        const endLine = Effect.suspend(() => Effect.forEach(buffer.flush(), emit, { discard: true }))
+        let usedBrowser = false
+        // A continued reply keeps counting from what it already used.
+        let usage: Usage | null = assistant.usage ? { ...assistant.usage } : null
+        let answeredBy: string | null = null
+        const addUsage = (u: Omit<Usage, 'requests'>) => {
+          const prev = usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, reasoningTokens: 0, cost: null, requests: 0 }
+          usage = {
+            promptTokens: prev.promptTokens + u.promptTokens,
+            completionTokens: prev.completionTokens + u.completionTokens,
+            totalTokens: prev.totalTokens + u.totalTokens,
+            cachedTokens: prev.cachedTokens + u.cachedTokens,
+            reasoningTokens: prev.reasoningTokens + u.reasoningTokens,
+            cost: u.cost === null ? prev.cost : (prev.cost ?? 0) + u.cost,
+            requests: prev.requests + 1
+          }
+        }
+
         return Effect.gen(function* () {
           const request = yield* buildRequest(assistant, prefill)
-          yield* openRouter
-            .streamChat(request)
-            .pipe(Stream.runForEach((delta) => Effect.forEach(buffer.push(delta), emit, { discard: true })))
+          const chatModel = request.model
+          const settings = yield* settingsStore.get.pipe(Effect.orElseSucceed(() => null))
+          const refs = new Map<string, string>()
+          for (let step = 0; ; step++) {
+            const calls = new Map<number, { id: string; name: string; args: string }>()
+            let text = ''
+            // Images (uploads or browser screenshots) go to the vision model if this one is blind.
+            const vision = settings?.visionModel
+            request.model =
+              vision && vision !== chatModel && hasImages(request.messages) && !(yield* seesImages(chatModel)) ? vision : chatModel
+            if (request.model !== chatModel) answeredBy = request.model
+            yield* openRouter.streamChat(request).pipe(
+              Stream.runForEach((delta) => {
+                if (delta.type === 'usage') {
+                  addUsage(delta.usage)
+                  return Effect.void
+                }
+                if (delta.type === 'text') {
+                  text += delta.text
+                  return Effect.forEach(buffer.push(delta.text), emit, { discard: true })
+                }
+                const call = calls.get(delta.index) ?? { id: '', name: '', args: '' }
+                if (delta.id) call.id = delta.id
+                if (delta.name) call.name += delta.name
+                if (delta.args) call.args += delta.args
+                calls.set(delta.index, call)
+                return Effect.void
+              })
+            )
+            if (calls.size === 0 || !request.tools) return
+            if (step >= MAX_AGENT_STEPS) {
+              yield* endLine
+              yield* emit(`Stopped after ${MAX_AGENT_STEPS} browser steps. Ask me to keep going if you want me to continue.`)
+              return
+            }
+
+            yield* endLine
+            const toolCalls = [...calls.values()].map((c, i) => ({
+              id: c.id || `call_${step}_${i}`,
+              type: 'function' as const,
+              function: { name: c.name, arguments: c.args || '{}' }
+            }))
+            request.messages.push({ role: 'assistant', content: text || null, tool_calls: toolCalls })
+            const images: string[] = []
+            for (const call of toolCalls) {
+              usedBrowser = true
+              const outcome = yield* runTool(browser, refs, call.function.name, call.function.arguments)
+              yield* emit(stepLine(outcome.step))
+              request.messages.push({ role: 'tool', tool_call_id: call.id, content: outcome.text })
+              if (outcome.image) images.push(outcome.image)
+            }
+            // Tool results are text-only on most providers, so screenshots follow as a user turn.
+            if (images.length > 0) {
+              request.messages.push({
+                role: 'user',
+                content: [
+                  { type: 'text', text: 'Screenshot of the browser viewport you asked for:' },
+                  ...images.map((url) => ({ type: 'image_url' as const, image_url: { url } }))
+                ]
+              })
+            }
+          }
         }).pipe(
+          // Hand the browser back however the reply ends (done, error, Stop, Take over).
+          Effect.ensuring(Effect.suspend(() => (usedBrowser ? browser.release : Effect.void))),
           Effect.onExit((exit) =>
             Effect.gen(function* () {
               // The unfinished line is kept (and marked partial) so nothing received is lost.
@@ -158,11 +267,11 @@ export class Chat extends Context.Service<
               yield* Effect.forEach(tail, emit, { discard: true }).pipe(Effect.ignore)
               const partial = tail.length > 0
               const stopped = stopRequested.delete(assistant.id)
-              if (Exit.isSuccess(exit)) return yield* finish(assistant.id, 'complete', null, false)
+              if (Exit.isSuccess(exit)) return yield* finish(assistant.id, 'complete', null, false, usage, answeredBy)
               if (Cause.hasInterruptsOnly(exit.cause))
-                return yield* finish(assistant.id, stopped ? 'stopped' : 'interrupted', null, partial)
+                return yield* finish(assistant.id, stopped ? 'stopped' : 'interrupted', null, partial, usage, answeredBy)
               const error = Cause.squash(exit.cause)
-              return yield* finish(assistant.id, 'error', errorMessage(error), partial)
+              return yield* finish(assistant.id, 'error', errorMessage(error), partial, usage, answeredBy)
             })
           )
         )

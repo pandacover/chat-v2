@@ -1,16 +1,20 @@
-import { ipcMain, shell } from 'electron'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { app, ipcMain, shell } from 'electron'
 import { Cause, Effect, type ManagedRuntime } from 'effect'
 import type { IpcResult, NewAttachmentInput, SettingsPatch } from '@shared/types'
 import { errorMessage } from './errors'
+import { checkForUpdates, installUpdate, updateState } from './updater'
 import { publishArtifact } from './protocols'
 import { Attachments } from './services/Attachments'
+import { Browser } from './services/Browser'
 import { Chat, NEW_SESSION_TITLE } from './services/Chat'
 import { Db } from './services/Db'
 import { ElevenLabs } from './services/ElevenLabs'
 import { OpenRouter } from './services/OpenRouter'
 import { SettingsStore } from './services/SettingsStore'
 
-export type MainServices = Db | Chat | Attachments | SettingsStore | OpenRouter | ElevenLabs
+export type MainServices = Db | Chat | Attachments | SettingsStore | OpenRouter | ElevenLabs | Browser
 
 type Handler = (...args: any[]) => Effect.Effect<unknown, { readonly _tag: string; readonly message: string }, MainServices>
 
@@ -18,6 +22,13 @@ const str = (v: unknown, name: string): string => {
   if (typeof v !== 'string') throw new TypeError(`${name} must be a string`)
   return v
 }
+type Rect = { x: number; y: number; width: number; height: number }
+const rect = (v: unknown): Rect | undefined => {
+  const r = v as Partial<Rect> | undefined
+  return r && [r.x, r.y, r.width, r.height].every((n) => typeof n === 'number') ? (r as Rect) : undefined
+}
+const stamp = () => new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+
 const ids = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [])
 
 const handlers: Record<string, Handler> = {
@@ -35,12 +46,13 @@ const handlers: Record<string, Handler> = {
     Db.use((db) =>
       db.use((d) => d.updateSession(str(id, 'id'), { title: str(title, 'title').trim() || NEW_SESSION_TITLE }))
     ),
-  'sessions:update': (id, patch: { model?: string | null; systemPrompt?: string | null }) =>
+  'sessions:update': (id, patch: { model?: string | null; systemPrompt?: string | null; browserEnabled?: boolean }) =>
     Db.use((db) =>
       db.use((d) =>
         d.updateSession(str(id, 'id'), {
           ...(patch.model !== undefined ? { model: patch.model || null } : {}),
-          ...(patch.systemPrompt !== undefined ? { systemPrompt: patch.systemPrompt?.trim() ? patch.systemPrompt : null } : {})
+          ...(patch.systemPrompt !== undefined ? { systemPrompt: patch.systemPrompt?.trim() ? patch.systemPrompt : null } : {}),
+          ...(typeof patch.browserEnabled === 'boolean' ? { browserEnabled: patch.browserEnabled } : {})
         })
       )
     ),
@@ -114,7 +126,33 @@ const handlers: Record<string, Handler> = {
   'stt:transcribe': (audio: ArrayBuffer, mime) =>
     ElevenLabs.use((e) => e.transcribe(new Uint8Array(audio), str(mime, 'mime'))),
 
-  'artifacts:publish': (html) => Effect.sync(() => publishArtifact(str(html, 'html')))
+  'artifacts:publish': (html) => Effect.sync(() => publishArtifact(str(html, 'html'))),
+
+  'updates:get': () => Effect.sync(updateState),
+  'updates:check': () => Effect.promise(checkForUpdates),
+  'updates:install': () => Effect.promise(installUpdate),
+
+  'browser:attach': (id) => Browser.use((b) => b.attach(Number(id))),
+  'browser:screenshot': (r) =>
+    Effect.gen(function* () {
+      const shot = yield* (yield* Browser).screenshot(rect(r))
+      return yield* (yield* Attachments).add({ name: `screenshot-${stamp()}.png`, mime: 'image/png', data: shot.png.buffer })
+    }),
+  'browser:capture': (r) =>
+    Browser.use((b) => b.screenshot(rect(r))).pipe(
+      Effect.map((shot) => `data:image/png;base64,${Buffer.from(shot.png).toString('base64')}`)
+    ),
+  'browser:elementAt': (x, y) => Browser.use((b) => b.elementAt(Number(x), Number(y))),
+  'browser:screencast': (on) => Browser.use((b) => b.screencast(on === true)),
+  'browser:saveRecording': (data: ArrayBuffer) =>
+    Effect.sync(() => {
+      const dir = join(app.getPath('videos'), 'chat-v2')
+      mkdirSync(dir, { recursive: true })
+      const file = join(dir, `recording-${stamp()}.webm`)
+      writeFileSync(file, new Uint8Array(data))
+      return file
+    }),
+  'browser:reveal': (path) => Effect.sync(() => shell.showItemInFolder(str(path, 'path')))
 }
 
 export const registerIpc = (runtime: ManagedRuntime.ManagedRuntime<MainServices, unknown>) => {

@@ -1,6 +1,9 @@
 <script lang="ts">
+  import { tip } from '@/lib/tooltip'
   import { untrack } from 'svelte'
-  import { parseContent } from '@shared/artifacts'
+  import { parseContent, type ContentBlock } from '@shared/artifacts'
+  import { splitSteps, type Step } from '@shared/steps'
+  import StepList from './StepList.svelte'
   import type { PathNode } from '@shared/types'
   import { fade, fly } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
@@ -8,6 +11,7 @@
   import BranchSwitcher from './BranchSwitcher.svelte'
   import Icon from './Icon.svelte'
   import Markdown from './Markdown.svelte'
+  import { usageDetail, usageLabel } from '@/lib/usage'
 
   let { node, last = false }: { node: PathNode; last?: boolean } = $props()
 
@@ -15,7 +19,13 @@
   const streaming = $derived(message.status === 'streaming')
   // Lines animate only when they arrive while you watch, never on history or a backfill.
   const live = $derived(streaming && app.liveIds.has(message.id))
-  const blocks = $derived(message.role === 'assistant' ? parseContent(message.content) : [])
+  // Browser steps are their own blocks; artifacts are parsed out of the prose between them.
+  type Block = ContentBlock | { type: 'steps'; steps: Step[] }
+  const blocks = $derived<Block[]>(
+    message.role === 'assistant'
+      ? splitSteps(message.content).flatMap((seg): Block[] => (seg.type === 'steps' ? [seg] : parseContent(seg.content)))
+      : []
+  )
   const busy = $derived(app.streaming)
   // The turn you just sent slides in; opening, switching or forking a chat renders still.
   const fresh = untrack(
@@ -34,7 +44,8 @@
     for (const b of blocks) {
       if (b.type === 'artifact' && b.complete && !announced.has(b.identifier)) {
         announced.add(b.identifier)
-        app.artifact = { identifier: b.identifier, messageId: message.id }
+        // Don't pull focus away from the browser while the agent is using it.
+        if (!app.control.active) app.showArtifact({ identifier: b.identifier, messageId: message.id })
       }
     }
   })
@@ -165,8 +176,8 @@
       </div>
     {:else}
       <div class="-ml-1 flex h-6 items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
-        <button class="icon-btn !p-1" title={copied ? 'Copied' : 'Copy'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={14} /></button>
-        <button class="icon-btn !p-1" title="Edit (creates a branch)" disabled={busy} onclick={startEdit}><Icon name="edit" size={14} /></button>
+        <button class="icon-btn !p-1" use:tip={copied ? 'Copied' : 'Copy'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={14} /></button>
+        <button class="icon-btn !p-1" use:tip={'Edit (creates a branch)'} disabled={busy} onclick={startEdit}><Icon name="edit" size={14} /></button>
         <BranchSwitcher {node} disabled={busy} />
       </div>
     {/if}
@@ -176,6 +187,8 @@
     {#each blocks as block, i (i)}
       {#if block.type === 'text'}
         <Markdown source={block.content} streaming={streaming && i === blocks.length - 1} live={live && i === blocks.length - 1} />
+      {:else if block.type === 'steps'}
+        <StepList steps={block.steps} {live} running={streaming && i === blocks.length - 1} />
       {:else}
         {@const active = app.artifact?.identifier === block.identifier && app.artifact?.messageId === message.id}
         <button
@@ -183,7 +196,7 @@
             ? 'bg-surface shadow-[0_0_0_1px_var(--muted)]'
             : 'bg-surface shadow-[0_0_0_1px_var(--line)] hover:shadow-[0_0_0_1px_var(--muted)]'}"
           disabled={!block.complete}
-          onclick={() => (app.artifact = { identifier: block.identifier, messageId: message.id })}
+          onclick={() => app.showArtifact({ identifier: block.identifier, messageId: message.id })}
         >
           <span class="grid size-9 place-items-center rounded-md bg-hover text-fg-2"><Icon name="window" size={17} /></span>
           <span class="min-w-0 flex-1">
@@ -201,7 +214,9 @@
       {/if}
     {/each}
 
-    {#if streaming && blocks.length === 0}
+    {#if streaming && app.control.active && blocks.at(-1)?.type !== 'steps'}
+      <StepList steps={[]} live running />
+    {:else if streaming && blocks.length === 0}
       <div class="thinking py-1 text-[13.5px]" aria-live="polite">Thinking</div>
     {/if}
 
@@ -231,15 +246,19 @@
           ? 'opacity-100'
           : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}"
       >
-        <button class="icon-btn !p-1" title={copied ? 'Copied' : 'Copy'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={14} /></button>
-        <button class="icon-btn !p-1" title="Regenerate (creates a branch)" disabled={busy} onclick={() => app.regenerate(message.id)}>
+        <button class="icon-btn !p-1" use:tip={copied ? 'Copied' : 'Copy'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={14} /></button>
+        <button class="icon-btn !p-1" use:tip={'Regenerate (creates a branch)'} disabled={busy} onclick={() => app.regenerate(message.id)}>
           <Icon name="refresh" size={14} />
         </button>
-        <button class="icon-btn !p-1" title="Fork into a new chat from here" onclick={() => app.fork(message.id)}>
+        <button class="icon-btn !p-1" use:tip={'Fork into a new chat from here'} onclick={() => app.fork(message.id)}>
           <Icon name="branch" size={14} />
         </button>
         <BranchSwitcher {node} disabled={busy} />
         {#if message.model}<span class="ml-2 truncate text-[11.5px] text-muted">{message.model}</span>{/if}
+        {#if message.usage}
+          <span class="px-0.5 text-[11.5px] text-muted/60" aria-hidden="true">·</span>
+          <span class="shrink-0 text-[11.5px] text-muted tabular-nums" use:tip={usageDetail(message.usage)} in:fade={{ duration: 200 }}>{usageLabel(message.usage)}</span>
+        {/if}
       </div>
     {/if}
   </div>

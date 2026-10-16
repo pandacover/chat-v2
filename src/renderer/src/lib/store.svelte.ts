@@ -1,6 +1,7 @@
 import { SvelteSet } from 'svelte/reactivity'
 import { parseContent, type ArtifactBlock } from '@shared/artifacts'
-import type { Attachment, Message, ModelInfo, Session, SessionView, SettingsView, StreamEvent } from '@shared/types'
+import type { UpdateState } from '@shared/types'
+import type { Attachment, BrowserEvent, Message, ModelInfo, Session, SessionView, SettingsView, StreamEvent } from '@shared/types'
 
 const api = window.api
 
@@ -41,11 +42,72 @@ class AppState {
   liveIds = new SvelteSet<string>()
   sidebarOpen = $state(true)
 
+  update = $state<UpdateState | null>(null)
+
+  /** Pending composer attachments. Shared so the browser panel can add captures. */
+  draftAttachments = $state<Attachment[]>([])
+
+  // The right panel holds artifacts and the built-in browser as tabs.
+  browserOpen = $state(false)
+  panelTab = $state<'artifact' | 'browser'>('artifact')
+  browser = $state({ url: '', title: '', loading: false, canBack: false, canForward: false })
+  /** Set while the model is driving the browser. */
+  control = $state({ active: false, label: '' })
+  /** Where the agent's pointer is, in page pixels; `clicks` increments per click for the ripple. */
+  cursor = $state({ x: 0, y: 0, visible: false, clicks: 0 })
+
   private toastSeq = 0
   private backfilling = new Map<string, Promise<void>>()
 
   get streaming(): boolean {
     return this.view?.path.some((n) => n.message.status === 'streaming') ?? false
+  }
+
+  get hasArtifact(): boolean {
+    return this.artifact !== null && this.artifactVersions.length > 0
+  }
+
+  get panelOpen(): boolean {
+    return this.browserOpen || this.hasArtifact
+  }
+
+  /** The visible tab, falling back to whichever one exists. */
+  get activeTab(): 'artifact' | 'browser' {
+    if (this.panelTab === 'browser' && this.browserOpen) return 'browser'
+    return this.hasArtifact ? 'artifact' : 'browser'
+  }
+
+  showArtifact(artifact: OpenArtifact) {
+    this.artifact = artifact
+    this.panelTab = 'artifact'
+  }
+
+  openBrowser() {
+    this.browserOpen = true
+    this.panelTab = 'browser'
+  }
+
+  closeBrowser() {
+    this.browserOpen = false
+    this.panelTab = 'artifact'
+  }
+
+  addDraftAttachment(attachment: Attachment) {
+    this.draftAttachments.push(attachment)
+  }
+
+  private onBrowserEvent(e: BrowserEvent) {
+    if (e.type === 'open') this.openBrowser()
+    else if (e.type === 'control') {
+      this.control = { active: e.active, label: e.label }
+      if (e.active) this.openBrowser()
+      else this.cursor.visible = false
+    } else if (e.type === 'cursor') {
+      this.cursor.x = e.x
+      this.cursor.y = e.y
+      this.cursor.visible = true
+      if (e.click) this.cursor.clicks += 1
+    }
   }
 
   /** Every complete version of the open artifact along the visible branch. */
@@ -64,6 +126,9 @@ class AppState {
 
   async init() {
     api.chat.onEvent((e) => this.onEvent(e))
+    api.browser.onEvent((e) => this.onBrowserEvent(e))
+    api.updates.onEvent((s) => (this.update = s))
+    void api.updates.get().then((s) => (this.update = s))
     await Promise.all([this.refreshSessions(), this.loadSettings()])
     const first = this.sessions[0]
     if (first) await this.open(first.id)
@@ -148,7 +213,7 @@ class AppState {
     }
   }
 
-  async updateSession(patch: { model?: string | null; systemPrompt?: string | null }) {
+  async updateSession(patch: { model?: string | null; systemPrompt?: string | null; browserEnabled?: boolean }) {
     let view = this.view
     // Picking a model or instructions before the first message starts the chat.
     if (!view) {
@@ -284,6 +349,8 @@ class AppState {
       if (!m) return
       m.status = e.status
       m.error = e.error
+      if (e.usage) m.usage = e.usage
+      if (e.model) m.model = e.model
       if (e.status === 'error' && e.error) this.toast(e.error)
       this.liveIds.delete(e.messageId)
     })

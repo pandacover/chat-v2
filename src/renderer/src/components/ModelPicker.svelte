@@ -1,15 +1,29 @@
 <script lang="ts">
+  import { tip } from '@/lib/tooltip'
   import { tick } from 'svelte'
+  import type { ModelInfo } from '@shared/types'
   import { pop } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
   import Icon from './Icon.svelte'
+  import { priceDetail, priceLine } from '@/lib/pricing'
 
   let {
     value,
     onchange,
     block = false,
-    placement = 'down'
-  }: { value: string; onchange: (id: string) => void; block?: boolean; placement?: 'up' | 'down' } = $props()
+    placement = 'down',
+    filter,
+    noneLabel
+  }: {
+    value: string
+    onchange: (id: string) => void
+    block?: boolean
+    placement?: 'up' | 'down'
+    /** Limits the list, e.g. to models that accept images. */
+    filter?: (m: ModelInfo) => boolean
+    /** Offers an empty choice with this label (value ''). */
+    noneLabel?: string
+  } = $props()
 
   let open = $state(false)
   let query = $state('')
@@ -26,13 +40,20 @@
 
   const results = $derived.by(() => {
     const q = query.trim().toLowerCase()
-    const list = q ? app.models.filter((m) => m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)) : app.models
+    const pool = filter ? app.models.filter(filter) : app.models
+    const list = q ? pool.filter((m) => m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)) : pool
     return list.slice(0, 100)
   })
 
   const current = $derived.by(() => {
+    if (!value && noneLabel) return { provider: '', label: noneLabel }
     const m = app.models.find((m) => m.id === value)
     return split(value, m?.name ?? value.split('/').pop() ?? value)
+  })
+
+  const selectedPrice = $derived.by(() => {
+    const m = app.models.find((m) => m.id === value)
+    return m ? `${m.name}: ${priceDetail(m)}` : null
   })
 
   const pick = (id: string) => {
@@ -81,6 +102,7 @@
     onclick={toggle}
     aria-haspopup="listbox"
     aria-expanded={open}
+    use:tip={open ? null : selectedPrice}
   >
     {#if current.provider}<span class="text-muted">{current.provider}</span><span class="text-muted/60">/</span>{/if}
     <span class="truncate text-fg">{current.label}</span>
@@ -89,7 +111,7 @@
 
   {#if open}
     <div
-      class="absolute z-50 w-[360px] max-w-[80vw] overflow-hidden {placement === 'up' ? 'bottom-full mb-1.5 origin-bottom-right' : 'top-full mt-1.5 origin-top-right'} rounded-lg bg-surface shadow-[0_0_0_1px_var(--line),var(--shadow)] {block
+      class="absolute z-50 w-[420px] max-w-[80vw] overflow-hidden {placement === 'up' ? 'bottom-full mb-1.5 origin-bottom-right' : 'top-full mt-1.5 origin-top-right'} rounded-lg bg-surface shadow-[0_0_0_1px_var(--line),var(--shadow)] {block
         ? 'left-0'
         : 'right-0'}"
       transition:pop={{ duration: 150 }}
@@ -107,6 +129,14 @@
         />
       </div>
       <ul bind:this={list} class="max-h-80 overflow-y-auto p-1" role="listbox">
+        {#if noneLabel && !query.trim()}
+          <li role="option" aria-selected={value === ''}>
+            <button type="button" class="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-fg-2 hover:bg-hover" onclick={() => pick('')}>
+              <span class="flex-1">{noneLabel}</span>
+              <Icon name="check" size={13} class={value === '' ? 'text-fg' : 'opacity-0'} />
+            </button>
+          </li>
+        {/if}
         {#each results as m, i (m.id)}
           {@const s = split(m.id, m.name)}
           <li role="option" aria-selected={m.id === value} data-cursor={i === cursor}>
@@ -116,12 +146,13 @@
               onmouseenter={() => (cursor = i)}
               onclick={() => pick(m.id)}
             >
-              <span class="min-w-0 flex-1 truncate">
-                <span class="text-fg">{s.label}</span>
-                <span class="ml-1 text-muted">{s.provider}</span>
+              <span class="min-w-0 flex-1">
+                <span class="block truncate"><span class="text-fg">{s.label}</span><span class="ml-1 text-muted">{s.provider}</span></span>
+                <span class="block truncate text-[11.5px] text-muted tabular-nums" use:tip={priceDetail(m)}>{priceLine(m)}</span>
               </span>
-              {#if m.inputModalities.includes('image')}<span class="text-[11px] text-muted" title="Accepts images">img</span>{/if}
-              {#if m.inputModalities.includes('file')}<span class="text-[11px] text-muted" title="Reads files natively">pdf</span>{/if}
+              {#if m.supportsTools}<span class="text-[11px] text-muted" use:tip={'Can use tools, including the browser'}>tools</span>{/if}
+              {#if m.inputModalities.includes('image')}<span class="text-[11px] text-muted" use:tip={'Accepts images'}>img</span>{/if}
+              {#if m.inputModalities.includes('file')}<span class="text-[11px] text-muted" use:tip={'Reads files natively'}>pdf</span>{/if}
               {#if m.contextLength}<span class="w-10 text-right text-[11px] text-muted tabular-nums">{m.contextLength >= 1e6 ? `${Math.round(m.contextLength / 1e6)}M` : `${Math.round(m.contextLength / 1000)}k`}</span>{/if}
               <Icon name="check" size={13} class={m.id === value ? 'text-fg' : 'opacity-0'} />
             </button>

@@ -1,0 +1,47 @@
+# Installers for Windows (NSIS .exe) and macOS (.dmg). CI builds and publishes them on
+# every push to main (.github/workflows/release.yml); the app updates itself from there.
+appId: com.pandacover.chatv2
+productName: chat-v2
+copyright: Copyright © pandacover
+directories:
+  output: dist
+  buildResources: build
+files:
+  - out/**
+  - package.json
+  - "!out-test/**"
+asar: true
+
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: ${productName}-${version}-setup.${ext}
+
+nsis:
+  # Per-user install without admin rights, so updates install silently on restart.
+  oneClick: true
+  perMachine: false
+  deleteAppDataOnUninstall: false
+
+mac:
+  icon: build/icon.png
+  category: public.app-category.productivity
+  # Unsigned for now: CI disables identity discovery. Signing and notarising can be
+  # added later with a Developer ID certificate.
+  identity: null
+  target:
+    - target: dmg
+      arch: [universal]
+    # The zip carries the update metadata (latest-mac.yml).
+    - target: zip
+      arch: [universal]
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+# Installers are published as releases of this (public) repository.
+publish:
+  provider: github
+  owner: pandacover
+  repo: chat-v2
+  releaseType: draft

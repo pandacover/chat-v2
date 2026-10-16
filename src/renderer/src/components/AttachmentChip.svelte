@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tip } from '@/lib/tooltip'
   import type { Attachment } from '@shared/types'
   import { pop } from '@/lib/motion'
   import Icon from './Icon.svelte'
@@ -20,13 +21,13 @@
     <div class="grid size-8 place-items-center rounded-sm bg-surface font-mono text-[9.5px] font-medium tracking-wide text-muted">{ext}</div>
   {/if}
   <div class="min-w-0 leading-tight">
-    <div class="max-w-36 truncate text-[12.5px] text-fg" title={attachment.name}>{attachment.name}</div>
+    <div class="max-w-36 truncate text-[12.5px] text-fg" use:tip={attachment.name}>{attachment.name}</div>
     <div class="text-[11px] text-muted">{size}</div>
   </div>
   {#if onremove}
     <button
       class="absolute -top-1.5 -right-1.5 grid size-5 place-items-center rounded-full bg-fg text-bg opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-      title="Remove {attachment.name}"
+      use:tip={`Remove ${attachment.name}`}
       onclick={onremove}><Icon name="x" size={11} stroke={2.2} /></button
     >
   {/if}

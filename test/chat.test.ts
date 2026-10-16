@@ -3,15 +3,47 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Effect, Layer, ManagedRuntime, Stream } from 'effect'
-import type { StreamEvent } from '../src/shared/types'
+import type { ModelInfo, StreamEvent } from '../src/shared/types'
 import { AppPaths } from '../src/main/services/AppPaths'
 import { Attachments } from '../src/main/services/Attachments'
 import { Broadcaster, Chat } from '../src/main/services/Chat'
 import { Db } from '../src/main/services/Db'
-import { type ChatRequest, OpenRouter } from '../src/main/services/OpenRouter'
+import { type ChatDelta, type ChatRequest, OpenRouter } from '../src/main/services/OpenRouter'
+import { Browser, type BrowserApi, type PageSnapshot } from '../src/main/services/Browser'
 import { SettingsStore } from '../src/main/services/SettingsStore'
 
-type Script = (req: ChatRequest) => Stream.Stream<string>
+type Script = (req: ChatRequest) => Stream.Stream<string | ChatDelta>
+
+const page = (over: Partial<PageSnapshot> = {}): PageSnapshot => ({
+  url: 'http://shop.test/',
+  title: 'Shop',
+  elements: '[e1] button "Buy now"',
+  text: 'Welcome',
+  scroll: { y: 0, height: 800, viewport: 800 },
+  ...over
+})
+
+/** Records browser calls instead of driving a real page. */
+const fakeBrowser = (log: string[]) =>
+  Layer.succeed(
+    Browser,
+    Browser.of({
+      attach: () => Effect.void,
+      navigate: (url) => Effect.sync(() => (log.push(`navigate ${url}`), page({ url }))),
+      history: (d) => Effect.sync(() => (log.push(d), page())),
+      snapshot: Effect.sync(() => (log.push('snapshot'), page())),
+      click: (t) => Effect.sync(() => (log.push(`click ${t.ref}`), page({ elements: '[e1] button "Bought!"' }))),
+      type: (ref, text) => Effect.sync(() => (log.push(`type ${ref} ${text}`), page())),
+      press: (k) => Effect.sync(() => (log.push(`press ${k}`), page())),
+      scroll: (dy) => Effect.sync(() => (log.push(`scroll ${dy}`), page())),
+      screenshot: () => Effect.succeed({ dataUrl: 'data:image/jpeg;base64,AAAA', png: new Uint8Array(4) }),
+      evaluate: () => Effect.succeed('42'),
+      elementAt: () => Effect.succeed(null),
+      screencast: () => Effect.void,
+      status: (label) => Effect.sync(() => void log.push(`status ${label}`)),
+      release: Effect.sync(() => void log.push('release'))
+    } satisfies BrowserApi)
+  )
 
 const dirs: string[] = []
 afterEach(() => {
@@ -23,7 +55,12 @@ afterEach(() => {
   }
 })
 
-const setup = (script: Script, dir = mkdtempSync(join(tmpdir(), 'chat-v2-'))) => {
+const setup = (
+  script: Script,
+  dir = mkdtempSync(join(tmpdir(), 'chat-v2-')),
+  browserLog: string[] = [],
+  models: ModelInfo[] = []
+) => {
   dirs.push(dir)
   const events: StreamEvent[] = []
   const requests: ChatRequest[] = []
@@ -34,10 +71,11 @@ const setup = (script: Script, dir = mkdtempSync(join(tmpdir(), 'chat-v2-'))) =>
     OpenRouter,
     OpenRouter.of({
       streamChat: (req) => {
-        requests.push(req)
-        return script(req)
+        // Snapshot the request: the agent loop keeps appending to its messages.
+        requests.push(structuredClone(req))
+        return script(req).pipe(Stream.map((d): ChatDelta => (typeof d === 'string' ? { type: 'text', text: d } : d)))
       },
-      listModels: Effect.succeed([])
+      listModels: Effect.succeed(models)
     })
   )
   const providers = Layer.mergeAll(fakeOpenRouter, Attachments.layer).pipe(Layer.provideMerge(base))
@@ -48,9 +86,16 @@ const setup = (script: Script, dir = mkdtempSync(join(tmpdir(), 'chat-v2-'))) =>
     }
   })
   const runtime = ManagedRuntime.make(
-    Layer.mergeAll(Chat.layer.pipe(Layer.provide(providers), Layer.provide(Layer.succeed(Broadcaster, broadcaster))), providers)
+    Layer.mergeAll(
+      Chat.layer.pipe(
+        Layer.provide(providers),
+        Layer.provide(Layer.succeed(Broadcaster, broadcaster)),
+        Layer.provide(fakeBrowser(browserLog))
+      ),
+      providers
+    )
   )
-  const run = <A, E>(eff: Effect.Effect<A, E, Chat | Db>) => runtime.runPromise(eff)
+  const run = <A, E>(eff: Effect.Effect<A, E, Chat | Db | SettingsStore>) => runtime.runPromise(eff)
   const doneCount = () => events.filter((e) => e.type === 'done').length
   const waitForDone = async (n: number) => {
     while (doneCount() < n) await new Promise<void>((r) => waiters.push(r))
@@ -186,6 +231,96 @@ describe('chat', () => {
     expect(t.requests[1]!.messages.at(-1)).toEqual({ role: 'assistant', content: 'done line\n<artifact title="C' })
     const reEmitted = t.events.filter((e) => e.type === 'line' && e.index === 1).map((e) => (e as { text: string }).text)
     expect(reEmitted).toEqual(['<artifact title="C', '<artifact title="Counter">'])
+    await t.runtime.dispose()
+  })
+
+  test('browser agent: tool calls run, steps persist, results go back to the model', async () => {
+    const log: string[] = []
+    const tool = (id: string, name: string, args: string): ChatDelta => ({ type: 'tool', index: 0, id, name, args })
+    const t = setup(
+      (req) => {
+        const toolTurns = req.messages.filter((m) => m.role === 'tool').length
+        if (toolTurns === 0) return Stream.make<Array<string | ChatDelta>>('Opening the shop.\nChecking', tool('c1', 'browser_navigate', '{"url":"shop.test"}'))
+        if (toolTurns === 1) return Stream.make(tool('c2', 'browser_click', '{"ref":"e1"}'))
+        return Stream.make('I bought it.')
+      },
+      undefined,
+      log
+    )
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { browserEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'buy it', attachmentIds: [] })))
+    await t.waitForDone(1)
+
+    expect(log).toEqual(['status Opened shop.test', 'navigate shop.test', 'status Clicked “Buy now”', 'click e1', 'release'])
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    expect(view.path[1]!.message.content.split('\n')).toEqual([
+      'Opening the shop.',
+      'Checking',
+      '::step {"tool":"browser_navigate","label":"Opened shop.test","ok":true}',
+      '::step {"tool":"browser_click","label":"Clicked “Buy now”","ok":true}',
+      'I bought it.'
+    ])
+    // Tools are offered, and the follow-up request carries the call and its result.
+    expect(t.requests[0]!.tools?.map((x) => x.function.name)).toContain('browser_click')
+    expect(t.requests[1]!.messages.at(-2)).toMatchObject({ role: 'assistant', tool_calls: [{ id: 'c1', function: { name: 'browser_navigate' } }] })
+    expect(t.requests[1]!.messages.at(-1)).toMatchObject({ role: 'tool', tool_call_id: 'c1' })
+    expect(String((t.requests[1]!.messages.at(-1) as { content: string }).content)).toContain('[e1] button "Buy now"')
+    // Chats without the switch get no tools.
+    await t.runtime.dispose()
+  })
+
+  test('usage is summed over every request in a reply and persisted', async () => {
+    const usage: ChatDelta = { type: 'usage', usage: { promptTokens: 100, completionTokens: 10, totalTokens: 110, cachedTokens: 40, reasoningTokens: 5, cost: 0.001 } }
+    const t = setup((req) => {
+      const turns = req.messages.filter((m) => m.role === 'tool').length
+      if (turns < 2) return Stream.make<Array<string | ChatDelta>>({ type: 'tool', index: 0, id: `c${turns}`, name: 'browser_snapshot', args: '{}' }, usage)
+      return Stream.make<Array<string | ChatDelta>>('All done.', usage)
+    })
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { browserEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'look', attachmentIds: [] })))
+    await t.waitForDone(1)
+    const expected = { promptTokens: 300, completionTokens: 30, totalTokens: 330, cachedTokens: 120, reasoningTokens: 15, requests: 3 }
+    const done = t.events.find((e) => e.type === 'done')
+    expect(done).toMatchObject({ usage: expected })
+    expect((done as { usage: { cost: number } }).usage.cost).toBeCloseTo(0.003)
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    expect(view.path[1]!.message.usage).toMatchObject(expected)
+    await t.runtime.dispose()
+  })
+
+  test('requests with images go to the vision model when the chat model cannot see', async () => {
+    const models: ModelInfo[] = [
+      { id: 'blind/model', name: 'Blind', contextLength: null, inputModalities: ['text'], supportsTools: true, pricing: { input: null, output: null, cacheRead: null, cacheWrite: null } },
+      { id: 'eye/model', name: 'Eye', contextLength: null, inputModalities: ['text', 'image'], supportsTools: true, pricing: { input: null, output: null, cacheRead: null, cacheWrite: null } }
+    ]
+    const t = setup(
+      (req) =>
+        req.messages.some((m) => m.role === 'tool')
+          ? Stream.make('It shows a shop.')
+          : Stream.make<Array<string | ChatDelta>>({ type: 'tool', index: 0, id: 'c0', name: 'browser_screenshot', args: '{}' }),
+      undefined,
+      [],
+      models
+    )
+    await t.run(SettingsStore.use((st) => st.update({ settings: { visionModel: 'eye/model' } })))
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { browserEnabled: true, model: 'blind/model' }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'what is on screen?', attachmentIds: [] })))
+    await t.waitForDone(1)
+    expect(t.requests.map((r) => r.model)).toEqual(['blind/model', 'eye/model'])
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    expect(view.path[1]!.message.model).toBe('eye/model')
+    await t.runtime.dispose()
+  })
+
+  test('chats without browser access are offered no tools', async () => {
+    const t = setup(() => Stream.make('plain'))
+    const s = await t.run(newSession)
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'hi', attachmentIds: [] })))
+    await t.waitForDone(1)
+    expect(t.requests[0]!.tools).toBeUndefined()
     await t.runtime.dispose()
   })
 

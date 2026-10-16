@@ -1,0 +1,62 @@
+# Builds installers on every push to main and publishes them as releases of this
+# repository, where installed apps pick them up (src/main/updater.ts).
+# Uses the workflow's own GITHUB_TOKEN; no extra secrets are needed.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # Every run gets a higher version, so installed apps always see it as newer.
+  VERSION: 0.1.${{ github.run_number }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Set version
+        run: npm pkg set version=${{ env.VERSION }}
+      - run: bun run build
+      - name: Build and upload installers (draft release)
+        run: bunx electron-builder --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Unsigned builds for now.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the draft once every platform has uploaded
+        run: |
+          gh release edit "v${VERSION}" --repo "${GITHUB_REPOSITORY}" --draft=false --latest \
+            --notes "Built from ${GITHUB_SHA::7}: ${{ github.event.head_commit.message || 'manual run' }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

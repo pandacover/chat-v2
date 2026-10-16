@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tip } from '@/lib/tooltip'
   import { onDestroy } from 'svelte'
   import type { Settings } from '@shared/types'
   import { CODE_FONTS, READING_FONTS, READING_SIZES, UI_FONTS, appearance, type FontOption, type ReadingSize } from '@/lib/appearance.svelte'
@@ -6,6 +7,7 @@
   import { app } from '@/lib/store.svelte'
   import { theme, type ThemePref } from '@/lib/theme.svelte'
   import Icon from './Icon.svelte'
+  import Logo from './Logo.svelte'
   import ModelPicker from './ModelPicker.svelte'
 
   let form = $state<Settings>({ ...app.settings!.settings })
@@ -19,7 +21,8 @@
     { id: 'model', label: 'Model' },
     { id: 'instructions', label: 'Instructions' },
     { id: 'voice', label: 'Voice & files' },
-    { id: 'appearance', label: 'Appearance' }
+    { id: 'appearance', label: 'Appearance' },
+    { id: 'about', label: 'About' }
   ]
 
   // Plain settings save on their own, shortly after the last change.
@@ -76,6 +79,16 @@
   }
 
   const close = () => (app.page = 'chat')
+
+  let checking = $state(false)
+  const checkUpdates = async () => {
+    checking = true
+    const s = await app.attempt(() => window.api.updates.check())
+    checking = false
+    if (!s) return
+    app.update = s
+    if (s.status === 'idle') app.toast(`You're on the latest version (${s.current}).`, 'info')
+  }
 
   const jump = (id: string) => {
     active = id
@@ -222,6 +235,17 @@
           <div class="mt-5 max-w-md">
             <ModelPicker block value={form.defaultModel} onchange={(id) => (form.defaultModel = id)} />
           </div>
+          <div class="mt-5 max-w-md">
+            <span class="mb-1.5 block font-medium text-fg">Vision model</span>
+            <ModelPicker
+              block
+              value={form.visionModel}
+              onchange={(id) => (form.visionModel = id)}
+              filter={(m) => m.inputModalities.includes('image')}
+              noneLabel="None: keep the chat's model"
+            />
+            <p class="mt-1.5 text-muted">Answers messages that include images, such as uploads or browser screenshots, when the chat's model can't see images.</p>
+          </div>
           <label class="mt-5 block max-w-md">
             <span class="mb-1.5 flex justify-between"><span class="font-medium text-fg">Temperature</span><span class="text-fg-2 tabular-nums">{form.temperature.toFixed(1)}</span></span>
             <input type="range" min="0" max="2" step="0.1" bind:value={form.temperature} class="w-full accent-[var(--fg-2)]" />
@@ -232,7 +256,7 @@
         <section id="settings-instructions" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
           <div class="flex items-baseline">
             <h2 class="font-serif text-[20px]">System instructions</h2>
-            <button class="ml-auto inline-flex items-center gap-1 text-[12px] text-muted hover:text-fg" title={app.settings!.configPath} onclick={() => window.api.settings.openConfigFile()}>
+            <button class="ml-auto inline-flex items-center gap-1 text-[12px] text-muted hover:text-fg" use:tip={app.settings!.configPath} onclick={() => window.api.settings.openConfigFile()}>
               Open config.json <Icon name="external" size={11} />
             </button>
           </div>
@@ -310,6 +334,32 @@
           <div class="mt-6">
             <span class="mb-1.5 block font-medium text-fg">Code font</span>
             {@render fontPicker(CODE_FONTS, appearance.prefs.code, (id) => appearance.set('code', id), '{ }')}
+          </div>
+        </section>
+
+        <section id="settings-about" class="scroll-mt-6 pt-8 pb-10 shadow-[0_-1px_0_var(--line)] mt-10">
+          <h2 class="font-serif text-[20px]">About</h2>
+          <div class="mt-4 flex items-center gap-4">
+            <span class="grid size-14 place-items-center rounded-xl bg-[#0b0b0c] text-white"><Logo size={44} /></span>
+            <div class="min-w-0 flex-1">
+              <div class="font-medium text-fg">chat-v2 {app.update?.current ?? ''}</div>
+              <div class="text-muted">
+                {#if !app.update || app.update.status === 'unsupported'}
+                  Development build. Updates apply to installed versions.
+                {:else if app.update.next}
+                  Version {app.update.next} is available.
+                {:else}
+                  Updates are checked every 30 minutes.
+                {/if}
+              </div>
+            </div>
+            <button
+              class="rounded-md bg-surface px-3 py-1.5 text-fg-2 shadow-[0_0_0_1px_var(--line)] hover:text-fg disabled:opacity-50"
+              disabled={checking || !app.update || app.update.status === 'unsupported'}
+              onclick={checkUpdates}
+            >
+              {checking ? 'Checking…' : 'Check for updates'}
+            </button>
           </div>
         </section>
       </div>

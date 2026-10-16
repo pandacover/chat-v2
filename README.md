@@ -39,6 +39,17 @@ bun test           # unit + integration tests (line buffer, SSE, artifacts, chat
 
 > If `ELECTRON_RUN_AS_NODE=1` is set in your shell (some editors/terminals that are themselves Electron apps set it), unset it before `bun run dev`/`preview`, or Electron starts as plain Node.
 
+## Releases and updates
+
+Every push to `main` runs `.github/workflows/release.yml`. It tests, sets the version to `0.1.<run number>`, builds a Windows installer (`.exe`) and a macOS universal `.dmg`, and publishes them as a [release of this repo](https://github.com/pandacover/chat-v2/releases). It uses the workflow's own token, so no secrets are needed.
+
+Installed apps check for updates on launch and every 30 minutes. When one is out, an update button appears at the bottom of the sidebar:
+
+- **Windows:** downloads the update and restarts into it.
+- **macOS:** builds are unsigned, so the app downloads the new DMG and opens it; drag chat-v2 into Applications to replace the old one.
+
+The logo is generated: edit `src/shared/logo.ts`, then run `bun scripts/make-icons.ts`.
+
 ## Configuration
 
 Files live in Electron's user-data folder (`%APPDATA%\chat-v2` on Windows, `~/Library/Application Support/chat-v2` on macOS, `~/.config/chat-v2` on Linux):

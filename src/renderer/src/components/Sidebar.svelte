@@ -1,10 +1,13 @@
 <script lang="ts">
+  import { tip } from '@/lib/tooltip'
   import { flip } from 'svelte/animate'
   import type { Session } from '@shared/types'
   import { ease, fade, fly } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
   import { theme, type ThemePref } from '@/lib/theme.svelte'
   import Icon, { type IconName } from './Icon.svelte'
+  import Logo from './Logo.svelte'
+  import UpdateButton from './UpdateButton.svelte'
 
   let query = $state('')
   let renaming = $state<string | null>(null)
@@ -61,12 +64,13 @@
 >
   <div class="flex h-full w-[252px] flex-col">
     <div class="flex h-12 items-center gap-1 pr-2 pl-4">
+      <Logo size={22} class="-ml-1 text-fg" />
       <span class="font-serif text-[17px] tracking-tight italic">chat</span>
       <span class="ml-auto"></span>
-      <button class="icon-btn" title="Hide sidebar (Ctrl+B)" onclick={() => (app.sidebarOpen = false)}>
+      <button class="icon-btn" use:tip={{ text: 'Hide sidebar', kbd: 'Ctrl B' }} onclick={() => (app.sidebarOpen = false)}>
         <Icon name="sidebar" size={17} />
       </button>
-      <button class="icon-btn" title="New chat (Ctrl+N)" onclick={() => app.newSession()}>
+      <button class="icon-btn" use:tip={{ text: 'New chat', kbd: 'Ctrl N' }} onclick={() => app.newSession()}>
         <Icon name="compose" size={17} />
       </button>
     </div>
@@ -75,7 +79,7 @@
       <Icon name="search" size={14} />
       <input bind:value={query} placeholder="Search" class="w-full bg-transparent text-[13px] outline-none placeholder:text-muted" />
       {#if query}
-        <button class="text-muted hover:text-fg" title="Clear" onclick={() => (query = '')}><Icon name="x" size={13} /></button>
+        <button class="text-muted hover:text-fg" use:tip={'Clear'} onclick={() => (query = '')}><Icon name="x" size={13} /></button>
       {/if}
     </label>
 
@@ -117,12 +121,12 @@
                 onclick={() => app.open(s.id)}
                 ondblclick={() => startRename(s)}
               >
-                {#if s.forkedFromSessionId}<span class="text-muted" title="Forked chat"><Icon name="branch" size={12} /></span>{/if}
+                {#if s.forkedFromSessionId}<span class="text-muted" use:tip={'Forked chat'}><Icon name="branch" size={12} /></span>{/if}
                 <span class="truncate">{s.title}</span>
               </button>
               <div class="flex shrink-0 items-center pr-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
-                <button class="icon-btn !p-1" title="Rename" onclick={() => startRename(s)}><Icon name="edit" size={13} /></button>
-                <button class="icon-btn !p-1" title="Delete" onclick={() => (confirming = s.id)}><Icon name="trash" size={13} /></button>
+                <button class="icon-btn !p-1" use:tip={'Rename'} onclick={() => startRename(s)}><Icon name="edit" size={13} /></button>
+                <button class="icon-btn !p-1" use:tip={'Delete'} onclick={() => (confirming = s.id)}><Icon name="trash" size={13} /></button>
               </div>
             {/if}
           </div>
@@ -133,6 +137,7 @@
       {/each}
     </nav>
 
+    <UpdateButton />
     <div class="flex items-center gap-1 px-2 py-2">
       <button
         class="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] text-fg-2 transition-colors hover:bg-hover hover:text-fg"
@@ -145,7 +150,7 @@
           <button
             role="radio"
             aria-checked={theme.pref === t.id}
-            title={t.label}
+            use:tip={t.label}
             class="grid size-6 place-items-center rounded-sm transition-colors {theme.pref === t.id ? 'bg-surface text-fg shadow-[0_1px_2px_#0000001a]' : 'text-muted hover:text-fg'}"
             onclick={() => theme.set(t.id)}
           >
@@ -160,7 +165,7 @@
 {#if !app.sidebarOpen}
   <button
     class="icon-btn fixed top-2.5 left-2.5 z-30"
-    title="Show sidebar (Ctrl+B)"
+    use:tip={{ text: 'Show sidebar', kbd: 'Ctrl B' }}
     in:fly={{ x: -6, duration: 180 }}
     onclick={() => (app.sidebarOpen = true)}
   >

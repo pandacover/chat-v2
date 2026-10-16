@@ -1,9 +1,11 @@
 <script lang="ts">
+  import { tip } from '@/lib/tooltip'
   import { tick } from 'svelte'
   import { fade, fly, pop } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
   import Composer from './Composer.svelte'
   import Icon from './Icon.svelte'
+  import Logo from './Logo.svelte'
   import MessageItem from './MessageItem.svelte'
 
   let scroller: HTMLDivElement | undefined = $state()
@@ -73,6 +75,15 @@
     })
   })
 
+  const toggleBrowser = async () => {
+    const next = !(view?.session.browserEnabled ?? false)
+    await app.updateSession({ browserEnabled: next })
+    if (!next) return
+    app.openBrowser()
+    const info = app.models.find((m) => m.id === model)
+    if (info && !info.supportsTools) app.toast(`${info.name} can't use tools, so it can't drive the browser. Pick a model marked "tools".`)
+  }
+
   const openPrompt = () => {
     promptDraft = view?.session.systemPrompt ?? app.settings?.settings.systemPrompt ?? ''
     promptOpen = true
@@ -95,6 +106,14 @@
     {:else}
       <span class="flex-1"></span>
     {/if}
+    <button
+      class="icon-btn relative {app.browserOpen ? '!text-fg' : ''}"
+      use:tip={app.browserOpen ? 'Hide browser' : 'Open browser'}
+      onclick={() => (app.browserOpen && app.activeTab === 'browser' ? app.closeBrowser() : app.openBrowser())}
+    >
+      <Icon name="globe" size={16} />
+      {#if app.control.active}<span class="absolute top-1 right-1 size-1.5 rounded-full bg-accent"></span>{/if}
+    </button>
   </header>
 
   {#if empty}<div class="flex-1"></div>{/if}
@@ -103,6 +122,7 @@
     <div bind:this={scroller} {onscroll} class="h-full overflow-y-auto {empty ? 'overflow-hidden' : ''}">
       {#if empty}
         <div class="mx-auto max-w-[720px] px-6 pb-6 text-center" in:fade={{ duration: 260 }}>
+          <Logo size={64} class="mx-auto mb-5 text-fg" />
           <h2 class="font-serif text-[34px] leading-tight font-[420] tracking-[-0.015em]">{greeting}.</h2>
           {#if app.settings && !app.settings.hasOpenRouterKey}
             <button class="mt-3 text-[14px] text-fg-2 underline decoration-muted underline-offset-4 hover:decoration-fg" onclick={() => (app.settingsOpen = true)}>
@@ -122,7 +142,7 @@
     {#if !pinned && !empty}
       <button
         class="absolute bottom-3 left-1/2 grid size-8 -translate-x-1/2 place-items-center rounded-full bg-surface text-fg-2 shadow-float hover:text-fg"
-        title="Jump to latest"
+        use:tip={'Jump to latest'}
         transition:fly={{ y: 6, duration: 160 }}
         onclick={() => toBottom('smooth')}
       >
@@ -139,6 +159,8 @@
       onmodel={(id) => app.updateSession({ model: id })}
       customInstructions={hasOverride}
       oninstructions={openPrompt}
+      browserEnabled={view?.session.browserEnabled ?? false}
+      onbrowser={toggleBrowser}
     />
   </div>
 

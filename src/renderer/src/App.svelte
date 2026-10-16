@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import ArtifactPanel from './components/ArtifactPanel.svelte'
+  import BrowserPanel from './components/BrowserPanel.svelte'
   import ChatView from './components/ChatView.svelte'
   import Icon from './components/Icon.svelte'
   import SettingsPage from './components/SettingsPage.svelte'
@@ -71,7 +72,7 @@
     <main class="relative flex min-w-0 flex-1 bg-bg {app.sidebarOpen ? 'shadow-[-1px_0_0_var(--line)]' : ''}">
       <div class="flex min-w-0 flex-1" inert={app.page !== 'chat'}>
         <ChatView />
-        {#if app.artifact && app.artifactVersions.length > 0}
+        {#if app.panelOpen}
           <div class="relative flex shrink-0 justify-end overflow-hidden" style="width: {panelWidth}px" transition:reveal={{ width: panelWidth }}>
             <div class="relative flex h-full shrink-0" style="width: {panelWidth}px">
               <div
@@ -83,7 +84,35 @@
               >
                 <span class="absolute inset-y-0 left-0 w-px bg-line transition-colors group-hover:bg-muted {resizing ? '!bg-fg-2' : ''}"></span>
               </div>
-              <div class="min-w-0 flex-1 {resizing ? 'pointer-events-none' : ''}"><ArtifactPanel /></div>
+              <div class="flex min-w-0 flex-1 flex-col bg-side {resizing ? 'pointer-events-none' : ''}">
+                {#if app.browserOpen && app.hasArtifact}
+                  <div class="flex shrink-0 gap-1 px-2 pt-2" role="tablist" aria-label="Panel">
+                    {#each [{ id: 'artifact', label: app.artifactVersions[0]?.block.title ?? 'Artifact', icon: 'window' }, { id: 'browser', label: app.browser.title || 'Browser', icon: 'globe' }] as t (t.id)}
+                      <button
+                        role="tab"
+                        aria-selected={app.activeTab === t.id}
+                        class="flex min-w-0 max-w-[50%] items-center gap-1.5 rounded-md px-2.5 py-1 text-[12.5px] transition-colors {app.activeTab === t.id
+                          ? 'bg-surface text-fg shadow-[0_0_0_1px_var(--line)]'
+                          : 'text-fg-2 hover:bg-hover hover:text-fg'}"
+                        onclick={() => (app.panelTab = t.id as 'artifact' | 'browser')}
+                      >
+                        <Icon name={t.icon as 'window' | 'globe'} size={13} />
+                        <span class="truncate">{t.label}</span>
+                        {#if t.id === 'browser' && app.control.active}<span class="size-1.5 shrink-0 rounded-full bg-accent"></span>{/if}
+                      </button>
+                    {/each}
+                  </div>
+                {/if}
+                <!-- Both stay mounted so switching tabs never reloads the page or the artifact. -->
+                <div class="relative min-h-0 flex-1">
+                  {#if app.hasArtifact}
+                    <div class="absolute inset-0 {app.activeTab === 'artifact' ? '' : 'invisible'}" inert={app.activeTab !== 'artifact'}><ArtifactPanel /></div>
+                  {/if}
+                  {#if app.browserOpen}
+                    <div class="absolute inset-0 {app.activeTab === 'browser' ? '' : 'invisible'}" inert={app.activeTab !== 'browser'}><BrowserPanel /></div>
+                  {/if}
+                </div>
+              </div>
             </div>
           </div>
         {/if}

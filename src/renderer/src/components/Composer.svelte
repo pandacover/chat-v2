@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tip } from '@/lib/tooltip'
   import type { Attachment } from '@shared/types'
   import { fade, pop } from '@/lib/motion'
   import { startRecording, type Recording } from '@/lib/recorder'
@@ -12,17 +13,20 @@
     model,
     onmodel,
     customInstructions = false,
-    oninstructions
+    oninstructions,
+    browserEnabled = false,
+    onbrowser
   }: {
     placeholder?: string
     model: string
     onmodel: (id: string) => void
     customInstructions?: boolean
     oninstructions: () => void
+    browserEnabled?: boolean
+    onbrowser: () => void
   } = $props()
 
   let text = $state('')
-  let attachments = $state<Attachment[]>([])
   let uploading = $state(0)
   let dragging = $state(false)
   let focused = $state(false)
@@ -39,7 +43,7 @@
   let tick: ReturnType<typeof setInterval> | undefined
 
   const busy = $derived(app.streaming)
-  const canSend = $derived((text.trim() !== '' || attachments.length > 0) && uploading === 0 && !busy)
+  const canSend = $derived((text.trim() !== '' || app.draftAttachments.length > 0) && uploading === 0 && !busy)
 
   export const focus = () => textarea?.focus()
 
@@ -56,7 +60,7 @@
         const added = await app.attempt(async () =>
           window.api.attachments.add({ name: file.name || 'pasted-image.png', mime: file.type, data: await file.arrayBuffer() })
         )
-        if (added) attachments.push(added)
+        if (added) app.addDraftAttachment(added)
       } finally {
         uploading -= 1
       }
@@ -65,22 +69,22 @@
   }
 
   const removeAttachment = (a: Attachment) => {
-    attachments = attachments.filter((x) => x.id !== a.id)
+    app.draftAttachments = app.draftAttachments.filter((x) => x.id !== a.id)
     void window.api.attachments.discard(a.id)
   }
 
   const submit = async () => {
     if (!canSend) return
     const body = text
-    const files = attachments
+    const files = app.draftAttachments
     text = ''
-    attachments = []
+    app.draftAttachments = []
     queueMicrotask(fit)
     const ok = await app.send(body, files)
     if (!ok) {
       // Put the draft back so nothing is lost.
       text = body
-      attachments = files
+      app.draftAttachments = files
       queueMicrotask(fit)
     }
   }
@@ -215,9 +219,9 @@
     ? 'shadow-[0_0_0_1px_var(--muted),var(--shadow)]'
     : 'shadow-[0_0_0_1px_var(--line),var(--shadow)]'}"
 >
-  {#if attachments.length > 0 || uploading > 0}
+  {#if app.draftAttachments.length > 0 || uploading > 0}
     <div class="flex flex-wrap items-center gap-1.5 px-3 pt-3">
-      {#each attachments as a (a.id)}<AttachmentChip attachment={a} onremove={() => removeAttachment(a)} />{/each}
+      {#each app.draftAttachments as a (a.id)}<AttachmentChip attachment={a} onremove={() => removeAttachment(a)} />{/each}
       {#if uploading > 0}<span class="px-1 text-[12px] text-muted" in:fade>Uploading…</span>{/if}
     </div>
   {/if}
@@ -261,10 +265,10 @@
         void addFiles([...(input.files ?? [])]).then(() => (input.value = ''))
       }}
     />
-    <button class="icon-btn" title="Attach files" onclick={() => fileInput?.click()}><Icon name="paperclip" size={17} /></button>
+    <button class="icon-btn" use:tip={'Attach files'} onclick={() => fileInput?.click()}><Icon name="paperclip" size={17} /></button>
     <button
       class="icon-btn select-none {recording ? '!bg-accent !text-on-accent' : ''}"
-      title="Voice input: hold to talk, or click to start and stop (Ctrl+M)"
+      use:tip={{ text: 'Voice: hold to talk, or click to start and stop', kbd: 'Ctrl M' }}
       disabled={transcribing}
       onpointerdown={micDown}
       onpointerup={micUp}
@@ -273,8 +277,19 @@
       <Icon name="mic" size={17} />
     </button>
 
+    <button
+      class="ml-0.5 flex h-7 items-center gap-1.5 rounded-full px-2.5 text-[12.5px] transition-colors {browserEnabled
+        ? 'bg-fg text-bg'
+        : 'text-fg-2 hover:bg-hover hover:text-fg'}"
+      role="switch"
+      aria-checked={browserEnabled}
+      use:tip={browserEnabled ? 'The assistant can use the browser in this chat' : 'Let the assistant use the browser in this chat'}
+      onclick={onbrowser}
+    >
+      <Icon name="globe" size={14} /> Browser
+    </button>
     <span class="ml-auto"></span>
-    <button class="icon-btn relative" title="Instructions for this chat" onclick={oninstructions}>
+    <button class="icon-btn relative" use:tip={'Instructions for this chat'} onclick={oninstructions}>
       <Icon name="sliders" size={16} />
       {#if customInstructions}<span class="absolute top-1 right-1 size-1.5 rounded-full bg-fg"></span>{/if}
     </button>
@@ -285,7 +300,7 @@
         : canSend
           ? 'bg-accent text-on-accent'
           : 'bg-hover text-muted'}"
-      title={busy ? 'Stop generating' : 'Send (Enter)'}
+      use:tip={busy ? 'Stop generating' : { text: 'Send', kbd: 'Enter' }}
       disabled={!busy && !canSend}
       onclick={() => (busy ? app.stop() : submit())}
     >

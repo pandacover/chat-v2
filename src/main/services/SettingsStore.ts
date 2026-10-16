@@ -12,7 +12,8 @@ export const DEFAULT_SETTINGS: Settings = {
   sttModel: 'scribe_v2',
   sttLanguage: '',
   pdfEngine: 'cloudflare-ai',
-  artifactsEnabled: true
+  artifactsEnabled: true,
+  visionModel: ''
 }
 
 const PDF_ENGINES: ReadonlyArray<Settings['pdfEngine']> = ['cloudflare-ai', 'mistral-ocr', 'native']
@@ -31,7 +32,8 @@ export const normalizeSettings = (raw: unknown): Settings => {
     sttLanguage: str('sttLanguage', DEFAULT_SETTINGS.sttLanguage).trim(),
     pdfEngine: pdfEngine ?? DEFAULT_SETTINGS.pdfEngine,
     artifactsEnabled:
-      typeof input.artifactsEnabled === 'boolean' ? input.artifactsEnabled : DEFAULT_SETTINGS.artifactsEnabled
+      typeof input.artifactsEnabled === 'boolean' ? input.artifactsEnabled : DEFAULT_SETTINGS.artifactsEnabled,
+    visionModel: str('visionModel', DEFAULT_SETTINGS.visionModel).trim()
   }
 }
 
