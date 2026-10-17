@@ -50,9 +50,12 @@ export const checkForUpdates = async () => {
   return state
 }
 
+/** Releases ship one DMG per architecture. An Intel build running under Rosetta moves to the native one. */
+const macArch = () => (process.arch === 'arm64' || app.runningUnderARM64Translation ? 'arm64' : 'x64')
+
 /** macOS: fetch the DMG with progress into Downloads and open it. */
 const downloadDmg = async (version: string) => {
-  const url = `${RELEASES}/download/v${version}/chat-v2-${version}-universal.dmg`
+  const url = `${RELEASES}/download/v${version}/chat-v2-${version}-${macArch()}.dmg`
   const file = join(app.getPath('downloads'), `chat-v2-${version}.dmg`)
   set({ status: 'downloading', percent: 0, error: null })
   const res = await net.fetch(url)
@@ -62,7 +65,8 @@ const downloadDmg = async (version: string) => {
   const body = Readable.fromWeb(res.body as import('node:stream/web').ReadableStream<Uint8Array>)
   body.on('data', (chunk: Buffer) => {
     received += chunk.length
-    if (total) set({ percent: Math.round((received / total) * 100) })
+    const percent = Math.round((received / total) * 100)
+    if (total && percent !== state.percent) set({ percent })
   })
   await pipeline(body, createWriteStream(file))
   set({ status: 'ready', percent: 100 })

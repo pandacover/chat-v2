@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
+import { DatabaseSync, type SQLInputValue, type StatementSync } from 'node:sqlite'
 import { Context, Effect, Layer } from 'effect'
 import type {
   Attachment,
@@ -177,10 +177,21 @@ export const makeDb = (file: string) => {
     db.exec('commit')
   })
 
-  const all = <T>(sql: string, ...params: SQLInputValue[]) => db.prepare(sql).all(...params) as unknown as T[]
-  const one = <T>(sql: string, ...params: SQLInputValue[]) =>
-    db.prepare(sql).get(...params) as unknown as T | undefined
-  const run = (sql: string, ...params: SQLInputValue[]) => db.prepare(sql).run(...params)
+  // Statements are compiled once and reused: loading a chat runs a few per message, and a
+  // streaming reply one per line.
+  const statements = new Map<string, StatementSync>()
+  const prepare = (sql: string) => {
+    let statement = statements.get(sql)
+    if (!statement) {
+      // `in (?, ?, …)` lists make a new statement per length; don't keep those forever.
+      if (statements.size >= 256) statements.clear()
+      statements.set(sql, (statement = db.prepare(sql)))
+    }
+    return statement
+  }
+  const all = <T>(sql: string, ...params: SQLInputValue[]) => prepare(sql).all(...params) as unknown as T[]
+  const one = <T>(sql: string, ...params: SQLInputValue[]) => prepare(sql).get(...params) as unknown as T | undefined
+  const run = (sql: string, ...params: SQLInputValue[]) => prepare(sql).run(...params)
 
   // Re-entrant: nested calls join the outer transaction (SQLite has no nested BEGIN).
   const transaction = <A>(f: () => A): A => {

@@ -14,6 +14,8 @@ export const makeLineBuffer = (): LineBuffer => {
   return {
     push(delta) {
       pending += delta
+      // Without this, a long line (minified artifact HTML) is re-split on every delta.
+      if (!delta.includes('\n')) return []
       const parts = pending.split('\n')
       pending = parts.pop() ?? ''
       // A `\r` at the end of `pending` may be the first half of a split `\r\n`; it is

@@ -20,9 +20,14 @@
   const isBoard = $derived(current?.block.kind === 'moodboard')
   let board: ReturnType<typeof Moodboard> | undefined = $state()
 
+  // Plain strings, so a streamed line that leaves the artifact unchanged doesn't
+  // re-publish it or re-highlight its code.
+  const source = $derived(current?.block.content ?? '')
+  const html = $derived(current?.block.kind === 'html' ? source : undefined)
+  const highlighted = $derived(hljs.highlight(source, { language: isBoard ? 'json' : 'xml' }).value)
+
   $effect(() => {
-    const html = current?.block.content
-    if (html === undefined || current?.block.kind !== 'html') return
+    if (html === undefined) return
     let cancelled = false
     void window.api.artifacts.publish(html).then((u) => {
       if (cancelled) return
@@ -145,7 +150,7 @@
           {/if}
         {:else}
           <div class="h-full overflow-auto px-4 py-3" in:fade={{ duration: 140 }}>
-            <pre class="text-[12.5px] leading-relaxed"><code class="hljs font-mono">{@html hljs.highlight(current.block.content, { language: isBoard ? 'json' : 'xml' }).value}</code></pre>
+            <pre class="text-[12.5px] leading-relaxed"><code class="hljs font-mono">{@html highlighted}</code></pre>
           </div>
         {/if}
       </div>

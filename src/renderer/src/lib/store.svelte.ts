@@ -61,23 +61,32 @@ class AppState {
   private toastSeq = 0
   private backfilling = new Map<string, Promise<void>>()
 
-  get streaming(): boolean {
-    return this.view?.path.some((n) => n.message.status === 'streaming') ?? false
-  }
+  // Derived rather than getters: these are read all over the layout, and a getter would
+  // re-scan (and for artifacts, re-parse) the whole conversation on every streamed line.
+  streaming = $derived(this.view?.path.some((n) => n.message.status === 'streaming') ?? false)
 
-  get hasArtifact(): boolean {
-    return this.artifact !== null && this.artifactVersions.length > 0
-  }
+  /** Every complete version of the open artifact along the visible branch. */
+  artifactVersions = $derived.by(() => {
+    const open = this.artifact
+    if (!open || !this.view) return []
+    const out: Array<{ messageId: string; block: ArtifactBlock }> = []
+    for (const { message } of this.view.path) {
+      if (message.role !== 'assistant') continue
+      for (const b of parseContent(message.content)) {
+        if (b.type === 'artifact' && b.complete && b.identifier === open.identifier) out.push({ messageId: message.id, block: b })
+      }
+    }
+    return out
+  })
 
-  get panelOpen(): boolean {
-    return this.browserOpen || this.hasArtifact
-  }
+  hasArtifact = $derived(this.artifact !== null && this.artifactVersions.length > 0)
+
+  panelOpen = $derived(this.browserOpen || this.hasArtifact)
 
   /** The visible tab, falling back to whichever one exists. */
-  get activeTab(): 'artifact' | 'browser' {
-    if (this.panelTab === 'browser' && this.browserOpen) return 'browser'
-    return this.hasArtifact ? 'artifact' : 'browser'
-  }
+  activeTab = $derived<'artifact' | 'browser'>(
+    this.panelTab === 'browser' && this.browserOpen ? 'browser' : this.hasArtifact ? 'artifact' : 'browser'
+  )
 
   showArtifact(artifact: OpenArtifact) {
     this.artifact = artifact
@@ -129,20 +138,6 @@ class AppState {
       this.cursor.visible = true
       if (e.click) this.cursor.clicks += 1
     }
-  }
-
-  /** Every complete version of the open artifact along the visible branch. */
-  get artifactVersions(): Array<{ messageId: string; block: ArtifactBlock }> {
-    const open = this.artifact
-    if (!open || !this.view) return []
-    const out: Array<{ messageId: string; block: ArtifactBlock }> = []
-    for (const { message } of this.view.path) {
-      if (message.role !== 'assistant') continue
-      for (const b of parseContent(message.content)) {
-        if (b.type === 'artifact' && b.complete && b.identifier === open.identifier) out.push({ messageId: message.id, block: b })
-      }
-    }
-    return out
   }
 
   async init() {

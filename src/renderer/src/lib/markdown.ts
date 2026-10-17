@@ -41,8 +41,42 @@ const closeOpenFence = (md: string) => {
   return fences && fences.length % 2 === 1 ? `${md}\n\`\`\`` : md
 }
 
+const sanitize = (html: string) =>
+  DOMPurify.sanitize(html, { ADD_ATTR: ['target', 'data-copy'], FORBID_TAGS: ['style', 'iframe', 'form'] })
+
 export const renderMarkdown = (md: string, streaming = false): string => {
   const source = streaming ? closeOpenFence(md) : md
-  const html = marked.parse(source, { async: false }) as string
-  return DOMPurify.sanitize(html, { ADD_ATTR: ['target', 'data-copy'], FORBID_TAGS: ['style', 'iframe', 'form'] })
+  return sanitize(marked.parse(source, { async: false }) as string)
+}
+
+/** Top-level blocks whose HTML is complete on its own (raw HTML can open a tag in one block and close it in another). */
+const SELF_CONTAINED = new Set(['space', 'paragraph', 'heading', 'code', 'list', 'blockquote', 'table', 'hr'])
+
+/**
+ * Like renderMarkdown, but as one HTML string per top-level block, each rendered once and
+ * remembered by its source. Re-rendering the whole message on every streamed line cost
+ * O(length²) (with every code block re-highlighted); this way only the block still being
+ * written is redone, and the finished ones keep their DOM.
+ */
+export const blockRenderer = () => {
+  let cache = new Map<string, string>()
+  return (md: string, streaming = false): string[] => {
+    const tokens = marked.lexer(streaming ? closeOpenFence(md) : md)
+    // Reference-style link definitions apply across blocks, so render those messages whole.
+    if (Object.keys(tokens.links).length > 0 || tokens.some((t) => !SELF_CONTAINED.has(t.type))) {
+      cache = new Map()
+      return [renderMarkdown(md, streaming)]
+    }
+    const next = new Map<string, string>()
+    const blocks: string[] = []
+    for (const token of tokens) {
+      const html = cache.get(token.raw) ?? next.get(token.raw) ?? sanitize(marked.parser([token]))
+      next.set(token.raw, html)
+      if (html) blocks.push(html)
+    }
+    // Keep only this pass's blocks, so a streaming block's earlier versions don't pile up,
+    // and nothing once the message is finished (it doesn't render again).
+    cache = streaming ? next : new Map()
+    return blocks
+  }
 }

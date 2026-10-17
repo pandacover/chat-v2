@@ -44,12 +44,12 @@ bun test           # unit + integration tests (line buffer, SSE, artifacts, chat
 
 ## Releases and updates
 
-Every push to `main` runs `.github/workflows/release.yml`. It tests, sets the version to `0.1.<run number>`, builds a Windows installer (`.exe`) and a macOS universal `.dmg`, and publishes them as a [release of this repo](https://github.com/pandacover/chat-v2/releases). It uses the workflow's own token, so no secrets are needed.
+Every push to `main` runs `.github/workflows/release.yml`. It tests, sets the version to `0.1.<run number>`, builds a Windows installer (`.exe`) and macOS `.dmg`s for Apple Silicon (`-arm64`) and Intel (`-x64`), and publishes them as a [release of this repo](https://github.com/pandacover/chat-v2/releases). It uses the workflow's own token, so no secrets are needed.
 
 Installed apps check for updates on launch and every 30 minutes. When one is out, an update button appears at the bottom of the sidebar:
 
 - **Windows:** downloads the update and restarts into it.
-- **macOS:** builds are only ad-hoc signed (no Developer ID), so the app downloads the new DMG and opens it; drag chat-v2 into Applications to replace the old one.
+- **macOS:** builds are only ad-hoc signed (no Developer ID), so the app downloads the new DMG for its architecture and opens it; drag chat-v2 into Applications to replace the old one.
 
 The logo is generated: edit `src/shared/logo.ts`, then run `bun scripts/make-icons.ts`.
 

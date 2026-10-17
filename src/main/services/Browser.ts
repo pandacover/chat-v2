@@ -244,11 +244,17 @@ export class Browser extends Context.Service<Browser, BrowserApi>()('chat-v2/Bro
         attempt('Screenshot', async () => {
           const r = rect ? { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.max(1, Math.round(rect.width)), height: Math.max(1, Math.round(rect.height)) } : undefined
           const image = await wc.capturePage(r)
-          const size = image.getSize()
-          const small = size.width > 1280 ? image.resize({ width: 1280 }) : image
+          // Each caller wants one of the two, and encoding blocks the main process
+          // (a full-size PNG especially), so neither is encoded until it is read.
+          let dataUrl: string | undefined
+          let png: Uint8Array<ArrayBuffer> | undefined
           return {
-            dataUrl: `data:image/jpeg;base64,${small.toJPEG(72).toString('base64')}`,
-            png: Uint8Array.from(image.toPNG())
+            get dataUrl() {
+              return (dataUrl ??= `data:image/jpeg;base64,${(image.getSize().width > 1280 ? image.resize({ width: 1280 }) : image).toJPEG(72).toString('base64')}`)
+            },
+            get png() {
+              return (png ??= Uint8Array.from(image.toPNG()))
+            }
           }
         })
 

@@ -68,13 +68,14 @@ jobs:
       - name: Check the macOS signature
         if: runner.os == 'macOS'
         run: |
-          app=dist/mac-universal/chat-v2.app
-          codesign --verify --deep --strict --verbose=2 "$app"
-          info=$(codesign -dv --verbose=2 "$app" 2>&1)
-          echo "$info"
-          grep -qx 'Identifier=com.pandacover.chatv2' <<<"$info"
-          codesign -d --entitlements - "$app" 2>&1 | grep -q com.apple.security.device.audio-input
-          plutil -p "$app/Contents/Info.plist" | grep -q NSMicrophoneUsageDescription
+          for app in dist/mac/chat-v2.app dist/mac-arm64/chat-v2.app dist/mac-universal/chat-v2.app; do
+            codesign --verify --deep --strict --verbose=2 "$app"
+            info=$(codesign -dv --verbose=2 "$app" 2>&1)
+            echo "$info"
+            grep -qx 'Identifier=com.pandacover.chatv2' <<<"$info"
+            codesign -d --entitlements - "$app" 2>&1 | grep -q com.apple.security.device.audio-input
+            plutil -p "$app/Contents/Info.plist" | grep -q NSMicrophoneUsageDescription
+          done
 
   publish:
     needs: build

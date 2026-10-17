@@ -4,10 +4,6 @@
   "workspaces": {
     "": {
       "name": "chat-v2",
-      "dependencies": {
-        "effect": "^4.0.5",
-        "electron-updater": "^6.8.9",
-      },
       "devDependencies": {
         "@fontsource-variable/geist": "^5.3.0",
         "@fontsource-variable/geist-mono": "^5.3.0",
@@ -26,8 +22,10 @@
         "@types/bun": "^1.4.3",
         "@types/node": "^26.6.5",
         "dompurify": "^3.4.17",
+        "effect": "^4.0.5",
         "electron": "^44.7.2",
         "electron-builder": "^26.15.3",
+        "electron-updater": "^6.8.9",
         "electron-vite": "^6.0.0",
         "highlight.js": "^11.12.0",
         "marked": "^18.1.1",

@@ -11,6 +11,9 @@ files:
   - package.json
   - "!out-test/**"
 asar: true
+# The UI is English-only, so Chromium's other locale packs (about 48 MB) are left out.
+# "en-US" also keeps macOS's en.lproj.
+electronLanguages: [en-US]
 
 win:
   icon: build/icon.png
@@ -38,12 +41,15 @@ mac:
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
     NSMicrophoneUsageDescription: chat-v2 uses the microphone for voice input.
+  # One build per architecture: a universal app carries both and is twice the size.
   target:
+    # The universal DMG is only for apps from before the split, whose updater downloads
+    # "-universal.dmg". Drop it once those have updated.
     - target: dmg
-      arch: [universal]
+      arch: [arm64, x64, universal]
     # The zip carries the update metadata (latest-mac.yml).
     - target: zip
-      arch: [universal]
+      arch: [arm64, x64]
   artifactName: ${productName}-${version}-${arch}.${ext}
 
 # Installers are published as releases of this (public) repository.

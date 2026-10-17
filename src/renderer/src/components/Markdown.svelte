@@ -1,17 +1,18 @@
 <script lang="ts">
-  import { renderMarkdown } from '@/lib/markdown'
+  import { blockRenderer } from '@/lib/markdown'
 
   let { source, streaming = false, live = false }: { source: string; streaming?: boolean; live?: boolean } = $props()
 
-  const html = $derived(renderMarkdown(source, streaming))
+  const render = blockRenderer()
+  const blocks = $derived(render(source, streaming))
   let el: HTMLDivElement | undefined = $state()
   let seen = 0
   const reduce = matchMedia('(prefers-reduced-motion: reduce)')
 
-  // {@html} rebuilds the whole block on every line, so CSS animations would replay on
-  // everything. Instead, ease in only the blocks that did not exist before this line.
+  // The block being written is rebuilt on every line, so CSS animations would replay on
+  // it. Instead, ease in only the blocks that did not exist before this line.
   $effect(() => {
-    void html
+    void blocks
     const node = el
     if (!node) return
     const count = node.children.length
@@ -37,4 +38,4 @@
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="prose-chat" bind:this={el} {onclick}>{@html html}</div>
+<div class="prose-chat" bind:this={el} {onclick}>{#each blocks as block}{@html block}{/each}</div>
