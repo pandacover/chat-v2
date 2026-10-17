@@ -7,6 +7,7 @@
   import Icon from './Icon.svelte'
   import Logo from './Logo.svelte'
   import MessageItem from './MessageItem.svelte'
+  import SelectionReply from './SelectionReply.svelte'
 
   let scroller: HTMLDivElement | undefined = $state()
   let dock: HTMLDivElement | undefined = $state()
@@ -102,7 +103,10 @@
       : 'pl-14'} {scrolled && !empty ? 'shadow-[0_1px_0_var(--line)]' : ''}"
   >
     {#if view && !empty}
-      <h1 class="min-w-0 flex-1 truncate text-[13.5px] text-fg-2" in:fade>{view.session.title}</h1>
+      <!-- Keyed so the generated title fades in over the placeholder. -->
+      {#key view.session.title}
+        <h1 class="min-w-0 flex-1 truncate text-[13.5px] text-fg-2" in:fade>{view.session.title}</h1>
+      {/key}
     {:else}
       <span class="flex-1"></span>
     {/if}
@@ -177,6 +181,8 @@
 
   {#if empty}<div class="flex-[1.3]"></div>{/if}
 </div>
+
+<SelectionReply {scroller} onreply={(block) => composer?.append(block)} />
 
 {#if promptOpen}
   <div class="fixed inset-0 z-50 grid place-items-center p-6" role="dialog" aria-modal="true" aria-label="Chat instructions">

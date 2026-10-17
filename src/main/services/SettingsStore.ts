@@ -16,6 +16,8 @@ export const DEFAULT_SETTINGS: Settings = {
   visionModel: '',
   // About $0.008 per sketch at 768px.
   sketchModel: 'black-forest-labs/flux-3-image-klein',
+  // About $0.00001 per title.
+  titleModel: 'mistralai/mistral-nemo',
   alwaysOnTop: false
 }
 
@@ -38,6 +40,7 @@ export const normalizeSettings = (raw: unknown): Settings => {
       typeof input.artifactsEnabled === 'boolean' ? input.artifactsEnabled : DEFAULT_SETTINGS.artifactsEnabled,
     visionModel: str('visionModel', DEFAULT_SETTINGS.visionModel).trim(),
     sketchModel: str('sketchModel', DEFAULT_SETTINGS.sketchModel).trim() || DEFAULT_SETTINGS.sketchModel,
+    titleModel: str('titleModel', DEFAULT_SETTINGS.titleModel).trim(),
     alwaysOnTop: typeof input.alwaysOnTop === 'boolean' ? input.alwaysOnTop : DEFAULT_SETTINGS.alwaysOnTop
   }
 }

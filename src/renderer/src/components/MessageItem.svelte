@@ -13,6 +13,7 @@
   import Icon from './Icon.svelte'
   import Markdown from './Markdown.svelte'
   import { usageDetail, usageLabel } from '@/lib/usage'
+  import { listEditing } from '@/lib/textarea'
 
   let { node, last = false }: { node: PathNode; last?: boolean } = $props()
 
@@ -130,6 +131,7 @@
         {#if editing}
           <textarea
             use:autosize
+            use:listEditing
             rows="1"
             bind:value={draft}
             aria-label="Edit message"
@@ -190,7 +192,8 @@
     {/if}
   </div>
 {:else if message.role === 'assistant'}
-  <div class="group flex flex-col gap-3" in:fade={{ duration: fresh ? 200 : 0 }}>
+  <!-- data-reply-scope: text selected in here can be quoted in a reply (SelectionReply). -->
+  <div class="group flex flex-col gap-3" data-reply-scope in:fade={{ duration: fresh ? 200 : 0 }}>
     {#each blocks as block, i (i)}
       {#if block.type === 'text'}
         <Markdown source={block.content} streaming={streaming && i === blocks.length - 1} live={live && i === blocks.length - 1} />
@@ -251,7 +254,7 @@
 
     {#if !streaming}
       <div
-        class="-ml-1 flex h-6 items-center gap-0.5 transition-opacity duration-150 {last
+        class="-ml-1 flex h-6 items-center gap-0.5 transition-opacity duration-150 select-none {last
           ? 'opacity-100'
           : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}"
       >

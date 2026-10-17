@@ -4,6 +4,7 @@
   import { fade, pop } from '@/lib/motion'
   import { startRecording, type Recording } from '@/lib/recorder'
   import { app } from '@/lib/store.svelte'
+  import { applyEdit, listEditing } from '@/lib/textarea'
   import AttachmentChip from './AttachmentChip.svelte'
   import Icon from './Icon.svelte'
   import ModelPicker from './ModelPicker.svelte'
@@ -48,6 +49,15 @@
   const canSend = $derived((text.trim() !== '' || app.draftAttachments.length > 0) && uploading === 0 && app.analyzing.size === 0 && !busy)
 
   export const focus = () => textarea?.focus()
+
+  /** Adds a block (such as a quoted reply) after the draft, as one undoable step. */
+  export const append = (block: string) => {
+    if (!textarea) return
+    const head = text.trimEnd()
+    const value = head ? `${head}\n\n${block}` : block
+    applyEdit(textarea, { value, start: value.length, end: value.length })
+    textarea.scrollTop = textarea.scrollHeight
+  }
 
   const fit = () => {
     if (!textarea) return
@@ -246,6 +256,7 @@
     <textarea
       bind:this={textarea}
       bind:value={text}
+      use:listEditing
       oninput={fit}
       {onkeydown}
       {onpaste}

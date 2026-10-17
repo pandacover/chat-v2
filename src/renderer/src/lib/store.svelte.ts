@@ -371,6 +371,12 @@ class AppState {
   }
 
   private onEvent(e: StreamEvent) {
+    if (e.type === 'title') {
+      const session = this.sessions.find((s) => s.id === e.sessionId)
+      if (session) session.title = e.title
+      if (this.view?.session.id === e.sessionId) this.view.session.title = e.title
+      return
+    }
     const message = this.find(e.messageId)
     if (!message) return
     if (e.type === 'line') {

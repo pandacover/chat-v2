@@ -5,6 +5,7 @@ import { parseSseLine } from '../src/main/sse'
 import { splitSteps, stepLine, summarizeSteps } from '../src/shared/steps'
 import { normalizeSettings, DEFAULT_SETTINGS } from '../src/main/services/SettingsStore'
 import { classify } from '../src/main/services/Attachments'
+import { cleanTitle } from '../src/main/services/Chat'
 
 const feed = (deltas: string[]) => {
   const buf = makeLineBuffer()
@@ -103,6 +104,18 @@ describe('settings', () => {
   })
 })
 
+describe('titles', () => {
+  test('strips what small models wrap a title in', () => {
+    expect(cleanTitle('Debugging a React hook')).toBe('Debugging a React hook')
+    expect(cleanTitle('"Debugging a React hook."')).toBe('Debugging a React hook')
+    expect(cleanTitle('\nTitle: **Weekend trip to Goa**.\n\nThis title sums up the request.')).toBe('Weekend trip to Goa')
+    expect(cleanTitle('## “Résumé tips”')).toBe('Résumé tips')
+    expect(cleanTitle('Why is the sky blue?')).toBe('Why is the sky blue?')
+    expect(cleanTitle(' \n"" ')).toBeNull()
+    expect(cleanTitle('word '.repeat(20))).toHaveLength(58)
+  })
+})
+
 describe('attachments', () => {
   test('classifies uploads', () => {
     expect(classify('a.png', 'image/png')).toBe('image')
@@ -125,6 +138,90 @@ describe('steps', () => {
     expect(segments.map((s) => s.type)).toEqual(['text', 'steps', 'text'])
     expect(segments[1]).toMatchObject({ steps: [{ label: 'Opened example.com' }, { label: 'Clicked “Buy”' }] })
     expect(summarizeSteps(content)).toBe('Let me look.\n[Used the browser: Opened example.com; Clicked “Buy”]\nDone.')
+  })
+})
+
+describe('lists', async () => {
+  const { continueList, indentList, renumberList } = await import('../src/renderer/src/lib/lists')
+  type Edit = { value: string; start: number; end: number } | null
+  // `|` marks the caret, in the input and in what comes back.
+  const run = (f: (value: string, start: number, end: number) => Edit, text: string) => {
+    const at = text.indexOf('|')
+    const out = f(text.slice(0, at) + text.slice(at + 1), at, at)
+    return out && `${out.value.slice(0, out.start)}|${out.value.slice(out.start)}`
+  }
+  const enter = (text: string) => run(continueList, text)
+  const tab = (text: string) => run((v, s, e) => indentList(v, s, e, false), text)
+  const untab = (text: string) => run((v, s, e) => indentList(v, s, e, true), text)
+
+  test('Shift+Enter starts the next item', () => {
+    expect(enter('- milk|')).toBe('- milk\n- |')
+    expect(enter('* milk|')).toBe('* milk\n* |')
+    expect(enter('1. milk|')).toBe('1. milk\n2. |')
+    expect(enter('9) milk|')).toBe('9) milk\n10) |')
+    expect(enter('  - [x] milk|')).toBe('  - [x] milk\n  - [ ] |')
+    // Text after the caret moves to the new item.
+    expect(enter('1. milk |and eggs')).toBe('1. milk\n2. |and eggs')
+    expect(enter('- |milk')).toBe('- \n- |milk')
+  })
+
+  test('a new item in the middle of a numbered list renumbers the ones after it', () => {
+    expect(enter('1. a|\n2. b\n   1. nested\n3. c')).toBe('1. a\n2. |\n3. b\n   1. nested\n4. c')
+  })
+
+  test('Shift+Enter on an empty item ends the list, or moves a nested one out a level', () => {
+    expect(enter('- a\n- |')).toBe('- a\n|')
+    expect(enter('1. a\n2. |')).toBe('1. a\n|')
+    expect(enter('- a\n- [ ] |')).toBe('- a\n|')
+    expect(enter('1. a\n   - b\n   - |')).toBe('1. a\n   - b\n2. |')
+    expect(enter('- a\n  - |\n- c')).toBe('- a\n- |\n- c')
+  })
+
+  test('Shift+Enter outside a list is an ordinary line break', () => {
+    expect(enter('hello|')).toBeNull()
+    expect(enter('|- a')).toBeNull()
+    expect(enter('-5 degrees|')).toBeNull()
+    expect(enter('```\n- a|')).toBeNull()
+  })
+
+  test('Tab nests an item under the one before it, Shift+Tab moves it back', () => {
+    expect(tab('1. a\n2. b|\n3. c')).toBe('1. a\n   1. b|\n2. c')
+    expect(tab('- a\n- b|\n  - c')).toBe('- a\n  - b|\n    - c')
+    // It joins a sub-list that is already there, taking its marker.
+    expect(tab('1. a\n   - x\n2. b|')).toBe('1. a\n   - x\n   - b|')
+    expect(tab('1. a\n   1. x\n2. b|')).toBe('1. a\n   1. x\n   2. b|')
+    expect(untab('1. a\n   1. b|\n2. c')).toBe('1. a\n2. b|\n3. c')
+    expect(untab('1. a\n   - b|\n2. c')).toBe('1. a\n2. b|\n3. c')
+    expect(untab('- a\n  - b|\n    - c')).toBe('- a\n- b|\n  - c')
+  })
+
+  test('Tab leaves focus navigation alone when there is nothing to move', () => {
+    expect(tab('- first|')).toBeNull()
+    expect(tab('plain text|')).toBeNull()
+    expect(untab('- top|')).toBeNull()
+  })
+
+  test('Tab moves every selected item', () => {
+    const value = '1. a\n2. b\n3. c\n4. d'
+    const out = indentList(value, value.indexOf('b'), value.indexOf('c') + 1, false)
+    expect(out?.value).toBe('1. a\n   1. b\n   2. c\n2. d')
+    expect(out && out.value.slice(out.start, out.end)).toBe('b\n   2. c')
+  })
+
+  test('renumbering keeps the first number and stops at the end of the list', () => {
+    expect(run(renumberList, '1. a\n3. c|')).toBe('1. a\n2. c|')
+    expect(run(renumberList, '5. a\n7. b|\n8. c')).toBe('5. a\n6. b|\n7. c')
+    expect(run(renumberList, '1. a\n2. b|')).toBeNull()
+    expect(run(renumberList, '1. a\n\n1. b|')).toBeNull()
+    expect(run(renumberList, 'Pros:\n1. a\nCons:\n1. b|')).toBeNull()
+  })
+})
+
+describe('quoting', () => {
+  test('quotes the selection as Markdown with the reply under it', async () => {
+    const { citation } = await import('../src/renderer/src/lib/quote')
+    expect(citation('  First paragraph.\n\n\n\nSecond one.  ', ' Why? ')).toBe('> First paragraph.\n>\n> Second one.\n\nWhy?')
+    expect(citation('const a = 1\n  return a')).toBe('> const a = 1\n>   return a')
   })
 })
 

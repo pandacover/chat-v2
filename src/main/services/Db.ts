@@ -416,6 +416,9 @@ export const makeDb = (file: string) => {
       if (patch.systemPrompt !== undefined)
         run('update sessions set system_prompt = ? where id = ?', patch.systemPrompt, id)
     },
+    /** Sets the title only while it is still `expected`, so a rename in the meantime wins. */
+    retitle: (id: string, expected: string, title: string): boolean =>
+      Number(run('update sessions set title = ? where id = ? and title = ?', title, id, expected).changes) > 0,
     deleteSession,
     forkSession,
     streamingIds: (sessionId: string): string[] =>

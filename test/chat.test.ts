@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Effect, Layer, ManagedRuntime, Stream } from 'effect'
@@ -60,9 +60,12 @@ const setup = (
   script: Script,
   dir = mkdtempSync(join(tmpdir(), 'chat-v2-')),
   browserLog: string[] = [],
-  models: ModelInfo[] = []
+  models: ModelInfo[] = [],
+  // Titling is off unless a test is about it, so every request a script sees is a reply.
+  config: Record<string, unknown> = { titleModel: '' }
 ) => {
   dirs.push(dir)
+  writeFileSync(join(dir, 'config.json'), JSON.stringify(config))
   const events: StreamEvent[] = []
   const requests: ChatRequest[] = []
   const waiters: Array<() => void> = []
@@ -134,6 +137,67 @@ describe('chat', () => {
 
     const since = await t.run(Chat.use((c) => c.linesSince(view.path[1]!.message.id, 1)))
     expect(since).toEqual({ lines: ['world', 'end'], status: 'complete' })
+    await t.runtime.dispose()
+  })
+
+  test('the title model names a new chat once, from its first message', async () => {
+    const t = setup(
+      (req) => (req.model === 'tiny/titler' ? Stream.make('**"Greeting the', ' assistant."**\n') : Stream.make('Hello!')),
+      undefined,
+      [],
+      [],
+      { titleModel: 'tiny/titler' }
+    )
+    const s = await t.run(newSession)
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'Say hello', attachmentIds: [] })))
+    await t.waitForDone(1)
+    while (!t.events.some((e) => e.type === 'title')) await new Promise((r) => setTimeout(r, 5))
+
+    expect(t.events.find((e) => e.type === 'title')).toEqual({ type: 'title', sessionId: s.id, title: 'Greeting the assistant' })
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    expect(view.session.title).toBe('Greeting the assistant')
+    const titleRequest = t.requests.find((r) => r.model === 'tiny/titler')!
+    expect(titleRequest.messages.map((m) => m.role)).toEqual(['system', 'user'])
+    expect(titleRequest.messages[1]!.content).toBe('<message>\nSay hello\n</message>')
+    expect(titleRequest.tools).toBeUndefined()
+
+    // Later turns keep the title.
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: view.path[1]!.message.id, text: 'And goodbye', attachmentIds: [] })))
+    await t.waitForDone(2)
+    expect(t.requests.filter((r) => r.model === 'tiny/titler')).toHaveLength(1)
+    await t.runtime.dispose()
+  })
+
+  test('renaming a chat before its generated title arrives keeps the new name', async () => {
+    let release = () => {}
+    const gate = new Promise<void>((r) => (release = r))
+    let titled = false
+    const t = setup(
+      (req) =>
+        req.model === 'tiny/titler'
+          ? Stream.fromEffect(Effect.promise(() => gate)).pipe(
+              Stream.map(() => 'Generated title'),
+              Stream.ensuring(Effect.sync(() => (titled = true)))
+            )
+          : Stream.make('ok'),
+      undefined,
+      [],
+      [],
+      { titleModel: 'tiny/titler' }
+    )
+    const s = await t.run(newSession)
+    const sent = await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'Plan my week', attachmentIds: [] })))
+    // The start of the message stands in until the title arrives.
+    expect(sent.session.title).toBe('Plan my week')
+    await t.waitForDone(1)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { title: 'Mine' }))))
+    release()
+    while (!titled) await new Promise((r) => setTimeout(r, 5))
+    await new Promise((r) => setTimeout(r, 20))
+
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    expect(view.session.title).toBe('Mine')
+    expect(t.events.some((e) => e.type === 'title')).toBe(false)
     await t.runtime.dispose()
   })
 

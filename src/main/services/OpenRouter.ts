@@ -32,6 +32,7 @@ export interface ChatRequest {
   model: string
   messages: ChatMessage[]
   temperature?: number
+  max_tokens?: number
   plugins?: unknown[]
   tools?: ToolDefinition[]
 }

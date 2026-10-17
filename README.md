@@ -10,9 +10,12 @@ A desktop chatbot built with Electron, Svelte 5 and Effect. It talks to any mode
 | Feature | How it works |
 | --- | --- |
 | **Session history** | Every chat is stored in SQLite (`node:sqlite`, no native modules). The sidebar supports search, rename (double-click) and delete. |
+| **Chat titles** | A new chat is titled with the start of its first message right away. In the background, a small model (`titleModel`, Mistral NeMo by default, about $0.00001 a title) reads that message and renames the chat. A rename you make first is kept. Pick "None" in Settings to keep the first-message titles. |
 | **File uploads** | Attach with the paperclip, drag and drop, or paste. Images go to vision models as `image_url` parts, PDFs as OpenRouter `file` parts (parsing engine set in Settings), and text/code files are inlined. 25 MB per file. |
 | **Interactive artifacts** | The model wraps self-contained HTML/CSS/JS in `<artifact>` tags. Artifacts open in a side panel inside an opaque-origin sandboxed iframe, served from a custom `artifact://` scheme with its own CSP. The panel has preview/code tabs, a version switcher, copy, download and reload. |
 | **Speech-to-text** | Push-to-talk on the mic button: hold to talk, or click to start and stop (`Ctrl+M`). Audio is recorded as WebM/Opus and transcribed by ElevenLabs (`scribe_v2` by default). |
+| **Lists in the composer** | Shift+Enter on a Markdown list item (`-`, `*`, `+`, `1.`, `1)`, `- [ ]`) starts the next one, numbered. Shift+Enter on an empty item ends the list, or moves a nested item out a level. Tab and Shift+Tab nest and un-nest items. Numbered lists renumber when items are added, nested or deleted, and every change can be undone with Ctrl+Z. |
+| **Reply to a passage** | Select text in a reply and a **Reply** button appears above it. It opens a one-line box; press Enter and the passage goes into the composer as a Markdown quote, with what you typed under it. Quote several passages, then send. |
 | **Session branching** | Editing a message or regenerating a reply adds a sibling branch; switch with the `‹ 1/3 ›` arrows. "Fork" copies the conversation up to any message into a new, independent session. |
 | **Durable streams** | Generation runs in the main process, not the window. Each completed line is written to the database *before* it is shown. Reloading or closing the window doesn't interrupt a reply; the window reattaches from its last line offset. If the app quits mid-reply, the reply is marked *interrupted* and **Continue** resumes it (via assistant prefill), joining any half-received line. |
 | **Line-by-line streaming** | Token deltas are buffered in the main process and released only as complete lines (`src/shared/lines.ts`). |
@@ -64,7 +67,8 @@ Files live in Electron's user-data folder (`%APPDATA%\chat-v2` on Windows, `~/Li
     "sttModel": "scribe_v2",
     "sttLanguage": "",
     "pdfEngine": "cloudflare-ai",
-    "artifactsEnabled": true
+    "artifactsEnabled": true,
+    "titleModel": "mistralai/mistral-nemo"
   }
   ```
 

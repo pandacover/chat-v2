@@ -247,6 +247,11 @@
             <p class="mt-1.5 text-muted">Answers messages that include images, such as uploads or browser screenshots, when the chat's model can't see images.</p>
           </div>
           <div class="mt-5 max-w-md">
+            <span class="mb-1.5 block font-medium text-fg">Title model</span>
+            <ModelPicker block value={form.titleModel} onchange={(id) => (form.titleModel = id)} noneLabel="None: use the first message" />
+            <p class="mt-1.5 text-muted">Names each new chat from its first message. A small model is enough; the default costs about $0.00001 a title.</p>
+          </div>
+          <div class="mt-5 max-w-md">
             <span class="mb-1.5 block font-medium text-fg">Sketch model</span>
             <ModelPicker block source="image" value={form.sketchModel} onchange={(id) => (form.sketchModel = id)} />
             <p class="mt-1.5 text-muted">Draws the pencil sketches on mood boards, one image per shot. Each sketch is drawn once and kept, so reopening a board costs nothing.</p>

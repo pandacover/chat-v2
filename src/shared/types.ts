@@ -104,6 +104,8 @@ export interface Settings {
   visionModel: string
   /** Draws the sketches on mood boards (an OpenRouter image model). */
   sketchModel: string
+  /** Names new chats from their first message; '' keeps the start of the message as the title. */
+  titleModel: string
   /** Keeps the window above other apps on the same desktop. */
   alwaysOnTop: boolean
 }
@@ -138,6 +140,8 @@ export interface ModelInfo {
 export type StreamEvent =
   | { type: 'line'; messageId: string; index: number; text: string }
   | { type: 'done'; messageId: string; status: MessageStatus; error: string | null; usage: Usage | null; model: string | null }
+  /** A new chat's generated title, replacing the one taken from its first message. */
+  | { type: 'title'; sessionId: string; title: string }
 
 export interface AppError {
   tag: string

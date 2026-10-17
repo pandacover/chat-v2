@@ -131,6 +131,15 @@ body {
   background: #e5703f40;
 }
 
+/* Text being quoted in a reply stays marked while the reply is typed (SelectionReply). */
+::highlight(reply-quote) {
+  background-color: var(--accent-wash);
+  color: var(--fg);
+}
+[data-theme='dark'] ::highlight(reply-quote) {
+  background-color: #e5703f40;
+}
+
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--line) transparent;
@@ -297,6 +306,8 @@ button:disabled {
   overflow: hidden;
 }
 .code-head {
+  /* Keeps the language label and Copy out of selected (and quoted) text. */
+  user-select: none;
   display: flex;
   justify-content: space-between;
   align-items: center;
