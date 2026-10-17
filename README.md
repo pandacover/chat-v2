@@ -9,8 +9,10 @@ A desktop chatbot built with Electron, Svelte 5 and Effect. It talks to any mode
 
 | Feature | How it works |
 | --- | --- |
-| **Session history** | Every chat is stored in SQLite (`node:sqlite`, no native modules). The sidebar supports search, rename (double-click) and delete. |
-| **Chat titles** | A new chat is titled with the start of its first message right away. In the background, a small model (`titleModel`, Mistral NeMo by default, about $0.00001 a title) reads that message and renames the chat. A rename you make first is kept. Pick "None" in Settings to keep the first-message titles. |
+| **Session history** | Every chat is stored in SQLite (`node:sqlite`, no native modules). The sidebar supports search, rename (double-click), pin and delete. A new chat is saved when its first message is sent, so empty chats never pile up. |
+| **Drafts** | Each chat keeps its own unsent text and attachments. A chat with a draft moves to a **Drafts** group at the top of the sidebar, marked with a pen; a new chat appears there only while its composer has something in it. Draft text is kept on this device across restarts. |
+| **Memory** | Each message you send is checked in the background, beside the reply. A local script first drops what you pasted (code, quotes, links) and skips messages that don't talk about you; the rest go to a model (`memoryModel`, Gemini 2.5 Flash with thinking off by default) with the facts so far, which replies with facts to add, change or remove. Passwords, keys and account numbers are filtered out. A chat gets the facts once, in its system prompt, as they were when it started. Every change is a version in SQLite, so Settings → Memory can show the history and restore any earlier version. Pick "None" to turn memory off. |
+| **Chat titles** | A new chat is titled with the start of its first message right away. In the background, a small model (`titleModel`, Mistral NeMo by default, about $0.00001 a title) reads that message and renames the chat. A rename you make first is kept, and forks keep their "(fork)" title. Pick "None" in Settings to keep the first-message titles. |
 | **File uploads** | Attach with the paperclip, drag and drop, or paste. Images go to vision models as `image_url` parts, PDFs as OpenRouter `file` parts (parsing engine set in Settings), and text/code files are inlined. 25 MB per file. |
 | **Interactive artifacts** | The model wraps self-contained HTML/CSS/JS in `<artifact>` tags. Artifacts open in a side panel inside an opaque-origin sandboxed iframe, served from a custom `artifact://` scheme with its own CSP. The panel has preview/code tabs, a version switcher, copy, download and reload. |
 | **Speech-to-text** | Push-to-talk on the mic button: hold to talk, or click to start and stop (`Ctrl+M`). Audio is recorded as WebM/Opus and transcribed by ElevenLabs (`scribe_v2` by default). |
@@ -49,7 +51,7 @@ Every push to `main` runs `.github/workflows/release.yml`. It tests, sets the ve
 Installed apps check for updates on launch and every 30 minutes. When one is out, an update button appears at the bottom of the sidebar:
 
 - **Windows:** downloads the update and restarts into it.
-- **macOS:** builds are only ad-hoc signed (no Developer ID), so the app downloads the new DMG for its architecture and opens it; drag chat-v2 into Applications to replace the old one.
+- **macOS:** builds are only ad-hoc signed (no Developer ID), so the app downloads the new DMG and opens it; drag chat-v2 into Applications to replace the old one. It fetches only the DMG for this Mac's processor (Apple silicon or Intel, read from the hardware, so an Intel build running under Rosetta moves to the native one), checks it against the release's checksum, and reuses a DMG it already downloaded instead of fetching it again.
 
 The logo is generated: edit `src/shared/logo.ts`, then run `bun scripts/make-icons.ts`.
 
@@ -68,12 +70,13 @@ Files live in Electron's user-data folder (`%APPDATA%\chat-v2` on Windows, `~/Li
     "sttLanguage": "",
     "pdfEngine": "cloudflare-ai",
     "artifactsEnabled": true,
-    "titleModel": "mistralai/mistral-nemo"
+    "titleModel": "mistralai/mistral-nemo",
+    "memoryModel": "google/gemini-2.5-flash"
   }
   ```
 
 - `secrets.json`: encrypted API keys (written by the app)
-- `chat.db`: sessions, messages, branches
+- `chat.db`: sessions, messages, branches, and memory (facts and their versions)
 - `attachments/`: uploaded files
 
 For automated testing, `OPENROUTER_BASE_URL` and `ELEVENLABS_BASE_URL` point the app at a mock server, and `CHAT_V2_HEADLESS=1` keeps the window hidden (it still renders, so Playwright can drive it and take screenshots).

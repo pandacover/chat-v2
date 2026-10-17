@@ -50,7 +50,9 @@ const show = (anchor: HTMLElement, input: TipInput) => {
   const tip = ensure()
   const data = normalize(input)
   if (!data) return
-  tip.textContent = data.text
+  const text = document.createElement('span')
+  text.textContent = data.text
+  tip.replaceChildren(text)
   if (data.kbd) {
     const k = document.createElement('kbd')
     k.textContent = data.kbd

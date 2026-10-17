@@ -20,6 +20,14 @@ const api: Api = {
     update: (id, patch) => call('sessions:update', id, patch),
     fork: (sessionId, messageId) => call('sessions:fork', sessionId, messageId)
   },
+  memory: {
+    get: () => call('memory:get'),
+    add: (fact) => call('memory:add', fact),
+    edit: (id, fact) => call('memory:edit', id, fact),
+    remove: (id) => call('memory:remove', id),
+    clear: () => call('memory:clear'),
+    restore: (rev) => call('memory:restore', rev)
+  },
   chat: {
     send: (input) => call('chat:send', input),
     edit: (input) => call('chat:edit', input),

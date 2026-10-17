@@ -457,9 +457,12 @@ code.hljs {
   z-index: 100;
   pointer-events: none;
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 6px;
-  max-width: 280px;
+  /* Long tips wrap inside the pill instead of running past it (the text is the page colour,
+     so overflow vanished against the background and read as clipped). */
+  width: max-content;
+  max-width: min(300px, calc(100vw - 12px));
   padding: 4px 8px;
   border-radius: var(--radius-sm);
   background: var(--fg);
@@ -467,7 +470,8 @@ code.hljs {
   font-family: var(--font-ui);
   font-size: 12px;
   line-height: 1.35;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
   opacity: 0;
   translate: 0 2px;
   transition:
@@ -482,6 +486,8 @@ code.hljs {
   translate: 0 0;
 }
 .app-tooltip kbd {
+  flex-shrink: 0;
+  white-space: nowrap;
   font-family: var(--font-ui);
   font-size: 11px;
   opacity: 0.6;

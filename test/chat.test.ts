@@ -11,6 +11,7 @@ import { Db } from '../src/main/services/Db'
 import { type ChatDelta, type ChatRequest, OpenRouter } from '../src/main/services/OpenRouter'
 import { Browser, type BrowserApi, type PageSnapshot } from '../src/main/services/Browser'
 import { SettingsStore } from '../src/main/services/SettingsStore'
+import { ProviderError } from '../src/main/errors'
 import { layoutBoard, parseMoodboard } from '../src/shared/moodboard'
 
 type Script = (req: ChatRequest) => Stream.Stream<string | ChatDelta>
@@ -61,8 +62,8 @@ const setup = (
   dir = mkdtempSync(join(tmpdir(), 'chat-v2-')),
   browserLog: string[] = [],
   models: ModelInfo[] = [],
-  // Titling is off unless a test is about it, so every request a script sees is a reply.
-  config: Record<string, unknown> = { titleModel: '' }
+  // Titling and memory are off unless a test is about them, so every request a script sees is a reply.
+  config: Record<string, unknown> = { titleModel: '', memoryModel: '' }
 ) => {
   dirs.push(dir)
   writeFileSync(join(dir, 'config.json'), JSON.stringify(config))
@@ -198,6 +199,132 @@ describe('chat', () => {
     const view = await t.run(Chat.use((c) => c.view(s.id)))
     expect(view.session.title).toBe('Mine')
     expect(t.events.some((e) => e.type === 'title')).toBe(false)
+    await t.runtime.dispose()
+  })
+
+  test('a fork keeps its title: the title model only names new chats', async () => {
+    const t = setup(
+      (req) => (req.model === 'tiny/titler' ? Stream.make('Generated title') : Stream.make('ok')),
+      undefined,
+      [],
+      [],
+      { titleModel: 'tiny/titler', memoryModel: '' }
+    )
+    const s = await t.run(newSession)
+    const first = await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'Plan my week', attachmentIds: [] })))
+    await t.waitForDone(1)
+    while (!t.events.some((e) => e.type === 'title')) await new Promise((r) => setTimeout(r, 5))
+
+    // Forking from the first message, then sending and editing there, never asks for a title.
+    const fork = await t.run(Db.use((db) => db.use((d) => d.forkSession(s.id, first.path[0]!.message.id))))
+    expect(fork.title).toBe('Generated title (fork)')
+    const forked = await t.run(Chat.use((c) => c.view(fork.id)))
+    await t.run(Chat.use((c) => c.send({ sessionId: fork.id, parentId: forked.path[0]!.message.id, text: 'Now plan June', attachmentIds: [] })))
+    await t.waitForDone(2)
+    await t.run(Chat.use((c) => c.edit({ sessionId: fork.id, messageId: forked.path[0]!.message.id, text: 'Plan my month', attachmentIds: [] })))
+    await t.waitForDone(3)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(t.requests.filter((r) => r.model === 'tiny/titler')).toHaveLength(1)
+    expect((await t.run(Chat.use((c) => c.view(fork.id)))).session.title).toBe('Generated title (fork)')
+    await t.runtime.dispose()
+  })
+
+  test('memory: messages about the user are read beside the reply, and later chats start with what was learned', async () => {
+    const t = setup(
+      (req) => {
+        if (req.model !== 'tiny/memory') return Stream.make('ok')
+        const prompt = req.messages[1]!.content as string
+        if (prompt.includes('Porto')) return Stream.make('{"update": [{"id": 1, "fact": "Lives in Porto."}]}')
+        if (prompt.includes('Lisbon')) return Stream.make('```json\n{"add": ["Lives in Lisbon"]}\n```')
+        return Stream.make('{}')
+      },
+      undefined,
+      [],
+      [],
+      { titleModel: '', memoryModel: 'tiny/memory' }
+    )
+    const waitForMemory = async (n: number) => {
+      while (t.events.filter((e) => e.type === 'memory' && e.added.length + e.removed.length > 0).length < n) await new Promise((r) => setTimeout(r, 5))
+    }
+    const a = await t.run(newSession)
+    let view = await t.run(Chat.use((c) => c.send({ sessionId: a.id, parentId: a.rootId, text: 'I just moved to Lisbon!', attachmentIds: [] })))
+    await t.waitForDone(1)
+    await waitForMemory(1)
+    expect(t.events.find((e) => e.type === 'memory')).toEqual({ type: 'memory', sessionId: a.id, added: ['Lives in Lisbon.'], removed: [] })
+    const memoryRequest = t.requests.find((r) => r.model === 'tiny/memory')!
+    expect(memoryRequest.messages[1]!.content).toBe('Profile so far:\n(empty)\n\n<message>\nI just moved to Lisbon!\n</message>')
+
+    // Questions that aren't about the user never reach the memory model.
+    view = await t.run(Chat.use((c) => c.send({ sessionId: a.id, parentId: view.path[1]!.message.id, text: 'What is 2 + 2?', attachmentIds: [] })))
+    await t.waitForDone(2)
+    expect(t.requests.filter((r) => r.model === 'tiny/memory')).toHaveLength(1)
+    expect(await t.run(Chat.use((c) => c.lastMemoryRun))).toMatchObject({ message: 'What is 2 + 2?', model: null, outcome: 'skipped' })
+    // The first chat started before anything was known, and keeps the profile it started with.
+    expect(t.requests.filter((r) => r.model !== 'tiny/memory').at(-1)!.messages[0]!.content).not.toContain('Lisbon')
+
+    const b = await t.run(newSession)
+    await t.run(Chat.use((c) => c.send({ sessionId: b.id, parentId: b.rootId, text: 'Actually I live in Porto now', attachmentIds: [] })))
+    await t.waitForDone(3)
+    await waitForMemory(2)
+    const replyToB = t.requests.filter((r) => r.model !== 'tiny/memory').at(-1)!
+    expect(replyToB.messages[0]!.content).toContain('- Lives in Lisbon.')
+    expect(t.requests.filter((r) => r.model === 'tiny/memory').at(-1)!.messages[1]!.content).toContain('1. Lives in Lisbon.')
+    const facts = await t.run(Db.use((db) => db.use((d) => d.liveFacts())))
+    expect(facts.map((f) => f.fact)).toEqual(['Lives in Porto.'])
+    await t.runtime.dispose()
+  })
+
+  test('memory asks for no thinking, and retries with room to think if the model insists', async () => {
+    const t = setup(
+      (req) => {
+        if (req.model !== 'thinker/memory') return Stream.make('ok')
+        if (req.reasoning) return Stream.fail(new ProviderError({ provider: 'test', status: 400, message: 'Reasoning is mandatory for this endpoint' })) as unknown as Stream.Stream<string>
+        return Stream.make('{"add": ["Has a cat named Miso."]}')
+      },
+      undefined,
+      [],
+      [],
+      { titleModel: '', memoryModel: 'thinker/memory' }
+    )
+    const s = await t.run(newSession)
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'My cat Miso says hi', attachmentIds: [] })))
+    await t.waitForDone(1)
+    while (!t.events.some((e) => e.type === 'memory')) await new Promise((r) => setTimeout(r, 5))
+    const asks = t.requests.filter((r) => r.model === 'thinker/memory')
+    expect(asks.map((r) => [r.reasoning, r.max_tokens])).toEqual([
+      [{ effort: 'none' }, 400],
+      [undefined, 4000]
+    ])
+    expect((await t.run(Db.use((db) => db.use((d) => d.liveFacts())))).map((f) => f.fact)).toEqual(['Has a cat named Miso.'])
+    await t.runtime.dispose()
+  })
+
+  test('failed and unreadable memory checks are reported, not swallowed', async () => {
+    let reply: Stream.Stream<string> = Stream.make('Sorry, I cannot help with that.')
+    const t = setup((req) => (req.model === 'tiny/memory' ? reply : Stream.make('ok')), undefined, [], [], { titleModel: '', memoryModel: 'tiny/memory' })
+    const lastRun = () => t.run(Chat.use((c) => c.lastMemoryRun))
+    const s = await t.run(newSession)
+    const first = await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'I live in Oslo', attachmentIds: [] })))
+    await t.waitForDone(1)
+    while ((await lastRun())?.outcome !== 'unreadable') await new Promise((r) => setTimeout(r, 5))
+    expect((await lastRun())!.detail).toBe('Sorry, I cannot help with that.')
+
+    reply = Stream.fail(new ProviderError({ provider: 'test', status: 402, message: 'Insufficient credits' })) as unknown as Stream.Stream<string>
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: first.path[1]!.message.id, text: 'I also speak Norwegian', attachmentIds: [] })))
+    await t.waitForDone(2)
+    while ((await lastRun())?.outcome !== 'error') await new Promise((r) => setTimeout(r, 5))
+    expect(await lastRun()).toMatchObject({ message: 'I also speak Norwegian', model: 'tiny/memory', detail: 'Insufficient credits' })
+    await t.runtime.dispose()
+  })
+
+  test('with memory off, nothing is read or sent', async () => {
+    const t = setup(() => Stream.make('ok'))
+    await t.run(Db.use((db) => db.use((d) => d.changeMemory({ add: ['Likes tea.'], update: [], remove: [] }, { kind: 'edited' }))))
+    const s = await t.run(newSession)
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'I love green tea', attachmentIds: [] })))
+    await t.waitForDone(1)
+    expect(t.requests).toHaveLength(1)
+    expect(t.requests[0]!.messages[0]!.content).not.toContain('Likes tea')
     await t.runtime.dispose()
   })
 

@@ -18,6 +18,9 @@ export const DEFAULT_SETTINGS: Settings = {
   sketchModel: 'black-forest-labs/flux-3-image-klein',
   // About $0.00001 per title.
   titleModel: 'mistralai/mistral-nemo',
+  // Reads messages that talk about the user for facts; about $0.0003 a message, thinking off.
+  // Small models (Mistral NeMo) made facts up and missed ones said in passing.
+  memoryModel: 'google/gemini-2.5-flash',
   alwaysOnTop: false
 }
 
@@ -41,6 +44,7 @@ export const normalizeSettings = (raw: unknown): Settings => {
     visionModel: str('visionModel', DEFAULT_SETTINGS.visionModel).trim(),
     sketchModel: str('sketchModel', DEFAULT_SETTINGS.sketchModel).trim() || DEFAULT_SETTINGS.sketchModel,
     titleModel: str('titleModel', DEFAULT_SETTINGS.titleModel).trim(),
+    memoryModel: str('memoryModel', DEFAULT_SETTINGS.memoryModel).trim(),
     alwaysOnTop: typeof input.alwaysOnTop === 'boolean' ? input.alwaysOnTop : DEFAULT_SETTINGS.alwaysOnTop
   }
 }

@@ -18,13 +18,15 @@
     {#if u.status === 'available'}
       <button
         class="flex w-full items-center gap-2 rounded-md bg-surface px-2.5 py-2 text-left text-[13px] shadow-[0_0_0_1px_var(--line)] transition-shadow hover:shadow-[0_0_0_1px_var(--muted)]"
-        use:tip={u.manual ? 'Downloads the new version and opens it. Drag chat-v2 into Applications to replace this one.' : 'Downloads the update and restarts into it.'}
+        use:tip={u.manual
+          ? `${u.downloaded ? 'Opens' : 'Downloads'} the ${u.build ?? 'Mac'} build${u.downloaded ? ', already downloaded' : ' and opens it'}. Drag chat-v2 into Applications to replace this one.`
+          : 'Downloads the update and restarts into it.'}
         onclick={install}
       >
         <span class="grid size-5 place-items-center rounded-full bg-accent text-on-accent"><Icon name="arrowDown" size={12} stroke={2.2} /></span>
         <span class="min-w-0 flex-1">
           <span class="block text-fg">Update to {u.next}</span>
-          <span class="block text-[11.5px] text-muted">You have {u.current}</span>
+          <span class="block text-[11.5px] text-muted">{u.downloaded ? 'Downloaded, ready to open' : `You have ${u.current}`}</span>
         </span>
       </button>
     {:else if u.status === 'downloading'}

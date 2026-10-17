@@ -1,7 +1,18 @@
-import { SvelteSet } from 'svelte/reactivity'
+import { SvelteMap, SvelteSet } from 'svelte/reactivity'
 import { parseContent, type ArtifactBlock } from '@shared/artifacts'
 import type { UpdateState } from '@shared/types'
-import type { Attachment, BrowserEvent, Message, ModelInfo, Session, SessionView, SettingsView, StreamEvent } from '@shared/types'
+import type {
+  Attachment,
+  BrowserEvent,
+  MemoryView,
+  Message,
+  ModelInfo,
+  Session,
+  SessionPatch,
+  SessionView,
+  SettingsView,
+  StreamEvent
+} from '@shared/types'
 
 const api = window.api
 
@@ -15,6 +26,23 @@ export interface OpenArtifact {
   identifier: string
   /** Which message's version is shown. */
   messageId: string
+}
+
+/** Unsent composer text, keyed by chat id ('' is the new chat). `at` orders drafts in the sidebar. */
+export interface Draft {
+  text: string
+  at: number
+}
+
+const DRAFTS_KEY = 'chat-v2.drafts'
+
+const loadDrafts = (): Array<[string, Draft]> => {
+  try {
+    const raw = JSON.parse(localStorage.getItem(DRAFTS_KEY) ?? '{}') as Record<string, Draft>
+    return Object.entries(raw).filter(([, d]) => typeof d?.text === 'string' && d.text.trim() !== '')
+  } catch {
+    return []
+  }
 }
 
 /** Cleans up the "Error invoking remote method" noise Electron sometimes adds. */
@@ -46,8 +74,23 @@ class AppState {
 
   update = $state<UpdateState | null>(null)
 
-  /** Pending composer attachments. Shared so the browser panel can add captures. */
+  /** Pending composer attachments of the open chat. Shared so the browser panel can add captures. */
   draftAttachments = $state<Attachment[]>([])
+
+  /** Unsent text per chat, saved on this device so it survives a restart. */
+  drafts = new SvelteMap<string, Draft>(loadDrafts())
+  /** Pending attachments of chats that aren't open (kept for this run only). */
+  private parked = new SvelteMap<string, Attachment[]>()
+  private draftsTimer: ReturnType<typeof setTimeout> | undefined
+
+  /**
+   * Model, instructions and browser access picked for the new chat before its first message.
+   * A new chat has no database row until then, so these wait here.
+   */
+  fresh = $state<SessionPatch>({})
+
+  /** Learned facts, loaded when Settings shows them. */
+  memory = $state<MemoryView | null>(null)
 
   // The right panel holds artifacts and the built-in browser as tabs.
   browserOpen = $state(false)
@@ -77,6 +120,13 @@ class AppState {
       }
     }
     return out
+  })
+
+  /** The open chat's settings, or what has been picked for the new chat. */
+  chat = $derived({
+    model: this.view ? this.view.session.model : (this.fresh.model ?? null),
+    systemPrompt: this.view ? this.view.session.systemPrompt : (this.fresh.systemPrompt ?? null),
+    browserEnabled: this.view ? this.view.session.browserEnabled : (this.fresh.browserEnabled ?? false)
   })
 
   hasArtifact = $derived(this.artifact !== null && this.artifactVersions.length > 0)
@@ -126,6 +176,61 @@ class AppState {
     }
   }
 
+  draftText(key: string) {
+    return this.drafts.get(key)?.text ?? ''
+  }
+
+  /** Whether a chat has anything unsent: text, or attachments waiting in its composer. */
+  hasDraft(key: string) {
+    if (this.drafts.has(key)) return true
+    const open = (this.view?.session.id ?? '') === key
+    return open ? this.draftAttachments.length > 0 : (this.parked.get(key)?.length ?? 0) > 0
+  }
+
+  setDraft(key: string, text: string) {
+    const prev = this.drafts.get(key)
+    if (prev?.text === text) return
+    if (text.trim() === '') {
+      if (!prev) return
+      this.drafts.delete(key)
+    } else {
+      this.drafts.set(key, { text, at: Date.now() })
+    }
+    clearTimeout(this.draftsTimer)
+    this.draftsTimer = setTimeout(() => this.saveDrafts(), 300)
+  }
+
+  saveDrafts() {
+    clearTimeout(this.draftsTimer)
+    try {
+      localStorage.setItem(DRAFTS_KEY, JSON.stringify(Object.fromEntries(this.drafts)))
+    } catch {
+      // Storage full or unavailable: drafts still last until the app closes.
+    }
+  }
+
+  /** Called when the composer leaves a chat: its attachments wait until it comes back. */
+  parkAttachments(key: string) {
+    if (this.draftAttachments.length > 0) this.parked.set(key, this.draftAttachments)
+    else this.parked.delete(key)
+    this.draftAttachments = []
+  }
+
+  unparkAttachments(key: string) {
+    this.draftAttachments = this.parked.get(key) ?? []
+    this.parked.delete(key)
+  }
+
+  /** Throws away a chat's unsent text and attachments. */
+  discardDraft(key: string) {
+    const open = (this.view?.session.id ?? '') === key
+    const files = open ? this.draftAttachments : (this.parked.get(key) ?? [])
+    for (const a of files) void api.attachments.discard(a.id).catch(() => {})
+    if (open) this.draftAttachments = []
+    this.parked.delete(key)
+    this.setDraft(key, '')
+  }
+
   private onBrowserEvent(e: BrowserEvent) {
     if (e.type === 'open') this.openBrowser()
     else if (e.type === 'control') {
@@ -145,9 +250,13 @@ class AppState {
     api.browser.onEvent((e) => this.onBrowserEvent(e))
     api.updates.onEvent((s) => (this.update = s))
     void api.updates.get().then((s) => (this.update = s))
+    addEventListener('beforeunload', () => this.saveDrafts())
     await Promise.all([this.refreshSessions(), this.loadSettings()])
+    // Drafts of chats that are gone (deleted elsewhere, or empty ones cleared at startup).
+    for (const key of [...this.drafts.keys()]) if (key && !this.sessions.some((s) => s.id === key)) this.setDraft(key, '')
+    // An unsent new chat is where the user left off; otherwise reopen the latest chat.
     const first = this.sessions[0]
-    if (first) await this.open(first.id)
+    if (first && !this.drafts.has('')) await this.open(first.id)
     void this.loadModels()
   }
 
@@ -219,13 +328,14 @@ class AppState {
     if (view) this.setView(view)
   }
 
-  async newSession() {
-    // Reuse an untouched empty chat instead of piling up blank sessions.
-    if (this.view && this.view.path.length === 0) return
-    const view = await this.attempt(() => api.sessions.create())
-    if (!view) return
-    this.setView(view)
-    await this.refreshSessions()
+  /**
+   * Opens the new chat. It is saved when its first message is sent; until then the sidebar
+   * lists it only while its composer holds a draft.
+   */
+  newSession() {
+    if (!this.view) return
+    this.view = null
+    this.artifact = null
   }
 
   async rename(id: string, title: string) {
@@ -234,7 +344,13 @@ class AppState {
     await this.refreshSessions()
   }
 
+  async pin(id: string, pinned: boolean) {
+    await this.attempt(() => api.sessions.update(id, { pinned }))
+    await this.refreshSessions()
+  }
+
   async remove(id: string) {
+    this.discardDraft(id)
     await this.attempt(() => api.sessions.remove(id))
     await this.refreshSessions()
     if (this.view?.session.id === id) {
@@ -244,14 +360,12 @@ class AppState {
     }
   }
 
-  async updateSession(patch: { model?: string | null; systemPrompt?: string | null; browserEnabled?: boolean }) {
-    let view = this.view
-    // Picking a model or instructions before the first message starts the chat.
+  async updateSession(patch: SessionPatch) {
+    const view = this.view
+    // The new chat isn't saved yet; its settings are applied when it is.
     if (!view) {
-      view = (await this.attempt(() => api.sessions.create())) ?? null
-      if (!view) return
-      this.setView(view)
-      await this.refreshSessions()
+      this.fresh = { ...this.fresh, ...patch }
+      return
     }
     await this.attempt(() => api.sessions.update(view.session.id, patch))
     await this.open(view.session.id)
@@ -267,15 +381,25 @@ class AppState {
 
   async send(text: string, attachments: Attachment[]) {
     let view = this.view
+    // The new chat gets its row now, with whatever was picked for it.
+    const created = !view
     if (!view) {
       view = (await this.attempt(() => api.sessions.create())) ?? null
       if (!view) return false
-      this.setView(view)
+      const fresh = $state.snapshot(this.fresh)
+      const id = view.session.id
+      if (Object.keys(fresh).length > 0) await this.attempt(() => api.sessions.update(id, fresh))
     }
     const parentId = view.path.at(-1)?.message.id ?? view.session.rootId
+    const sessionId = view.session.id
     const result = await this.attempt(() =>
-      api.chat.send({ sessionId: view.session.id, parentId, text, attachmentIds: attachments.map((a) => a.id) })
+      api.chat.send({ sessionId, parentId, text, attachmentIds: attachments.map((a) => a.id) })
     )
+    if (created) {
+      // Don't leave an empty chat behind when the first message didn't go through.
+      if (!result) void api.sessions.remove(sessionId).catch(() => {})
+      else this.fresh = {}
+    }
     await this.afterTurn(result)
     return result !== undefined
   }
@@ -365,7 +489,28 @@ class AppState {
     message.lineCount += 1
   }
 
+  async loadMemory() {
+    const m = await this.attempt(() => api.memory.get())
+    if (m) this.memory = m
+  }
+
+  /** Runs a change to memory from Settings and shows the result. */
+  async editMemory(f: () => Promise<MemoryView>) {
+    const m = await this.attempt(f)
+    if (m) this.memory = m
+    return m !== undefined
+  }
+
   private onEvent(e: StreamEvent) {
+    if (e.type === 'memory') {
+      if (this.memory) void this.loadMemory()
+      const quote = (fact: string) => `“${fact.replace(/\.$/, '')}”`
+      if (e.added.length > 0)
+        this.toast(`Remembered ${e.added.length === 1 ? quote(e.added[0]!) : `${e.added.length} things about you`}`, 'info')
+      else if (e.removed.length > 0)
+        this.toast(`Forgot ${e.removed.length === 1 ? quote(e.removed[0]!) : `${e.removed.length} things about you`}`, 'info')
+      return
+    }
     if (e.type === 'title') {
       const session = this.sessions.find((s) => s.id === e.sessionId)
       if (session) session.title = e.title

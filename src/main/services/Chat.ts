@@ -1,11 +1,12 @@
-import { Cause, Context, Effect, Exit, FiberMap, Layer, Stream } from 'effect'
+import { Cause, Context, Effect, Exit, FiberMap, Layer, Semaphore, Stream } from 'effect'
 import { ARTIFACT_INSTRUCTIONS, replaceArtifacts } from '@shared/artifacts'
 import { MOODBOARD_INSTRUCTIONS, docToSpec, parseBoardDoc, specToJson } from '@shared/moodboard'
 import { makeLineBuffer } from '@shared/lines'
-import type { Message, MessageStatus, SessionView, StreamEvent, Usage } from '@shared/types'
+import type { MemoryRun, Message, MessageStatus, SessionView, StreamEvent, Usage } from '@shared/types'
 import { type DbError, InvalidInput, type NotFound, errorMessage } from '../errors'
 import { WRITING_GUIDELINES } from '../guidelines'
 import { BROWSER_INSTRUCTIONS, BROWSER_TOOLS, MAX_AGENT_STEPS, runTool } from '../agent'
+import { MEMORY_INSTRUCTIONS, askedQuestion, memoryPrompt, memorySource, parseMemoryReply, profileBlock } from '../memory'
 import { stepLine, summarizeSteps } from '@shared/steps'
 import { Attachments } from './Attachments'
 import { Db } from './Db'
@@ -70,6 +71,8 @@ export class Chat extends Context.Service<
       messageId: string,
       fromIndex: number
     ) => Effect.Effect<{ lines: string[]; status: MessageStatus }, ChatError>
+    /** What happened to the last message memory looked at (this run of the app only). */
+    readonly lastMemoryRun: Effect.Effect<MemoryRun | null>
   }
 >()('chat-v2/Chat') {
   static readonly layer = Layer.effect(
@@ -88,6 +91,16 @@ export class Chat extends Context.Service<
       const stopRequested = new Set<string>()
       // Title requests, one per new chat. They outlive the call that sent the first message.
       const titling = yield* FiberMap.make<string>()
+      // Memory reads, one per user message. They run beside the reply but one at a time,
+      // so each sees the facts the previous one saved and none adds the same fact twice.
+      const remembering = yield* FiberMap.make<string>()
+      const memoryLock = yield* Semaphore.make(1)
+      let lastMemoryRun: MemoryRun | null = null
+      /** Records how a memory check went and tells open windows (a toast when something changed). */
+      const reportMemory = (sessionId: string, run: Omit<MemoryRun, 'at' | 'added' | 'removed' | 'dropped'> & Partial<MemoryRun>) => {
+        lastMemoryRun = { at: Date.now(), added: [], removed: [], dropped: [], ...run }
+        broadcaster.send({ type: 'memory', sessionId, added: lastMemoryRun.added, removed: lastMemoryRun.removed })
+      }
 
       const view = Effect.fn('Chat.view')(function* (sessionId: string) {
         const session = yield* db.require('Session', (d) => d.getSession(sessionId))
@@ -109,6 +122,10 @@ export class Chat extends Context.Service<
         const history = yield* db.use((d) => d.lineage(assistant.parentId!))
         const stored = yield* db.use((d) => d.storedAttachmentsFor(history.map((m) => m.id)))
         const boards = yield* db.use((d) => d.boardsFor(history.map((m) => m.id)))
+        // The profile as it was when this chat first asked, so it is sent once per chat.
+        const facts = settings.memoryModel
+          ? yield* db.use((d) => d.liveFacts(d.sessionMemoryRev(session.id)))
+          : []
         // A mood board the user edited by hand goes back to the model as edited.
         const withEdits = (m: Message) => {
           const edited = boards.get(m.id)
@@ -125,7 +142,8 @@ export class Chat extends Context.Service<
           WRITING_GUIDELINES,
           settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : '',
           settings.artifactsEnabled ? MOODBOARD_INSTRUCTIONS : '',
-          session.browserEnabled ? BROWSER_INSTRUCTIONS : ''
+          session.browserEnabled ? BROWSER_INSTRUCTIONS : '',
+          profileBlock(facts)
         ]
           .map((s) => s.trim())
           .filter(Boolean)
@@ -344,6 +362,65 @@ export class Chat extends Context.Service<
             broadcaster.send({ type: 'title', sessionId: input.sessionId, title })
         }).pipe(Effect.ignore)
 
+      /** Reads a user message for facts about the user and saves them as a memory revision. */
+      const remember = (input: { sessionId: string; model: string; source: string; previous: string | null; message: string }) =>
+        memoryLock
+          .withPermit(
+            Effect.gen(function* () {
+              const facts = yield* db.use((d) => d.liveFacts())
+              const ask = (request: Partial<ChatRequest>) =>
+                openRouter
+                  .streamChat({
+                    model: input.model,
+                    messages: [
+                      { role: 'system', content: MEMORY_INSTRUCTIONS },
+                      { role: 'user', content: memoryPrompt(facts, input.source, input.previous) }
+                    ],
+                    temperature: 0,
+                    ...request
+                  })
+                  .pipe(
+                    Stream.runFold(
+                      () => '',
+                      (acc, delta) => (delta.type === 'text' ? acc + delta.text : acc)
+                    )
+                  )
+              // Thinking would spend the token budget (and money) on a one-line JSON reply, so it
+              // is turned off. Models that must think reject that; they get a budget to think in.
+              const reply = yield* ask({ max_tokens: 400, reasoning: { effort: 'none' } }).pipe(
+                Effect.catchTag('ProviderError', () => ask({ max_tokens: 4000 })),
+                Effect.timeout('45 seconds')
+              )
+              const run = { message: input.message, model: input.model }
+              const reading = parseMemoryReply(reply, facts, input.source)
+              if (!reading)
+                return reportMemory(input.sessionId, { ...run, outcome: 'unreadable', detail: reply.trim().slice(0, 200) || '(empty reply)' })
+              const saved = reading.change
+                ? yield* db.use((d) => d.changeMemory(reading.change!, { kind: 'learned', sessionId: input.sessionId }))
+                : null
+              reportMemory(input.sessionId, {
+                ...run,
+                outcome: saved ? 'saved' : 'nothing',
+                added: saved?.added ?? [],
+                removed: saved?.removed ?? [],
+                dropped: reading.dropped,
+                detail: null
+              })
+            })
+          )
+          .pipe(
+            Effect.catchCause((cause) =>
+              // Quitting the app cuts checks off; that isn't a failure worth showing.
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.void
+                : Effect.gen(function* () {
+                const detail = errorMessage(Cause.squash(cause))
+                yield* Effect.logWarning(`Memory check failed with ${input.model}: ${detail}`)
+                reportMemory(input.sessionId, { message: input.message, model: input.model, outcome: 'error', detail })
+              })
+            )
+          )
+
       const insertUserTurn = Effect.fn('Chat.insertUserTurn')(function* (input: {
         sessionId: string
         parentId: string
@@ -357,7 +434,7 @@ export class Chat extends Context.Service<
         // A new chat is titled with the start of its first message right away, then renamed by the title model.
         const placeholder =
           session.title === NEW_SESSION_TITLE && !session.forkedFromSessionId ? titleFrom(input.text || 'Attachment') : null
-        const { assistant, files } = yield* db.use((d) => {
+        const { user, assistant, files, previous } = yield* db.use((d) => {
           const user = d.insertMessage({
             sessionId: input.sessionId,
             parentId: input.parentId,
@@ -375,9 +452,26 @@ export class Chat extends Context.Service<
             status: 'streaming',
             model: session.model ?? settings?.defaultModel ?? null
           })
-          return { assistant, files: input.attachmentIds.flatMap((id) => d.getAttachment(id)?.name ?? []) }
+          const parent = d.getMessage(input.parentId)
+          return {
+            user,
+            assistant,
+            files: input.attachmentIds.flatMap((id) => d.getAttachment(id)?.name ?? []),
+            // What the user is replying to: lets "Berlin" answer "Where are you based?".
+            previous: parent?.role === 'assistant' ? summarizeSteps(parent.content) : null
+          }
         })
         yield* start(assistant)
+        if (settings?.memoryModel) {
+          const message = input.text.replace(/\s+/g, ' ').trim().slice(0, 120)
+          const source = memorySource(input.text, askedQuestion(previous))
+          if (source) {
+            const job = remember({ sessionId: session.id, model: settings.memoryModel, source, previous, message })
+            yield* FiberMap.run(remembering, user.id, job)
+          } else if (message) {
+            reportMemory(session.id, { message, model: null, outcome: 'skipped', detail: null })
+          }
+        }
         if (placeholder && settings?.titleModel) {
           const job = nameSession({ sessionId: session.id, placeholder, model: settings.titleModel, text: input.text, files })
           yield* FiberMap.run(titling, session.id, job, { onlyIfMissing: true })
@@ -468,7 +562,8 @@ export class Chat extends Context.Service<
         continue: continueReply,
         stop,
         switchBranch,
-        linesSince
+        linesSince,
+        lastMemoryRun: Effect.sync(() => lastMemoryRun)
       })
     })
   )

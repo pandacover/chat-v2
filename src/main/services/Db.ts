@@ -9,6 +9,8 @@ import type {
   PathNode,
   Role,
   AudioAnalysis,
+  MemoryFact,
+  MemoryRevision,
   Session,
   Usage
 } from '@shared/types'
@@ -67,8 +69,33 @@ const MIGRATIONS: string[] = [
     data text not null,
     updated_at integer not null,
     primary key (message_id, identifier)
-  );`
+  );`,
+  // Pinned chats sit above the rest of the sidebar, in the order they were pinned.
+  `alter table sessions add column pinned_at integer;`,
+  // Memory: facts about the user, versioned without git. Every change is a revision; a fact
+  // lives from the revision that added it until the one that removed it, so any earlier
+  // profile can be read back (and restored as a new revision). Rows are never rewritten.
+  `create table memory_revisions (
+    rev integer primary key autoincrement,
+    kind text not null,
+    session_id text,
+    note text,
+    created_at integer not null
+  );
+  create table memory_facts (
+    id integer primary key autoincrement,
+    fact text not null,
+    added_rev integer not null,
+    removed_rev integer,
+    created_at integer not null
+  );
+  create index memory_facts_added on memory_facts(added_rev);
+  create index memory_facts_removed on memory_facts(removed_rev);
+  alter table sessions add column memory_rev integer;`
 ]
+
+/** At most this many facts are kept; past it, new ones are dropped until some are removed. */
+export const MEMORY_LIMIT = 150
 
 interface SessionRow {
   id: string
@@ -78,6 +105,7 @@ interface SessionRow {
   root_id: string
   forked_from_session_id: string | null
   browser_enabled: number
+  pinned_at: number | null
   created_at: number
   updated_at: number
 }
@@ -121,6 +149,7 @@ const toSession = (r: SessionRow): Session => ({
   rootId: r.root_id,
   forkedFromSessionId: r.forked_from_session_id,
   browserEnabled: r.browser_enabled === 1,
+  pinnedAt: r.pinned_at,
   createdAt: r.created_at,
   updatedAt: r.updated_at
 })
@@ -165,6 +194,15 @@ export interface NewMessage {
   status: MessageStatus
   model?: string | null
 }
+
+/** Changes the memory extractor asked for; `update` and `remove` refer to fact ids. */
+export interface MemoryChange {
+  add: string[]
+  update: Array<{ id: number; fact: string }>
+  remove: number[]
+}
+
+const factKey = (fact: string) => fact.trim().toLowerCase().replace(/[.!]+$/, '')
 
 export const makeDb = (file: string) => {
   const db = new DatabaseSync(file)
@@ -401,6 +439,108 @@ export const makeDb = (file: string) => {
       return getSession(fork.id)!
     })
 
+  /** The profile now, or as it was at revision `rev`. */
+  const liveFacts = (rev?: number): MemoryFact[] =>
+    (rev === undefined
+      ? all<{ id: number; fact: string; created_at: number }>(
+          'select id, fact, created_at from memory_facts where removed_rev is null order by id'
+        )
+      : all<{ id: number; fact: string; created_at: number }>(
+          `select id, fact, created_at from memory_facts
+            where added_rev <= ? and (removed_rev is null or removed_rev > ?) order by id`,
+          rev,
+          rev
+        )
+    ).map((r) => ({ id: r.id, fact: r.fact, createdAt: r.created_at }))
+
+  const memoryRev = (): number => one<{ rev: number | null }>('select max(rev) as rev from memory_revisions')?.rev ?? 0
+
+  /**
+   * Applies a change as one new revision. Adds that repeat a live fact are skipped, so the
+   * extractor can be sloppy. Returns what changed, or null when nothing did (no revision).
+   */
+  const changeMemory = (
+    change: MemoryChange,
+    origin: { kind: MemoryRevision['kind']; sessionId?: string | null; note?: string | null }
+  ): { rev: number; added: string[]; removed: string[] } | null =>
+    transaction(() => {
+      const live = liveFacts()
+      const byId = new Map(live.map((f) => [f.id, f]))
+      const removeIds = new Set<number>()
+      const adds: string[] = []
+      const seen = new Set<string>()
+      for (const id of change.remove) if (byId.has(id)) removeIds.add(id)
+      for (const u of change.update) {
+        const old = byId.get(u.id)
+        if (!old || factKey(old.fact) === factKey(u.fact)) continue
+        removeIds.add(u.id)
+        adds.push(u.fact)
+        seen.add(factKey(u.fact))
+      }
+      for (const f of live) if (!removeIds.has(f.id)) seen.add(factKey(f.fact))
+      for (const fact of change.add) {
+        if (seen.has(factKey(fact))) continue
+        seen.add(factKey(fact))
+        adds.push(fact)
+      }
+      const room = Math.max(0, MEMORY_LIMIT - (live.length - removeIds.size))
+      const added = adds.slice(0, room)
+      if (added.length === 0 && removeIds.size === 0) return null
+      const now = Date.now()
+      const rev = Number(
+        run(
+          'insert into memory_revisions (kind, session_id, note, created_at) values (?, ?, ?, ?)',
+          origin.kind,
+          origin.sessionId ?? null,
+          origin.note ?? null,
+          now
+        ).lastInsertRowid
+      )
+      for (const id of removeIds) run('update memory_facts set removed_rev = ? where id = ?', rev, id)
+      for (const fact of added) run('insert into memory_facts (fact, added_rev, created_at) values (?, ?, ?)', fact, rev, now)
+      return { rev, added, removed: [...removeIds].map((id) => byId.get(id)!.fact) }
+    })
+
+  const memoryHistory = (limit = 100): MemoryRevision[] => {
+    const revs = all<{ rev: number; kind: string; session_id: string | null; note: string | null; created_at: number }>(
+      'select * from memory_revisions order by rev desc limit ?',
+      limit
+    )
+    if (revs.length === 0) return []
+    const oldest = revs.at(-1)!.rev
+    const facts = all<{ fact: string; added_rev: number; removed_rev: number | null }>(
+      'select fact, added_rev, removed_rev from memory_facts where added_rev >= ? or removed_rev >= ? order by id',
+      oldest,
+      oldest
+    )
+    return revs.map((r) => ({
+      rev: r.rev,
+      kind: r.kind as MemoryRevision['kind'],
+      sessionId: r.session_id,
+      note: r.note,
+      createdAt: r.created_at,
+      added: facts.filter((f) => f.added_rev === r.rev).map((f) => f.fact),
+      removed: facts.filter((f) => f.removed_rev === r.rev).map((f) => f.fact)
+    }))
+  }
+
+  /** Brings back the profile as it was at `rev`, as a new revision, so history is kept. */
+  const restoreMemory = (rev: number) =>
+    transaction(() => {
+      const target = liveFacts(rev)
+      const live = liveFacts()
+      const wanted = new Set(target.map((t) => factKey(t.fact)))
+      const have = new Set(live.map((f) => factKey(f.fact)))
+      return changeMemory(
+        {
+          add: target.filter((t) => !have.has(factKey(t.fact))).map((t) => t.fact),
+          update: [],
+          remove: live.filter((f) => !wanted.has(factKey(f.fact))).map((f) => f.id)
+        },
+        { kind: 'restored', note: `Restored version ${rev}` }
+      )
+    })
+
   /** Deletes a session and returns attachment files no other row references. */
   const deleteSession = (id: string): string[] =>
     transaction(() => {
@@ -414,12 +554,32 @@ export const makeDb = (file: string) => {
 
   return {
     listSessions: () => all<SessionRow>('select * from sessions order by updated_at desc').map(toSession),
+    /**
+     * Deletes chats that never got a message (left over from when "New chat" saved a row
+     * straight away). Returns how many went.
+     */
+    pruneEmptySessions: (): number =>
+      Number(
+        run(
+          `delete from sessions where not exists (
+             select 1 from messages m where m.session_id = sessions.id and m.role != 'root')`
+        ).changes
+      ),
     getSession,
     createSession,
     updateSession: (
       id: string,
-      patch: { title?: string; model?: string | null; systemPrompt?: string | null; browserEnabled?: boolean }
+      patch: {
+        title?: string
+        model?: string | null
+        systemPrompt?: string | null
+        browserEnabled?: boolean
+        pinned?: boolean
+      }
     ) => {
+      // Neither pinning nor unpinning touches updated_at, so the chat keeps its date group.
+      if (patch.pinned === true) run('update sessions set pinned_at = coalesce(pinned_at, ?) where id = ?', Date.now(), id)
+      if (patch.pinned === false) run('update sessions set pinned_at = null where id = ?', id)
       if (patch.browserEnabled !== undefined)
         run('update sessions set browser_enabled = ? where id = ?', patch.browserEnabled ? 1 : 0, id)
       if (patch.title !== undefined) run('update sessions set title = ? where id = ?', patch.title, id)
@@ -587,6 +747,22 @@ export const makeDb = (file: string) => {
         map.set(r.message_id, boards)
       }
       return map
+    },
+    liveFacts,
+    memoryRev,
+    changeMemory,
+    memoryHistory,
+    restoreMemory,
+    /**
+     * The memory revision a chat sees. It is fixed the first time the chat asks, so the
+     * profile reaches the model once per chat and the system prompt stays the same after.
+     */
+    sessionMemoryRev: (sessionId: string): number => {
+      const row = one<{ memory_rev: number | null }>('select memory_rev from sessions where id = ?', sessionId)
+      if (row?.memory_rev != null) return row.memory_rev
+      const rev = memoryRev()
+      run('update sessions set memory_rev = ? where id = ?', rev, sessionId)
+      return rev
     },
     close: () => db.close()
   }

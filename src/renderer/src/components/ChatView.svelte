@@ -19,8 +19,8 @@
 
   const view = $derived(app.view)
   const empty = $derived(!view || view.path.length === 0)
-  const model = $derived(view?.session.model ?? app.settings?.settings.defaultModel ?? '')
-  const hasOverride = $derived(view?.session.systemPrompt != null)
+  const model = $derived(app.chat.model ?? app.settings?.settings.defaultModel ?? '')
+  const hasOverride = $derived(app.chat.systemPrompt != null)
 
   const greeting = (() => {
     const h = new Date().getHours()
@@ -77,7 +77,7 @@
   })
 
   const toggleBrowser = async () => {
-    const next = !(view?.session.browserEnabled ?? false)
+    const next = !app.chat.browserEnabled
     await app.updateSession({ browserEnabled: next })
     if (!next) return
     app.openBrowser()
@@ -86,7 +86,7 @@
   }
 
   const openPrompt = () => {
-    promptDraft = view?.session.systemPrompt ?? app.settings?.settings.systemPrompt ?? ''
+    promptDraft = app.chat.systemPrompt ?? app.settings?.settings.systemPrompt ?? ''
     promptOpen = true
   }
 
@@ -174,7 +174,7 @@
       onmodel={(id) => app.updateSession({ model: id })}
       customInstructions={hasOverride}
       oninstructions={openPrompt}
-      browserEnabled={view?.session.browserEnabled ?? false}
+      browserEnabled={app.chat.browserEnabled}
       onbrowser={toggleBrowser}
     />
   </div>

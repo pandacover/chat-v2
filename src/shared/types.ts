@@ -76,8 +76,59 @@ export interface Session {
   forkedFromSessionId: string | null
   /** When on, the model gets browser tools for this chat. */
   browserEnabled: boolean
+  /** When the chat was pinned to the top of the sidebar; null when it isn't. */
+  pinnedAt: number | null
   createdAt: number
   updatedAt: number
+}
+
+/** Something the app learned about the user, from their messages or added by hand. */
+export interface MemoryFact {
+  id: number
+  fact: string
+  createdAt: number
+}
+
+/** One change to memory. Every change is kept, so earlier versions can be restored. */
+export interface MemoryRevision {
+  rev: number
+  kind: 'learned' | 'edited' | 'restored' | 'cleared'
+  /** The chat a learned fact came from. */
+  sessionId: string | null
+  note: string | null
+  createdAt: number
+  added: string[]
+  removed: string[]
+}
+
+/** What happened to the last message memory looked at, so Settings can show it. Not saved. */
+export interface MemoryRun {
+  at: number
+  /** The start of the message. */
+  message: string
+  /** The memory model; null when the message was skipped before reaching it. */
+  model: string | null
+  outcome: 'skipped' | 'nothing' | 'saved' | 'unreadable' | 'error'
+  added: string[]
+  removed: string[]
+  /** Facts the model gave that named things the message never mentioned. */
+  dropped: string[]
+  /** The error, or the start of a reply that wasn't JSON. */
+  detail: string | null
+}
+
+export interface MemoryView {
+  facts: MemoryFact[]
+  revisions: MemoryRevision[]
+  lastRun: MemoryRun | null
+}
+
+/** Per-chat settings a chat can change from its composer. */
+export interface SessionPatch {
+  model?: string | null
+  systemPrompt?: string | null
+  browserEnabled?: boolean
+  pinned?: boolean
 }
 
 /** A node on the visible path, with its position among siblings for the ‹ 1/3 › switcher. */
@@ -106,6 +157,8 @@ export interface Settings {
   sketchModel: string
   /** Names new chats from their first message; '' keeps the start of the message as the title. */
   titleModel: string
+  /** Picks facts about the user out of their messages; '' turns memory off (nothing learned or sent). */
+  memoryModel: string
   /** Keeps the window above other apps on the same desktop. */
   alwaysOnTop: boolean
 }
@@ -142,6 +195,8 @@ export type StreamEvent =
   | { type: 'done'; messageId: string; status: MessageStatus; error: string | null; usage: Usage | null; model: string | null }
   /** A new chat's generated title, replacing the one taken from its first message. */
   | { type: 'title'; sessionId: string; title: string }
+  /** Memory changed after a message (learned in the background, so this can arrive any time). */
+  | { type: 'memory'; sessionId: string; added: string[]; removed: string[] }
 
 export interface AppError {
   tag: string
@@ -164,6 +219,10 @@ export interface UpdateState {
   percent: number | null
   error: string | null
   manual: boolean
+  /** macOS: the new version's DMG is already in Downloads, so installing just opens it. */
+  downloaded: boolean
+  /** macOS: which build this Mac gets ('Apple silicon' or 'Intel'). */
+  build: string | null
 }
 
 /** Everything the renderer can call on `window.api`. */
@@ -174,8 +233,17 @@ export interface Api {
     get(id: string): Promise<SessionView>
     rename(id: string, title: string): Promise<void>
     remove(id: string): Promise<void>
-    update(id: string, patch: { model?: string | null; systemPrompt?: string | null; browserEnabled?: boolean }): Promise<void>
+    update(id: string, patch: SessionPatch): Promise<void>
     fork(sessionId: string, messageId: string): Promise<SessionView>
+  }
+  memory: {
+    get(): Promise<MemoryView>
+    add(fact: string): Promise<MemoryView>
+    edit(id: number, fact: string): Promise<MemoryView>
+    remove(id: number): Promise<MemoryView>
+    clear(): Promise<MemoryView>
+    /** Brings back the facts as they were after revision `rev` (as a new revision). */
+    restore(rev: number): Promise<MemoryView>
   }
   chat: {
     send(input: { sessionId: string; parentId: string; text: string; attachmentIds: string[] }): Promise<SessionView>

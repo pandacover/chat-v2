@@ -148,6 +148,7 @@ app.whenReady().then(async () => {
       const attachments = yield* Attachments
       const recovered = yield* db.use((d) => d.markInterrupted())
       if (recovered > 0) yield* Effect.logInfo(`Marked ${recovered} interrupted replies`)
+      yield* db.use((d) => d.pruneEmptySessions())
       const stale = yield* db.use((d) => d.pruneOrphanAttachments(Date.now() - 24 * 60 * 60 * 1000))
       yield* attachments.removeFiles(stale)
     })

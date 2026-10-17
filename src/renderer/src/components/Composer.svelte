@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tip } from '@/lib/tooltip'
+  import { untrack } from 'svelte'
   import type { Attachment } from '@shared/types'
   import { fade, pop } from '@/lib/motion'
   import { startRecording, type Recording } from '@/lib/recorder'
@@ -64,6 +65,35 @@
     textarea.style.height = 'auto'
     textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`
   }
+
+  // Each chat keeps its own unsent text and attachments ('' is the new chat).
+  const key = $derived(app.view?.session.id ?? '')
+  let loaded: string | null = null
+  $effect.pre(() => {
+    const next = key
+    untrack(() => {
+      if (next === loaded) return
+      if (loaded !== null) app.parkAttachments(loaded)
+      loaded = next
+      text = app.draftText(next)
+      app.unparkAttachments(next)
+      queueMicrotask(fit)
+    })
+  })
+  $effect(() => {
+    const value = text
+    untrack(() => loaded !== null && app.setDraft(loaded, value))
+  })
+  // The draft was thrown away from the sidebar (or its chat deleted).
+  $effect(() => {
+    const stored = app.drafts.get(key)
+    untrack(() => {
+      if (!stored && loaded === key && text.trim() !== '') {
+        text = ''
+        queueMicrotask(fit)
+      }
+    })
+  })
 
   const addFiles = async (files: Iterable<File>) => {
     for (const file of files) {

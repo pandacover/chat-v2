@@ -2,14 +2,15 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { BrowserWindow, app, dialog, ipcMain, shell, systemPreferences } from 'electron'
 import { Cause, Effect, type ManagedRuntime } from 'effect'
-import type { AudioAnalysis, IpcResult, NewAttachmentInput, SettingsPatch } from '@shared/types'
+import type { AudioAnalysis, IpcResult, MemoryView, NewAttachmentInput, SessionPatch, SettingsPatch } from '@shared/types'
 import { errorMessage } from './errors'
 import { checkForUpdates, installUpdate, updateState } from './updater'
 import { publishArtifact } from './protocols'
 import { Attachments } from './services/Attachments'
 import { Browser } from './services/Browser'
 import { Chat, NEW_SESSION_TITLE } from './services/Chat'
-import { Db } from './services/Db'
+import { Db, type DbApi } from './services/Db'
+import { isSensitive } from './memory'
 import { ElevenLabs } from './services/ElevenLabs'
 import { OpenRouter } from './services/OpenRouter'
 import { SettingsStore } from './services/SettingsStore'
@@ -31,6 +32,27 @@ const rect = (v: unknown): Rect | undefined => {
 const stamp = () => new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
 
 const ids = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [])
+
+const int = (v: unknown, name: string): number => {
+  if (typeof v !== 'number' || !Number.isInteger(v)) throw new TypeError(`${name} must be an integer`)
+  return v
+}
+
+/** A fact typed in Settings: one line, ending like a sentence. Secrets are refused here too. */
+const typedFact = (v: unknown): string => {
+  const fact = str(v, 'fact').replace(/\s+/g, ' ').trim().slice(0, 200)
+  if (!fact) throw new TypeError('The fact is empty')
+  if (isSensitive(fact)) throw new TypeError("That looks like a password, key or account number, which memory doesn't keep")
+  return /[.!?…]$/.test(fact) ? fact : `${fact}.`
+}
+
+const memoryView = Effect.gen(function* () {
+  const lastRun = yield* (yield* Chat).lastMemoryRun
+  return yield* (yield* Db).use((d): MemoryView => ({ facts: d.liveFacts(), revisions: d.memoryHistory(), lastRun }))
+})
+
+/** Runs a change to memory made in Settings, then returns the new state. */
+const editMemory = (f: (d: DbApi) => unknown) => Db.use((db) => db.use(f)).pipe(Effect.andThen(memoryView))
 
 /**
  * macOS asks for the microphone once and remembers the answer. Asking before the window opens
@@ -66,13 +88,14 @@ const handlers: Record<string, Handler> = {
     Db.use((db) =>
       db.use((d) => d.updateSession(str(id, 'id'), { title: str(title, 'title').trim() || NEW_SESSION_TITLE }))
     ),
-  'sessions:update': (id, patch: { model?: string | null; systemPrompt?: string | null; browserEnabled?: boolean }) =>
+  'sessions:update': (id, patch: SessionPatch) =>
     Db.use((db) =>
       db.use((d) =>
         d.updateSession(str(id, 'id'), {
           ...(patch.model !== undefined ? { model: patch.model || null } : {}),
           ...(patch.systemPrompt !== undefined ? { systemPrompt: patch.systemPrompt?.trim() ? patch.systemPrompt : null } : {}),
-          ...(typeof patch.browserEnabled === 'boolean' ? { browserEnabled: patch.browserEnabled } : {})
+          ...(typeof patch.browserEnabled === 'boolean' ? { browserEnabled: patch.browserEnabled } : {}),
+          ...(typeof patch.pinned === 'boolean' ? { pinned: patch.pinned } : {})
         })
       )
     ),
@@ -90,6 +113,15 @@ const handlers: Record<string, Handler> = {
       const fork = yield* db.use((d) => d.forkSession(str(sessionId, 'sessionId'), str(messageId, 'messageId')))
       return yield* (yield* Chat).view(fork.id)
     }),
+
+  'memory:get': () => memoryView,
+  'memory:add': (fact) => editMemory((d) => d.changeMemory({ add: [typedFact(fact)], update: [], remove: [] }, { kind: 'edited' })),
+  'memory:edit': (id, fact) =>
+    editMemory((d) => d.changeMemory({ add: [], update: [{ id: int(id, 'id'), fact: typedFact(fact) }], remove: [] }, { kind: 'edited' })),
+  'memory:remove': (id) => editMemory((d) => d.changeMemory({ add: [], update: [], remove: [int(id, 'id')] }, { kind: 'edited' })),
+  'memory:clear': () =>
+    editMemory((d) => d.changeMemory({ add: [], update: [], remove: d.liveFacts().map((f) => f.id) }, { kind: 'cleared' })),
+  'memory:restore': (rev) => editMemory((d) => d.restoreMemory(int(rev, 'rev'))),
 
   'chat:send': (input) =>
     Chat.use((chat) =>

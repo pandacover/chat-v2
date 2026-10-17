@@ -35,6 +35,8 @@ export interface ChatRequest {
   max_tokens?: number
   plugins?: unknown[]
   tools?: ToolDefinition[]
+  /** `effort: 'none'` turns thinking off; thinking tokens count against `max_tokens`. */
+  reasoning?: { effort: 'none' | 'minimal' | 'low' | 'medium' | 'high' }
 }
 
 /** What a streamed completion yields: text, or a fragment of a tool call. */

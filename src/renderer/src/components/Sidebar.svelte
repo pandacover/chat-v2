@@ -16,19 +16,45 @@
 
   const DAY = 24 * 60 * 60 * 1000
 
+  /** A sidebar row: a saved chat, or (session null) the new chat while it has a draft. */
+  interface Entry {
+    key: string
+    title: string
+    session: Session | null
+    draft: boolean
+  }
+
+  /** The new chat has no title yet; its draft's first line stands in. */
+  const draftTitle = (text: string) => {
+    const line = text.replace(/\s+/g, ' ').trim()
+    return line.length > 60 ? `${line.slice(0, 57).trimEnd()}…` : line || 'New chat'
+  }
+
+  // Unsent drafts first, then pinned chats, then the rest by day.
   const groups = $derived.by(() => {
     const q = query.trim().toLowerCase()
-    const list = q ? app.sessions.filter((s) => s.title.toLowerCase().includes(q)) : app.sessions
+    const entries: Entry[] = app.sessions.map((s) => ({ key: s.id, title: s.title, session: s, draft: app.hasDraft(s.id) }))
+    if (app.hasDraft('')) entries.push({ key: '', title: draftTitle(app.draftText('')), session: null, draft: true })
+    const list = q ? entries.filter((e) => e.title.toLowerCase().includes(q)) : entries
+    const draftAt = (e: Entry) => app.drafts.get(e.key)?.at ?? Number.MAX_SAFE_INTEGER
+    const drafts = list.filter((e) => e.draft).sort((a, b) => draftAt(b) - draftAt(a))
+    const pinned = list
+      .filter((e) => !e.draft && e.session?.pinnedAt != null)
+      .sort((a, b) => a.session!.pinnedAt! - b.session!.pinnedAt!)
     const today = new Date().setHours(0, 0, 0, 0)
-    const buckets: Array<[string, Session[]]> = [
+    const buckets: Array<[string, Entry[]]> = [
+      ['Drafts', drafts],
+      ['Pinned', pinned],
       ['Today', []],
       ['Yesterday', []],
       ['This week', []],
       ['Earlier', []]
     ]
-    for (const s of list) {
-      const i = s.updatedAt >= today ? 0 : s.updatedAt >= today - DAY ? 1 : s.updatedAt >= today - 7 * DAY ? 2 : 3
-      buckets[i]![1].push(s)
+    for (const e of list) {
+      if (e.draft || !e.session || e.session.pinnedAt != null) continue
+      const at = e.session.updatedAt
+      const i = at >= today ? 2 : at >= today - DAY ? 3 : at >= today - 7 * DAY ? 4 : 5
+      buckets[i]![1].push(e)
     }
     return buckets.filter(([, items]) => items.length > 0)
   })
@@ -87,15 +113,16 @@
       {#each groups as [label, items] (label)}
         <div class="px-2.5 pt-5 pb-1.5 text-[11.5px] text-muted">{label}</div>
         <div class="flex flex-col gap-1">
-        {#each items as s (s.id)}
-          {@const active = app.view?.session.id === s.id}
+        {#each items as e (e.key)}
+          {@const s = e.session}
+          {@const active = (app.view?.session.id ?? '') === e.key}
           <div
             animate:flip={{ duration: 200, easing: ease }}
             class="group relative flex h-9 items-center rounded-md text-[13px] transition-colors {active
               ? 'bg-surface text-fg shadow-[0_1px_0_var(--line)]'
               : 'text-fg-2 hover:bg-hover hover:text-fg'}"
           >
-            {#if renaming === s.id}
+            {#if s && renaming === s.id}
               <input
                 use:focusSelect
                 bind:value={draft}
@@ -109,7 +136,7 @@
                 }}
                 onblur={commitRename}
               />
-            {:else if confirming === s.id}
+            {:else if s && confirming === s.id}
               <div class="flex w-full items-center gap-1 pr-1 pl-2.5" in:fade={{ duration: 120 }}>
                 <span class="min-w-0 flex-1 truncate text-fg">Delete this chat?</span>
                 <button class="rounded-sm px-1.5 py-0.5 text-[12px] text-muted hover:text-fg" onclick={() => (confirming = null)}>Keep</button>
@@ -118,15 +145,23 @@
             {:else}
               <button
                 class="flex h-full min-w-0 flex-1 items-center gap-1.5 pl-2.5 text-left"
-                onclick={() => app.open(s.id)}
-                ondblclick={() => startRename(s)}
+                onclick={() => (s ? app.open(s.id) : app.newSession())}
+                ondblclick={() => s && startRename(s)}
               >
-                {#if s.forkedFromSessionId}<span class="text-muted" use:tip={'Forked chat'}><Icon name="branch" size={12} /></span>{/if}
-                <span class="truncate">{s.title}</span>
+                {#if e.draft}<span class="shrink-0 text-accent" use:tip={'Unsent draft'}><Icon name="pen" size={12} /></span>{/if}
+                {#if s?.forkedFromSessionId}<span class="text-muted" use:tip={'Forked chat'}><Icon name="branch" size={12} /></span>{/if}
+                <span class="truncate {s ? '' : 'italic'}">{e.title}</span>
               </button>
               <div class="flex shrink-0 items-center pr-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
-                <button class="icon-btn !p-1" use:tip={'Rename'} onclick={() => startRename(s)}><Icon name="edit" size={13} /></button>
-                <button class="icon-btn !p-1" use:tip={'Delete'} onclick={() => (confirming = s.id)}><Icon name="trash" size={13} /></button>
+                {#if s}
+                  <button class="icon-btn !p-1" use:tip={s.pinnedAt != null ? 'Unpin chat' : 'Pin chat'} onclick={() => app.pin(s.id, s.pinnedAt == null)}>
+                    <Icon name="pin" size={13} class={s.pinnedAt != null ? '' : 'rotate-45'} />
+                  </button>
+                  <button class="icon-btn !p-1" use:tip={'Rename'} onclick={() => startRename(s)}><Icon name="edit" size={13} /></button>
+                  <button class="icon-btn !p-1" use:tip={'Delete'} onclick={() => (confirming = s.id)}><Icon name="trash" size={13} /></button>
+                {:else}
+                  <button class="icon-btn !p-1" use:tip={'Discard draft'} onclick={() => app.discardDraft('')}><Icon name="trash" size={13} /></button>
+                {/if}
               </div>
             {/if}
           </div>

@@ -1,7 +1,9 @@
 <script lang="ts">
   import { tip } from '@/lib/tooltip'
-  import { onDestroy } from 'svelte'
-  import type { Settings } from '@shared/types'
+  import { onDestroy, onMount } from 'svelte'
+  import type { MemoryRevision, MemoryRun, Settings } from '@shared/types'
+  import { CALL_TOKENS, callCost } from '@shared/estimates'
+  import { money } from '@/lib/pricing'
   import { CODE_FONTS, READING_FONTS, READING_SIZES, UI_FONTS, appearance, type FontOption, type ReadingSize } from '@/lib/appearance.svelte'
   import { fade, fly } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
@@ -20,6 +22,7 @@
     { id: 'keys', label: 'API keys' },
     { id: 'model', label: 'Model' },
     { id: 'instructions', label: 'Instructions' },
+    { id: 'memory', label: 'Memory' },
     { id: 'voice', label: 'Voice & files' },
     { id: 'appearance', label: 'Appearance' },
     { id: 'about', label: 'About' }
@@ -79,6 +82,71 @@
   }
 
   const close = () => (app.page = 'chat')
+
+  // Memory: what the app has learned, edited in place. Every change is a new version.
+  onMount(() => void app.loadMemory())
+  let newFact = $state('')
+  let editing = $state<number | null>(null)
+  let editDraft = $state('')
+  let confirmForget = $state(false)
+  let showHistory = $state(false)
+
+  const addFact = async () => {
+    const fact = newFact.trim()
+    if (fact && (await app.editMemory(() => window.api.memory.add(fact)))) newFact = ''
+  }
+
+  const saveEdit = async () => {
+    const id = editing
+    editing = null
+    if (id !== null && editDraft.trim()) await app.editMemory(() => window.api.memory.edit(id, editDraft.trim()))
+  }
+
+  const forget = async () => {
+    confirmForget = false
+    await app.editMemory(() => window.api.memory.clear())
+  }
+
+  const restore = async (rev: number) => {
+    if (await app.editMemory(() => window.api.memory.restore(rev))) app.toast(`Restored memory to version ${rev}`, 'info')
+  }
+
+  const KINDS: Record<MemoryRevision['kind'], string> = {
+    learned: 'Learned from a chat',
+    edited: 'Edited by you',
+    restored: 'Restored',
+    cleared: 'Forgot everything'
+  }
+
+  const when = (at: number) => new Date(at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+
+  // OpenRouter names start with the provider ("Google: Gemini 2.5 Flash"); the picker shows it apart.
+  const shortName = (name: string) => name.replace(/^[^:]{1,40}:\s*/, '')
+  const modelName = (id: string) => shortName(app.models.find((m) => m.id === id)?.name ?? id)
+
+  /** What the picked model costs per call, from OpenRouter's current prices. */
+  const costLine = (id: string, kind: keyof typeof CALL_TOKENS, per: string) => {
+    const info = app.models.find((m) => m.id === id)
+    if (!info) return app.models.length ? `OpenRouter doesn't list a price for ${id}.` : ''
+    const cost = callCost(info.pricing, kind)
+    const name = shortName(info.name)
+    if (cost === null) return `${name}'s price depends on the model OpenRouter routes to.`
+    if (cost === 0) return `${name} is free.`
+    return `${name} costs about ${money(cost)} ${per} (${money(cost * 1000)} per thousand).`
+  }
+
+  const OUTCOMES: Record<MemoryRun['outcome'], (r: MemoryRun) => string> = {
+    skipped: () => "Skipped before the model: it doesn't say anything about you.",
+    nothing: (r) => `${modelName(r.model!)} found nothing to keep.`,
+    saved: (r) => `${modelName(r.model!)} updated memory.`,
+    unreadable: (r) => `${modelName(r.model!)} didn't reply with the JSON memory needs.`,
+    error: (r) => `${modelName(r.model!)} failed.`
+  }
+
+  const focusSelect = (el: HTMLInputElement) => {
+    el.focus()
+    el.select()
+  }
 
   let checking = $state(false)
   const checkUpdates = async () => {
@@ -249,7 +317,10 @@
           <div class="mt-5 max-w-md">
             <span class="mb-1.5 block font-medium text-fg">Title model</span>
             <ModelPicker block value={form.titleModel} onchange={(id) => (form.titleModel = id)} noneLabel="None: use the first message" />
-            <p class="mt-1.5 text-muted">Names each new chat from its first message. A small model is enough; the default costs about $0.00001 a title.</p>
+            <p class="mt-1.5 text-muted">
+              Names each new chat from its first message. A small model is enough.
+              {form.titleModel ? costLine(form.titleModel, 'title', 'a title') : ''}
+            </p>
           </div>
           <div class="mt-5 max-w-md">
             <span class="mb-1.5 block font-medium text-fg">Sketch model</span>
@@ -292,6 +363,125 @@
               <span class="block text-muted">The model can build small HTML apps that run in the side panel.</span>
             </span>
           </label>
+        </section>
+
+        <section id="settings-memory" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
+          <h2 class="font-serif text-[20px]">Memory</h2>
+          <p class="mt-1 max-w-[60ch] text-muted">
+            A model reads each message you send for lasting facts about you, like your name, work or how you like answers, and keeps them on this device. Each new chat starts with them. Passwords, keys and account numbers are never kept.
+          </p>
+          <div class="mt-5 max-w-md">
+            <span class="mb-1.5 block font-medium text-fg">Memory model</span>
+            <ModelPicker block value={form.memoryModel} onchange={(id) => (form.memoryModel = id)} noneLabel="None: memory off" />
+            <p class="mt-1.5 text-muted">
+              {#if form.memoryModel}
+                {costLine(form.memoryModel, 'memory', 'for each message it reads')} Messages that don't talk about you are skipped first, for free.
+              {:else}
+                Nothing is learned, and chats start without the facts below.
+              {/if}
+            </p>
+          </div>
+
+          {#if app.memory?.lastRun}
+            {@const r = app.memory.lastRun}
+            <div class="mt-5 max-w-[60ch] rounded-md bg-surface px-3 py-2.5 text-[12.5px] shadow-[0_0_0_1px_var(--line)]" aria-live="polite">
+              <div class="flex items-baseline gap-2">
+                <span class="font-medium text-fg">Last message</span>
+                <span class="min-w-0 flex-1 truncate text-muted">“{r.message}”</span>
+                <span class="shrink-0 text-[11.5px] text-muted">{when(r.at)}</span>
+              </div>
+              <div class="mt-1 {r.outcome === 'error' || r.outcome === 'unreadable' ? 'text-danger' : 'text-fg-2'}">{OUTCOMES[r.outcome](r)}</div>
+              {#if r.detail}<div class="mt-0.5 font-mono text-[11.5px] break-words text-muted">{r.detail}</div>{/if}
+              {#each r.added as fact, j (j)}<div class="text-fg-2"><span class="text-muted">+</span> {fact}</div>{/each}
+              {#each r.removed as fact, j (j)}<div class="text-muted line-through decoration-muted/60">{fact}</div>{/each}
+              {#if r.dropped.length > 0}
+                <div class="mt-1 text-muted">Not kept, because they name things your message didn't mention: {r.dropped.join(' ')}</div>
+              {/if}
+            </div>
+          {/if}
+
+          <div class="mt-6">
+            <div class="mb-1.5 flex items-baseline gap-2">
+              <span class="font-medium text-fg">What chat-v2 knows about you</span>
+              {#if app.memory && app.memory.facts.length > 0}
+                <span class="text-muted tabular-nums">{app.memory.facts.length}</span>
+                <span class="ml-auto"></span>
+                {#if confirmForget}
+                  <span class="text-fg-2" in:fade={{ duration: 120 }}>Forget all of it?</span>
+                  <button class="text-[12px] text-muted hover:text-fg" onclick={() => (confirmForget = false)}>Keep</button>
+                  <button class="text-[12px] font-medium text-danger" onclick={forget}>Forget</button>
+                {:else}
+                  <button class="text-[12px] text-muted hover:text-danger" onclick={() => (confirmForget = true)}>Forget everything</button>
+                {/if}
+              {/if}
+            </div>
+            <ul class="divide-y divide-line overflow-hidden rounded-md bg-surface shadow-[0_0_0_1px_var(--line)]">
+              {#each app.memory?.facts ?? [] as f (f.id)}
+                <li class="group flex min-h-9 items-center gap-2 px-3 py-1.5">
+                  {#if editing === f.id}
+                    <input
+                      use:focusSelect
+                      bind:value={editDraft}
+                      class="h-7 min-w-0 flex-1 rounded-sm bg-bg px-2 outline-none"
+                      onkeydown={(e) => {
+                        if (e.key === 'Enter') void saveEdit()
+                        if (e.key === 'Escape') {
+                          e.preventDefault()
+                          editing = null
+                        }
+                      }}
+                      onblur={saveEdit}
+                    />
+                  {:else}
+                    <span class="min-w-0 flex-1 text-fg">{f.fact}</span>
+                    <span class="flex shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                      <button class="icon-btn !p-1" use:tip={'Edit'} onclick={() => ((editing = f.id), (editDraft = f.fact))}><Icon name="edit" size={13} /></button>
+                      <button class="icon-btn !p-1" use:tip={'Forget this'} onclick={() => app.editMemory(() => window.api.memory.remove(f.id))}><Icon name="trash" size={13} /></button>
+                    </span>
+                  {/if}
+                </li>
+              {:else}
+                <li class="px-3 py-2.5 text-muted">{app.memory ? 'Nothing yet. Tell it about yourself in any chat, or add a fact below.' : 'Loading…'}</li>
+              {/each}
+              <li class="flex items-center gap-2 px-3 py-1.5">
+                <Icon name="plus" size={13} class="shrink-0 text-muted" />
+                <input
+                  bind:value={newFact}
+                  placeholder="Add a fact, e.g. Prefers metric units."
+                  class="h-7 min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted"
+                  onkeydown={(e) => e.key === 'Enter' && addFact()}
+                />
+                {#if newFact.trim()}<button class="shrink-0 rounded-md bg-fg px-2.5 py-1 text-[12px] font-medium text-bg" in:fade={{ duration: 120 }} onclick={addFact}>Add</button>{/if}
+              </li>
+            </ul>
+          </div>
+
+          {#if app.memory && app.memory.revisions.length > 0}
+            <button class="mt-4 flex items-center gap-1 text-[12.5px] text-fg-2 hover:text-fg" aria-expanded={showHistory} onclick={() => (showHistory = !showHistory)}>
+              <Icon name="chevronDown" size={13} class="transition-transform duration-150 {showHistory ? '' : '-rotate-90'}" />
+              Version history <span class="text-muted tabular-nums">({app.memory.revisions.length})</span>
+            </button>
+            {#if showHistory}
+              <ol class="mt-2 space-y-3 border-l border-line pl-4" transition:fade={{ duration: 120 }}>
+                {#each app.memory.revisions as r, i (r.rev)}
+                  <li>
+                    <div class="flex items-baseline gap-2">
+                      <span class="font-medium text-fg tabular-nums">v{r.rev}</span>
+                      <span class="text-fg-2">{r.note ?? KINDS[r.kind]}</span>
+                      <span class="text-[12px] text-muted">{when(r.createdAt)}</span>
+                      {#if i > 0}
+                        <button class="ml-auto text-[12px] text-muted hover:text-fg" use:tip={'Bring back the facts as they were after this change'} onclick={() => restore(r.rev)}>Restore</button>
+                      {:else}
+                        <span class="ml-auto text-[12px] text-muted">Current</span>
+                      {/if}
+                    </div>
+                    {#each r.added as fact, j (j)}<div class="text-[12.5px] text-fg-2"><span class="text-muted">+</span> {fact}</div>{/each}
+                    {#each r.removed as fact, j (j)}<div class="text-[12.5px] text-muted line-through decoration-muted/60">{fact}</div>{/each}
+                  </li>
+                {/each}
+              </ol>
+            {/if}
+          {/if}
         </section>
 
         <section id="settings-voice" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
