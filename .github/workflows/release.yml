@@ -82,8 +82,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Publish the draft once every platform has uploaded
+        # The commit message comes in through the environment, not pasted into the script: quotes
+        # or backticks in it would otherwise break the command (or run as shell).
         run: |
           gh release edit "v${VERSION}" --repo "${GITHUB_REPOSITORY}" --draft=false --latest \
-            --notes "Built from ${GITHUB_SHA::7}: ${{ github.event.head_commit.message || 'manual run' }}"
+            --notes "Built from ${GITHUB_SHA::7}: ${COMMIT_MESSAGE}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message || 'manual run' }}
