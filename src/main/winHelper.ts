@@ -1,6 +1,8 @@
-import { type ChildProcessWithoutNullStreams, execFile, spawn } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
 import type { DesktopState, WindowInfo } from '@shared/computer'
+import type { Driver } from './driver'
+import { helperProcess, runCommand } from './helperProcess'
 
 // Windows input and window inspection for computer use, without native modules: one long-lived
 // PowerShell process compiles a small C# class over user32 and answers one request per line.
@@ -340,98 +342,16 @@ ${HELPER_SOURCE}
 [ChatV2.Helper]::Run()
 `
 
-/**
- * Input and window state for computer use. Coordinates are physical screen pixels. Pointer
- * actions go to the given top-level window (the one the guard checked) without moving the mouse.
- */
-export interface Driver {
-  state(): Promise<DesktopState>
-  click(hwnd: number, x: number, y: number, button: 'left' | 'right' | 'middle', count: number): Promise<void>
-  hover(hwnd: number, x: number, y: number): Promise<void>
-  drag(hwnd: number, from: { x: number; y: number }, to: { x: number; y: number }): Promise<void>
-  /** Wheel notches over a point; positive dy scrolls up, positive dx scrolls right (Windows' convention). */
-  wheel(hwnd: number, x: number, y: number, dx: number, dy: number): Promise<void>
-  text(text: string): Promise<void>
-  keys(vks: number[]): Promise<void>
-  focus(hwnd: number): Promise<void>
-  /** Start menu apps, for opening one by name. */
-  apps(): Promise<Array<{ name: string; id: string }>>
-  launch(id: string): Promise<void>
-  close(): void
-}
-
-type Pending = { resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void }
-
-const run = (command: string, args: string[]) =>
-  new Promise<string>((resolve, reject) => {
-    execFile(command, args, { windowsHide: true, maxBuffer: 8 * 1024 * 1024, timeout: 30000 }, (error, stdout) =>
-      error ? reject(error) : resolve(stdout)
-    )
-  })
-
 /** Starts the helper on first use, and again if it dies. `scriptFile` is where the script is written. */
 export const windowsDriver = (scriptFile: string): Driver => {
-  let child: ChildProcessWithoutNullStreams | null = null
-  let ready: Promise<void> | null = null
-  let nextId = 1
-  const pending = new Map<number, Pending>()
   let apps: Array<{ name: string; id: string }> | null = null
-
-  const start = () => {
-    writeFileSync(scriptFile, HELPER_SCRIPT, 'utf8')
-    const p = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptFile], { windowsHide: true })
-    child = p
-    let buffer = ''
-    let errors = ''
-    ready = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('the input helper did not start')), 20000)
-      p.stdout.setEncoding('utf8')
-      p.stdout.on('data', (chunk: string) => {
-        buffer += chunk
-        let i: number
-        while ((i = buffer.indexOf('\n')) >= 0) {
-          const line = buffer.slice(0, i).trim()
-          buffer = buffer.slice(i + 1)
-          if (!line.startsWith('{')) continue
-          const msg = JSON.parse(line) as Record<string, unknown>
-          if (msg.ready) {
-            clearTimeout(timer)
-            if (msg.dpiAware === false) reject(new Error('the input helper could not read the screen at its real resolution (DPI awareness)'))
-            else resolve()
-            continue
-          }
-          const waiter = pending.get(msg.id as number)
-          if (!waiter) continue
-          pending.delete(msg.id as number)
-          if (msg.ok) waiter.resolve(msg)
-          else waiter.reject(new Error(String(msg.error)))
-        }
-      })
-      p.stderr.on('data', (chunk: Buffer) => (errors = (errors + chunk.toString()).slice(-2000)))
-      p.on('exit', () => {
-        clearTimeout(timer)
-        if (child === p) child = null
-        const error = new Error(`the input helper stopped${errors.trim() ? `: ${errors.trim().split('\n')[0]}` : ''}`)
-        reject(error)
-        for (const waiter of pending.values()) waiter.reject(error)
-        pending.clear()
-      })
-    })
-    // A failed start is retried on the next request rather than kept.
-    ready.catch(() => {
-      if (child === p) child = null
-    })
-  }
-
-  const request = async (...words: Array<string | number>): Promise<Record<string, unknown>> => {
-    if (!child) start()
-    await ready
-    const id = nextId++
-    return new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject })
-      child!.stdin.write(`${id} ${words.join(' ')}\n`)
-    })
-  }
+  const { request, close } = helperProcess(
+    () => {
+      writeFileSync(scriptFile, HELPER_SCRIPT, 'utf8')
+      return spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptFile], { windowsHide: true })
+    },
+    (ready) => (ready.dpiAware === false ? 'the input helper could not read the screen at its real resolution (DPI awareness)' : null)
+  )
 
   return {
     state: async () => {
@@ -447,7 +367,7 @@ export const windowsDriver = (scriptFile: string): Driver => {
     focus: async (hwnd) => void (await request('focus', hwnd)),
     apps: async () => {
       if (apps) return apps
-      const out = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-StartApps | Select-Object Name, AppID | ConvertTo-Json -Compress'])
+      const out = await runCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-StartApps | Select-Object Name, AppID | ConvertTo-Json -Compress'])
       const list = JSON.parse(out.trim() || '[]') as Array<{ Name: string; AppID: string }> | { Name: string; AppID: string }
       apps = (Array.isArray(list) ? list : [list]).map((a) => ({ name: a.Name, id: a.AppID }))
       // Installs change the list; read it again in a while.
@@ -460,9 +380,6 @@ export const windowsDriver = (scriptFile: string): Driver => {
       const target = /^[a-z][\w+.-]*:\/\//i.test(id) ? id : `shell:AppsFolder\\${id}`
       spawn('explorer.exe', [target], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
     },
-    close: () => {
-      child?.stdin.end()
-      child = null
-    }
+    close
   }
 }

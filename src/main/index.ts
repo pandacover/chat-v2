@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { BrowserWindow, app, nativeTheme, safeStorage, session, shell, webContents } from 'electron'
+import { BrowserWindow, app, nativeTheme, safeStorage, screen, session, shell, webContents } from 'electron'
 import { Effect, Layer, ManagedRuntime } from 'effect'
 import type { BrowserEvent, StreamEvent } from '@shared/types'
 import { type MainServices, pinWindow, registerIpc } from './ipc'
@@ -11,7 +11,8 @@ import { Attachments } from './services/Attachments'
 import { Browser } from './services/Browser'
 import { Broadcaster, Chat } from './services/Chat'
 import { Computer } from './services/Computer'
-import { electronChatWindows, electronOverlay, electronScreen } from './desktop'
+import { electronChatWindows, electronOverlay, electronScreen, macPermissions } from './desktop'
+import { macDriver } from './macHelper'
 import { windowsDriver } from './winHelper'
 import { Db } from './services/Db'
 import { ElevenLabs } from './services/ElevenLabs'
@@ -60,8 +61,19 @@ const makeRuntime = () => {
   const db = Db.layer(join(root, 'chat.db'))
   const settings = SettingsStore.layer(cipher).pipe(Layer.provide(paths))
   const base = Layer.mergeAll(db, settings, paths)
+  const mac = process.platform === 'darwin'
   const computer = Computer.layer({
-    driver: process.platform === 'win32' ? windowsDriver(join(root, 'computer-helper.ps1')) : null,
+    driver:
+      process.platform === 'win32'
+        ? windowsDriver(join(root, 'computer-helper.ps1'))
+        : mac
+          ? macDriver(join(root, 'computer-helper.js'), () => {
+              const d = screen.getPrimaryDisplay()
+              return { w: d.size.width, h: d.size.height, scale: d.scaleFactor }
+            })
+          : null,
+    os: mac ? 'darwin' : 'win32',
+    ...(mac ? { permissions: macPermissions } : {}),
     screen: electronScreen,
     overlay: electronOverlay(headless),
     chatWindows: electronChatWindows(headless),

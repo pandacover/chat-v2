@@ -6,7 +6,7 @@ import type { MemoryRun, Message, MessageStatus, Session, SessionView, StreamEve
 import { type DbError, InvalidInput, type NotFound, errorMessage } from '../errors'
 import { WRITING_GUIDELINES } from '../guidelines'
 import { BROWSER_INSTRUCTIONS, BROWSER_TOOLS, MAX_AGENT_STEPS, runTool } from '../agent'
-import { COMPUTER_INSTRUCTIONS, COMPUTER_TOOLS, MAX_COMPUTER_STEPS, runComputerTool } from '../computerTools'
+import { COMPUTER_TOOLS, MAX_COMPUTER_STEPS, computerInstructions, runComputerTool } from '../computerTools'
 import { MEMORY_INSTRUCTIONS, askedQuestion, memoryPrompt, memorySource, parseMemoryReply, profileBlock } from '../memory'
 import { stepLine, summarizeSteps } from '@shared/steps'
 import { Attachments } from './Attachments'
@@ -172,7 +172,7 @@ export class Chat extends Context.Service<
           settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : '',
           settings.artifactsEnabled ? MOODBOARD_INSTRUCTIONS : '',
           // Computer use brings the browser along, for looking up how unfamiliar apps work.
-          usesComputer(session) ? COMPUTER_INSTRUCTIONS : '',
+          usesComputer(session) ? computerInstructions(process.platform === 'darwin' ? 'darwin' : 'win32') : '',
           session.browserEnabled || usesComputer(session) ? BROWSER_INSTRUCTIONS : '',
           profileBlock(facts)
         ]

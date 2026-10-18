@@ -305,7 +305,7 @@ export interface Api {
   }
   browser: BrowserApi
   computer: {
-    /** False where computer use isn't available yet (it's Windows-only for now). */
+    /** False where computer use isn't available (it runs on Windows and macOS). */
     supported: boolean
     tips(): Promise<AppTip[]>
     removeTip(id: string): Promise<AppTip[]>

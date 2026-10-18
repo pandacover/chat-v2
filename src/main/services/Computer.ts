@@ -4,6 +4,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context, Effect, Layer, Schema } from 'effect'
 import {
+  type DesktopOs,
   type DesktopState,
   type Frame,
   type Hidden,
@@ -27,7 +28,7 @@ import {
 import type { AppTip } from '@shared/types'
 import type { ChatWindowsPort, OverlayPort, ScreenPort } from '../desktop'
 import { errorMessage } from '../errors'
-import type { Driver } from '../winHelper'
+import type { Driver } from '../driver'
 import { AppPaths } from './AppPaths'
 import { SettingsStore } from './SettingsStore'
 
@@ -58,8 +59,12 @@ export type MarkInput =
   | { kind: 'text'; x: number; y: number; text: string; color?: MarkColor }
 
 export interface ComputerPorts {
-  /** Null where computer use isn't built yet (macOS, Linux). */
+  /** Null where computer use isn't built (Linux). */
   driver: Driver | null
+  /** Picks the protected apps and blocked shortcuts. */
+  os: DesktopOs
+  /** Why computer use can't start yet (a permission the system hasn't granted), or null. */
+  permissions?: () => Promise<string | null>
   screen: ScreenPort
   overlay: OverlayPort
   chatWindows: ChatWindowsPort
@@ -158,12 +163,12 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
           Effect.tryPromise({ try: f, catch: (cause) => fail(`${what}: ${errorMessage(cause)}`) })
 
         const needDriver = Effect.suspend(() =>
-          driver ? Effect.succeed(driver) : Effect.fail(fail('Computer use works on Windows only for now.'))
+          driver ? Effect.succeed(driver) : Effect.fail(fail("Computer use isn't available on this system yet."))
         )
 
         const guard = settings.get.pipe(
-          Effect.map((s) => ({ selfPid: ports.selfPid, extra: s.computerProtected })),
-          Effect.orElseSucceed(() => ({ selfPid: ports.selfPid, extra: [] as string[] }))
+          Effect.map((s) => ({ selfPid: ports.selfPid, extra: s.computerProtected, os: ports.os })),
+          Effect.orElseSucceed(() => ({ selfPid: ports.selfPid, extra: [] as string[], os: ports.os }))
         )
 
         // --- Tips the model saved about apps ---------------------------------------------------
@@ -195,12 +200,14 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             `Screenshot: ${f.shotW}×${f.shotH} pixels of the primary display. Give every coordinate in these pixels.`,
             fg ? (reasonOf(fg) ? `Active window: protected (${reasonOf(fg)})` : `Active window: "${clip(fg.title, 90)}" (${fg.exe || 'unknown app'})`) : 'Active window: none (the desktop)'
           ]
-          const listed = s.windows.filter((w) => onScreen(w) && w.title.trim() && !reasonOf(w)).slice(0, 15)
+          // macOS only names windows to apps it lets record the screen; list them by app then.
+          const named = (w: WindowInfo) => w.title.trim() !== '' || (ports.os === 'darwin' && w.exe !== '' && w.cls === 'layer 0')
+          const listed = s.windows.filter((w) => onScreen(w) && named(w) && !reasonOf(w)).slice(0, 15)
           if (listed.length) {
             lines.push('Windows, front to back:')
             for (const w of listed) {
               const r = shotRect(f, w)
-              lines.push(`- "${clip(w.title, 80)}" (${w.exe || '?'}) at ${r.x},${r.y} ${r.w}×${r.h}`)
+              lines.push(`- ${w.title.trim() ? `"${clip(w.title, 80)}"` : 'A window'} (${w.exe || '?'}) at ${r.x},${r.y} ${r.w}×${r.h}`)
             }
           }
           if (hidden.length) {
@@ -227,7 +234,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             const hidden = hiddenRegions(s.windows, reasonOf, { x: display.x, y: display.y, w: display.w, h: display.h })
             // A pixel of margin, so rounding never lets an edge of a protected window show.
             const cover = hidden.flatMap((h) => h.parts.map((p) => shotRect(f, p))).map((r) => ({ x: r.x - 2, y: r.y - 2, w: r.w + 4, h: r.h + 4 }))
-            const shot = yield* attempt('Capturing the screen', () => screen.capture({ w: f.shotW, h: f.shotH }, cover))
+            const shot = yield* attempt('Capturing the screen', () => overlay.hiddenWhile(() => screen.capture({ w: f.shotW, h: f.shotH }, cover)))
             if (shot.w !== f.shotW || shot.h !== f.shotH) f = { ...f, shotW: shot.w, shotH: shot.h }
             frame = f
             return { image: shot.dataUrl, frame: f, text: describe(s, f, hidden, reasonOf) } satisfies Look
@@ -356,6 +363,8 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               yield* needDriver
               if (owner && owner !== id) return yield* Effect.fail(fail('Another chat is using the computer. Wait for it to finish, or stop it.'))
               if (owner === id) return
+              const missing = ports.permissions ? yield* attempt('Checking permissions', ports.permissions) : null
+              if (missing) return yield* Effect.fail(fail(missing))
               yield* checkScale
               owner = id
               workWindow = null
@@ -428,7 +437,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
                 .flatMap((hd) => hd.parts)
                 .map((p) => ({ x: (p.x - crop.x) * sx - 2, y: (p.y - crop.y) * sy - 2, w: p.w * sx + 4, h: p.h * sy + 4 }))
                 .filter((r) => r.x < size.w && r.y < size.h && r.x + r.w > 0 && r.y + r.h > 0)
-              const shot = yield* attempt('Capturing the screen', () => screen.capture(size, cover, crop))
+              const shot = yield* attempt('Capturing the screen', () => overlay.hiddenWhile(() => screen.capture(size, cover, crop)))
               const zoomed = Math.round((shot.w / (x1 - x0)) * 10) / 10
               return {
                 image: shot.dataUrl,
@@ -496,7 +505,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
           keys: (combo, label) =>
             Effect.gen(function* () {
               const vks = yield* Effect.try({ try: () => parseKeys(combo), catch: (e) => fail(errorMessage(e)) })
-              const chord = protectedChord(vks)
+              const chord = protectedChord(vks, ports.os)
               if (chord) return yield* Effect.fail(fail(`Blocked: ${chord}, which are protected. Don't look for another way in; ask the user.`, 'blocked'))
               const { d, f, s } = yield* before(label)
               const w = yield* keyTarget(d, s)
@@ -519,9 +528,9 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               if (!found) {
                 const words = want.split(/\s+/).filter((w) => w.length > 2)
                 const near = apps.filter((a) => words.some((w) => a.name.toLowerCase().includes(w))).slice(0, 8).map((a) => a.name)
-                return yield* Effect.fail(fail(`No app called "${name}" in the Start menu.${near.length ? ` Close matches: ${near.join(', ')}.` : ''}`))
+                return yield* Effect.fail(fail(`No installed app called "${name}".${near.length ? ` Close matches: ${near.join(', ')}.` : ''}`))
               }
-              const reason = protectedAppName(found.name, found.id, ctx.extra)
+              const reason = protectedAppName(found.name, found.id, ctx.extra, ports.os)
               if (reason) return yield* Effect.fail(blocked(reason))
               const s0 = yield* readState
               yield* attempt('Opening the app', () => d.launch(found.id))

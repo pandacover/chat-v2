@@ -1,7 +1,7 @@
 // The Electron half of computer use: capturing the screen, the see-through overlay that draws
 // the sketch cursor and marks, and moving the chat window out of the way.
 import { join } from 'node:path'
-import { BrowserWindow, desktopCapturer, ipcMain, nativeImage, screen } from 'electron'
+import { BrowserWindow, desktopCapturer, ipcMain, nativeImage, screen, systemPreferences } from 'electron'
 import type { OverlayCommand, OverlayEvent, Rect } from '@shared/computer'
 
 export interface DisplayInfo {
@@ -27,6 +27,11 @@ export interface ScreenPort {
 export interface OverlayPort {
   send(event: OverlayEvent): void
   onCommand(handler: (command: OverlayCommand) => void): void
+  /**
+   * Runs a screen capture with the overlay out of the picture. Windows leaves it out of captures
+   * by itself; recent macOS versions capture it anyway, so there it's hidden for that moment.
+   */
+  hiddenWhile<A>(capture: () => Promise<A>): Promise<A>
 }
 
 export interface ChatWindowsPort {
@@ -44,7 +49,9 @@ export const electronScreen: ScreenPort = {
   },
   cursor: () => {
     const p = screen.getCursorScreenPoint()
-    return process.platform === 'win32' ? screen.dipToScreenPoint(p) : p
+    if (process.platform === 'win32') return screen.dipToScreenPoint(p)
+    const scale = screen.getPrimaryDisplay().scaleFactor
+    return { x: Math.round(p.x * scale), y: Math.round(p.y * scale) }
   },
   capture: async (size, cover, crop) => {
     const primary = screen.getPrimaryDisplay()
@@ -151,7 +158,8 @@ export const electronOverlay = (headless: boolean): OverlayPort => {
     w.setIgnoreMouseEvents(true)
     w.setContentProtection(true)
     w.setAlwaysOnTop(true, 'screen-saver')
-    w.setVisibleOnAllWorkspaces(true)
+    // On macOS, also over apps in full screen, which live in their own Space.
+    w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
     forwarding = false
     w.on('closed', () => {
       if (win === w) win = null
@@ -206,8 +214,39 @@ export const electronOverlay = (headless: boolean): OverlayPort => {
       if (loaded) void loaded.then(() => win && !win.isDestroyed() && win.webContents.send('overlay:event', event))
       else queue.push(event)
     },
-    onCommand: (h) => (handler = h)
+    onCommand: (h) => (handler = h),
+    hiddenWhile: async (capture) => {
+      const w = win
+      if (process.platform !== 'darwin' || !w || w.isDestroyed() || !w.isVisible()) return capture()
+      w.setOpacity(0)
+      // A frame for the window server to drop it from the screen.
+      await new Promise((r) => setTimeout(r, 50))
+      try {
+        return await capture()
+      } finally {
+        if (!w.isDestroyed()) w.setOpacity(1)
+      }
+    }
   }
+}
+
+/**
+ * macOS asks before an app may watch the screen or send input to other apps. Says what's still
+ * missing, after asking for it (macOS shows its own prompt the first time), or null.
+ */
+export const macPermissions = async (): Promise<string | null> => {
+  // Asking with `true` shows the system prompt the first time and only checks after that.
+  if (!systemPreferences.isTrustedAccessibilityClient(true)) {
+    return 'Computer use needs Accessibility access to work your apps. Allow chat-v2 in System Settings → Privacy & Security → Accessibility, then try again.'
+  }
+  if (systemPreferences.getMediaAccessStatus('screen') !== 'granted') {
+    // Trying to capture is what makes macOS ask for Screen Recording.
+    await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1, height: 1 } }).catch(() => [])
+    if (systemPreferences.getMediaAccessStatus('screen') !== 'granted') {
+      return 'Computer use needs Screen Recording access to see your screen. Allow chat-v2 in System Settings → Privacy & Security → Screen & System Audio Recording, then quit and reopen chat-v2.'
+    }
+  }
+  return null
 }
 
 export const electronChatWindows = (headless: boolean): ChatWindowsPort => {

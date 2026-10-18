@@ -12,5 +12,8 @@
     <!-- Voice input. Without it the hardened runtime denies the microphone without asking. -->
     <key>com.apple.security.device.audio-input</key>
     <true/>
+    <!-- Computer use: typing through System Events when posting the characters doesn't work. -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
   </dict>
 </plist>

@@ -34,7 +34,7 @@ export interface FakeDesktop {
   stop: (() => void) | null
 }
 
-export const fakeDesktop = (windows: WindowInfo[] = [win({})]): FakeDesktop => {
+export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'darwin' = 'win32'): FakeDesktop => {
   const d: FakeDesktop = {
     state: { cursor: { x: 50, y: 50 }, foreground: windows[0]?.hwnd ?? 0, windows },
     input: [],
@@ -52,6 +52,7 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})]): FakeDesktop => {
   }
   d.ports = {
     selfPid: SELF_PID,
+    os,
     driver: {
       state: async () => structuredClone(d.state),
       click: async (hwnd, x, y, button, count) => void d.input.push(`click ${hwnd} ${Math.round(x)},${Math.round(y)} ${button}${count > 1 ? ` x${count}` : ''}`),
@@ -86,7 +87,8 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})]): FakeDesktop => {
       send: (e) => void d.overlay.push(e),
       onCommand: (handler) => {
         d.stop = () => handler('stop')
-      }
+      },
+      hiddenWhile: (capture) => capture()
     },
     chatWindows: { hide: () => void d.chat.push('hide'), show: () => void d.chat.push('show') }
   }

@@ -81,7 +81,7 @@ const api: Api = {
     }
   },
   computer: {
-    supported: process.platform === 'win32',
+    supported: process.platform === 'win32' || process.platform === 'darwin',
     tips: () => call('computer:tips'),
     removeTip: (id) => call('computer:removeTip', id),
     protectedApps: () => call('computer:protectedApps'),

@@ -10,7 +10,7 @@ import { Attachments } from './services/Attachments'
 import { Browser } from './services/Browser'
 import { Chat, NEW_SESSION_TITLE } from './services/Chat'
 import { Computer } from './services/Computer'
-import { PROTECTED_APPS, PROTECTED_TITLES } from '@shared/computer'
+import { PROTECTED_TITLES, protectedAppsFor } from '@shared/computer'
 import { Db, type DbApi } from './services/Db'
 import { isSensitive } from './memory'
 import { ElevenLabs } from './services/ElevenLabs'
@@ -238,7 +238,8 @@ const handlers: Record<string, Handler> = {
 
   'computer:tips': () => Computer.use((c) => c.tips),
   'computer:removeTip': (id) => Computer.use((c) => c.removeTip(str(id, 'id'))),
-  'computer:protectedApps': () => Effect.succeed([...PROTECTED_APPS.map((a) => a.label), ...PROTECTED_TITLES.map((t) => t.label)])
+  'computer:protectedApps': () =>
+    Effect.succeed([...protectedAppsFor(process.platform === 'darwin' ? 'darwin' : 'win32').map((a) => a.label), ...PROTECTED_TITLES.map((t) => t.label)])
 }
 
 /** Calls made while the app quits are never answered; the window closes before it could use one. */

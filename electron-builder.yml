@@ -41,6 +41,8 @@ mac:
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
     NSMicrophoneUsageDescription: chat-v2 uses the microphone for voice input.
+    # Computer use types through System Events when it can't post the characters itself.
+    NSAppleEventsUsageDescription: chat-v2 uses System Events to type into apps during computer use.
   # One build per architecture: a universal app carries both and is twice the size.
   target:
     # The universal DMG is only for apps from before the split, whose updater downloads

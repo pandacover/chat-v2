@@ -5,8 +5,13 @@
 export interface WindowInfo {
   hwnd: number
   pid: number
-  /** Executable file name, e.g. "Resolve.exe". Empty when Windows won't say (protected processes). */
+  /**
+   * Executable file name on Windows, e.g. "Resolve.exe"; the app's name on macOS, e.g. "DaVinci
+   * Resolve". Empty when the system won't say (protected processes).
+   */
   exe: string
+  /** The app's bundle identifier on macOS, e.g. "com.apple.Terminal". */
+  bundle?: string
   title: string
   cls: string
   x: number
@@ -32,29 +37,45 @@ export interface Rect {
 
 // --- The guard -----------------------------------------------------------------------------
 
+/** The systems computer use runs on; each has its own list of protected apps. */
+export type DesktopOs = 'win32' | 'darwin'
+
 export interface ProtectedApp {
   label: string
-  /** Executable names, lower case, without ".exe". */
+  /** Where the entry applies. */
+  os: DesktopOs | 'any'
+  /** Executable names (macOS: app names), lower case, without ".exe". */
   exes: string[]
-  /** Names as they appear in the Start menu, for refusing to open the app at all. */
+  /** Names as they appear in the Start menu or Applications, for refusing to open the app at all. */
   names: string[]
+  /** macOS bundle identifiers, lower case. */
+  bundles?: string[]
 }
 
 /**
  * Apps the assistant may never see or touch. Settings and security tools could switch the
- * guard off or leak secrets; terminals and the Run box would let it run anything; credential
- * prompts are where passkeys and Windows Hello ask for a fingerprint or PIN.
+ * guard off or leak secrets; terminals, script tools and the Run box would let it run anything;
+ * credential prompts are where passkeys, Windows Hello and Touch ID ask for a fingerprint or PIN.
  */
 export const PROTECTED_APPS: ProtectedApp[] = [
-  { label: 'Windows Settings', exes: ['systemsettings', 'systemsettingsadminflows', 'systempropertiesadvanced', 'systempropertiescomputername', 'systempropertiesprotection', 'systempropertiesremote', 'useraccountcontrolsettings', 'msconfig'], names: ['settings', 'system configuration'] },
-  { label: 'Control Panel', exes: ['control', 'rundll32'], names: ['control panel'] },
-  { label: 'Windows Security', exes: ['sechealthui', 'securityhealthhost', 'securityhealthtray'], names: ['windows security'] },
-  { label: 'Passkey and sign-in prompts', exes: ['credentialuibroker', 'credentialenrollmentmanager', 'consent', 'logonui', 'lockapp', 'webauthn', 'ngcpopkeysrv'], names: [] },
-  { label: 'Admin tools', exes: ['mmc', 'regedit', 'taskmgr', 'gpedit', 'secpol', 'certmgr', 'resmon', 'perfmon', 'eventvwr', 'compmgmtlauncher'], names: ['registry editor', 'task manager', 'computer management', 'services', 'event viewer', 'windows tools', 'local security policy', 'credential manager'] },
-  { label: 'Terminals', exes: ['cmd', 'powershell', 'pwsh', 'powershell_ise', 'windowsterminal', 'wt', 'openconsole', 'conhost', 'wsl', 'wslhost', 'bash', 'mintty', 'alacritty', 'wezterm-gui', 'hyper', 'tabby'], names: ['command prompt', 'windows powershell', 'powershell', 'terminal', 'windows terminal', 'git bash', 'ubuntu', 'wsl'] },
-  { label: 'Start, search and quick settings', exes: ['startmenuexperiencehost', 'searchhost', 'searchapp', 'searchui', 'shellexperiencehost', 'shellhost', 'controlcenter'], names: ['run'] },
-  { label: 'Password managers', exes: ['1password', 'bitwarden', 'keepass', 'keepassxc', 'lastpass', 'dashlane', 'nordpass', 'keeper', 'keeperpasswordmanager', 'enpass', 'proton pass', 'roboform', 'authy desktop', 'yubico authenticator', 'ykman'], names: ['1password', 'bitwarden', 'keepass', 'keepassxc', 'lastpass', 'dashlane', 'nordpass', 'keeper', 'enpass', 'proton pass', 'roboform', 'authy', 'yubico authenticator'] }
+  { label: 'Windows Settings', os: 'win32', exes: ['systemsettings', 'systemsettingsadminflows', 'systempropertiesadvanced', 'systempropertiescomputername', 'systempropertiesprotection', 'systempropertiesremote', 'useraccountcontrolsettings', 'msconfig'], names: ['settings', 'system configuration'] },
+  { label: 'Control Panel', os: 'win32', exes: ['control', 'rundll32'], names: ['control panel'] },
+  { label: 'Windows Security', os: 'win32', exes: ['sechealthui', 'securityhealthhost', 'securityhealthtray'], names: ['windows security'] },
+  { label: 'Passkey and sign-in prompts', os: 'win32', exes: ['credentialuibroker', 'credentialenrollmentmanager', 'consent', 'logonui', 'lockapp', 'webauthn', 'ngcpopkeysrv'], names: [] },
+  { label: 'Admin tools', os: 'win32', exes: ['mmc', 'regedit', 'taskmgr', 'gpedit', 'secpol', 'certmgr', 'resmon', 'perfmon', 'eventvwr', 'compmgmtlauncher'], names: ['registry editor', 'task manager', 'computer management', 'services', 'event viewer', 'windows tools', 'local security policy', 'credential manager'] },
+  { label: 'Terminals', os: 'win32', exes: ['cmd', 'powershell', 'pwsh', 'powershell_ise', 'windowsterminal', 'wt', 'openconsole', 'conhost', 'wsl', 'wslhost', 'bash', 'mintty', 'alacritty', 'wezterm-gui', 'hyper', 'tabby'], names: ['command prompt', 'windows powershell', 'powershell', 'terminal', 'windows terminal', 'git bash', 'ubuntu', 'wsl'] },
+  { label: 'Start, search and quick settings', os: 'win32', exes: ['startmenuexperiencehost', 'searchhost', 'searchapp', 'searchui', 'shellexperiencehost', 'shellhost', 'controlcenter'], names: ['run'] },
+  { label: 'Password managers', os: 'any', exes: ['1password', 'bitwarden', 'keepass', 'keepassxc', 'lastpass', 'dashlane', 'nordpass', 'keeper', 'keeperpasswordmanager', 'enpass', 'proton pass', 'roboform', 'authy desktop', 'yubico authenticator', 'ykman'], names: ['1password', 'bitwarden', 'keepass', 'keepassxc', 'lastpass', 'dashlane', 'nordpass', 'keeper', 'enpass', 'proton pass', 'roboform', 'authy', 'yubico authenticator'], bundles: ['com.1password.1password', 'com.agilebits.onepassword7', 'com.bitwarden.desktop', 'org.keepassxc.keepassxc', 'com.lastpass.lastpassmacdesktop', 'com.dashlane.dashlanephonefinal', 'me.proton.pass.electron'] },
+  { label: 'System Settings', os: 'darwin', exes: ['system settings', 'system preferences'], names: ['system settings', 'system preferences'], bundles: ['com.apple.systempreferences', 'com.apple.settings'] },
+  { label: 'Keychain and Passwords', os: 'darwin', exes: ['keychain access', 'passwords'], names: ['keychain access', 'passwords'], bundles: ['com.apple.keychainaccess', 'com.apple.passwords'] },
+  { label: 'Password and Touch ID prompts', os: 'darwin', exes: ['securityagent', 'coreautha', 'universalaccessauthwarn', 'loginwindow', 'screensaverengine', 'coreservicesuiagent'], names: [], bundles: ['com.apple.securityagent', 'com.apple.localauthentication.uiagent', 'com.apple.loginwindow', 'com.apple.screensaver.engine'] },
+  { label: 'Admin and script tools', os: 'darwin', exes: ['activity monitor', 'disk utility', 'directory utility', 'console', 'script editor', 'automator', 'shortcuts'], names: ['activity monitor', 'disk utility', 'directory utility', 'console', 'script editor', 'automator', 'shortcuts'], bundles: ['com.apple.activitymonitor', 'com.apple.diskutility', 'com.apple.scripteditor2', 'com.apple.automator', 'com.apple.shortcuts'] },
+  { label: 'Terminals', os: 'darwin', exes: ['terminal', 'iterm2', 'iterm', 'warp', 'ghostty', 'kitty', 'alacritty', 'wezterm', 'wezterm-gui', 'hyper', 'tabby'], names: ['terminal', 'iterm', 'warp', 'ghostty', 'kitty', 'alacritty', 'wezterm', 'hyper', 'tabby'], bundles: ['com.apple.terminal', 'com.googlecode.iterm2', 'dev.warp.warp-stable', 'com.mitchellh.ghostty', 'net.kovidgoyal.kitty', 'org.alacritty', 'com.github.wez.wezterm', 'co.zeit.hyper'] },
+  { label: 'Spotlight and Control Center', os: 'darwin', exes: ['spotlight', 'control center', 'notification center', 'controlcenter', 'notificationcenter'], names: ['spotlight'], bundles: ['com.apple.spotlight', 'com.apple.controlcenter', 'com.apple.notificationcenterui'] }
 ]
+
+/** The protected apps that apply on a system. */
+export const protectedAppsFor = (os: DesktopOs) => PROTECTED_APPS.filter((a) => a.os === 'any' || a.os === os)
 
 /**
  * Window titles that mark secret places inside otherwise allowed apps, mostly browser tabs:
@@ -76,15 +97,20 @@ export interface GuardContext {
   selfPid: number
   /** Extra apps or title words the user protected in Settings. */
   extra: string[]
+  /** Defaults to Windows. */
+  os?: DesktopOs
 }
 
 /** Why a window is off limits, or null when the assistant may use it. */
-export const protectedReason = (win: Pick<WindowInfo, 'pid' | 'exe' | 'title'>, ctx: GuardContext): string | null => {
+export const protectedReason = (win: Pick<WindowInfo, 'pid' | 'exe' | 'title' | 'bundle'>, ctx: GuardContext): string | null => {
   if (win.pid === ctx.selfPid) return 'chat-v2 itself'
-  // Windows won't name some processes (system ones, mostly). What can't be named isn't touched.
-  if (!win.exe.trim()) return 'an app Windows will not identify'
+  // The system won't name some processes (system ones, mostly). What can't be named isn't touched.
+  if (!win.exe.trim()) return 'an app the system will not identify'
   const exe = exeKey(win.exe)
-  for (const app of PROTECTED_APPS) if (exe && app.exes.includes(exe)) return app.label
+  const bundle = win.bundle?.toLowerCase() ?? ''
+  for (const app of protectedAppsFor(ctx.os ?? 'win32')) {
+    if (app.exes.includes(exe) || (bundle && app.bundles?.includes(bundle))) return app.label
+  }
   for (const { label, pattern } of PROTECTED_TITLES) if (pattern.test(win.title.trim())) return label
   const title = win.title.toLowerCase()
   for (const raw of ctx.extra) {
@@ -94,12 +120,15 @@ export const protectedReason = (win: Pick<WindowInfo, 'pid' | 'exe' | 'title'>, 
   return null
 }
 
-/** Why an app may not be opened by name, or null. Matches the Start menu name and its id. */
-export const protectedAppName = (name: string, id: string, extra: string[]): string | null => {
+/**
+ * Why an app may not be opened by name, or null. Matches the Start menu name and its id, or on
+ * macOS the app's name and path.
+ */
+export const protectedAppName = (name: string, id: string, extra: string[], os: DesktopOs = 'win32'): string | null => {
   const n = name.trim().toLowerCase()
   const lowerId = id.toLowerCase()
   if (/immersivecontrolpanel|windowsterminal|\\(cmd|powershell|pwsh|regedit|mmc|taskmgr|control)\.exe$/.test(lowerId)) return 'a protected system app'
-  for (const app of PROTECTED_APPS) {
+  for (const app of protectedAppsFor(os)) {
     // "Developer Command Prompt for VS 2022" is still a command prompt; "Run" must match whole.
     if (app.names.some((p) => (p.length < 5 ? n === p : n.includes(p))) || app.exes.includes(exeKey(n))) return app.label
     if (app.exes.some((e) => lowerId.endsWith(`\\${e}.exe`))) return app.label
@@ -139,9 +168,20 @@ export const parseKeys = (combo: string): number[] => {
   })
 }
 
-/** Shortcuts that reach protected places directly (Run, Settings, Start search, lock, Task Manager). */
-export const protectedChord = (vks: number[]): string | null => {
+/**
+ * Shortcuts that reach protected places directly: Run, Settings, Start search, lock and Task
+ * Manager on Windows; Spotlight, Force Quit and lock on macOS, where Cmd (0x5b) is the everyday
+ * modifier rather than the Windows key.
+ */
+export const protectedChord = (vks: number[], os: DesktopOs = 'win32'): string | null => {
   const has = (vk: number) => vks.includes(vk)
+  if (os === 'darwin') {
+    if (has(0x5b) && has(0x20)) return 'Cmd+Space opens Spotlight, which can open anything'
+    if (has(0x11) && has(0x20)) return 'Ctrl+Space switches input sources'
+    if (has(0x5b) && has(0x12) && has(0x1b)) return 'Cmd+Option+Esc opens Force Quit'
+    if (has(0x11) && has(0x5b) && has(0x51)) return 'Ctrl+Cmd+Q locks the screen'
+    return null
+  }
   if (has(0x5b) || has(0x5c)) return 'Windows-key shortcuts open Start, Run and Settings'
   if (has(0x11) && has(0x12) && has(0x2e)) return 'Ctrl+Alt+Delete opens the security screen'
   if (has(0x11) && has(0x10) && has(0x1b)) return 'Ctrl+Shift+Esc opens Task Manager'
