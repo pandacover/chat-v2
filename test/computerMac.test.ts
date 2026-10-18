@@ -102,6 +102,16 @@ describe('mac helper script', () => {
     helper.close()
   })
 
+  test('clicks and scrolls try Accessibility before posting events, which Mac apps mostly ignore', () => {
+    const click = MAC_HELPER_SCRIPT.slice(MAC_HELPER_SCRIPT.indexOf('function click('))
+    expect(click.indexOf('axClick(')).toBeGreaterThan(-1)
+    expect(click.indexOf('axClick(')).toBeLessThan(click.indexOf('postMouse('))
+    const wheel = MAC_HELPER_SCRIPT.slice(MAC_HELPER_SCRIPT.indexOf('function wheel('))
+    expect(wheel.indexOf('axScroll(')).toBeLessThan(wheel.indexOf('CGEventPostToPid('))
+    // Hit-testing is done within the app the guard checked, never system-wide.
+    expect(MAC_HELPER_SCRIPT).not.toContain('AXUIElementCreateSystemWide')
+  })
+
   test('the script survives being embedded: escapes are still escapes', () => {
     expect(MAC_HELPER_SCRIPT).toContain("JSON.stringify(obj) + '\\n'")
     expect(MAC_HELPER_SCRIPT).toContain(".split('\\n')")
@@ -136,6 +146,15 @@ describe('mac computer service', () => {
     await t.run(Computer.use((c) => c.begin('r')))
     const look = await t.tool('computer_screenshot')
     expect(look.text).toContain('- A window (TextEdit) at')
+  })
+
+  test("the model hears how a click went, so it doesn't take a posted click for a done one", async () => {
+    const t = service()
+    t.desktop.ports.driver!.click = async () => 'Nothing there responds to Accessibility, so I posted mouse events instead.'
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    const out = await t.tool('computer_click', { x: 100, y: 100, target: 'Canvas' })
+    expect(out.text.startsWith('Nothing there responds to Accessibility')).toBe(true)
   })
 
   test('a missing permission stops it before it starts, with what to allow', async () => {

@@ -14,10 +14,11 @@ import { helperProcess } from './helperProcess'
 // `win` is a CGWindowID. Coordinates here are points (macOS's global display coordinates); the
 // driver below converts to and from the physical pixels the rest of computer use works in.
 //
-// The mouse is never moved: mouse events are posted to the app that owns the window (and tagged
-// with the window), not to the system, so the user keeps their pointer. Apps that aren't in front
-// are brought forward first, since many Mac apps take a first click only to activate. Keys and
-// text are posted as keyboard events, which reach the app in front and don't touch the mouse.
+// The mouse is never moved. A click presses the element under the point through Accessibility
+// (buttons, menus, rows, links, text fields), which apps can't ignore and which says whether it
+// worked; where nothing takes a press, mouse events are posted to the app that owns the window,
+// which many Mac apps ignore, and the model is told so. Dragging can only be posted, since macOS
+// has no way to drag without the pointer. Keys and text reach the app in front.
 
 export const MAC_HELPER_SCRIPT = String.raw`
 ObjC.import('Cocoa')
@@ -162,11 +163,142 @@ function postMouse(pid, win, type, x, y, button, clicks) {
   $.CGEventPostToPid(pid, e)
 }
 
+// --- Accessibility: clicks that apps can't ignore -----------------------------------------
+// Mac apps ignore most mouse events posted to them. Accessibility is how macOS lets another app
+// press a button, pick a row or focus a field without the pointer, and it says whether it worked.
+
+var axPrepared = {}
+function axApp(pid) {
+  var app = $.AXUIElementCreateApplication(pid)
+  if (!axPrepared[pid]) {
+    axPrepared[pid] = true
+    // Electron apps build their accessibility tree only when something asks for it.
+    try { $.AXUIElementSetAttributeValue(app, $('AXManualAccessibility'), $.NSNumber.numberWithBool(true)) } catch (e) {}
+  }
+  return app
+}
+
+function axGet(el, name) {
+  var ref = Ref()
+  return $.AXUIElementCopyAttributeValue(el, $(name), ref) === 0 ? ref[0] : null
+}
+
+function axString(el, name) {
+  var v = axGet(el, name)
+  if (v === null || v === undefined) return ''
+  try {
+    var s = ObjC.castRefToObject(v).js
+    return typeof s === 'string' ? s : ''
+  } catch (e) { return '' }
+}
+
+function axNumber(el, name) {
+  var v = axGet(el, name)
+  if (v === null || v === undefined) return null
+  try {
+    var n = ObjC.castRefToObject(v).js
+    return typeof n === 'number' ? n : null
+  } catch (e) { return null }
+}
+
+function axActions(el) {
+  var ref = Ref()
+  if ($.AXUIElementCopyActionNames(el, ref) !== 0) return []
+  try {
+    var list = ObjC.deepUnwrap(ObjC.castRefToObject(ref[0]))
+    return Array.isArray(list) ? list : []
+  } catch (e) { return [] }
+}
+
+function axAt(pid, x, y) {
+  at('finding what is at ' + Math.round(x) + ',' + Math.round(y))
+  var ref = Ref()
+  return $.AXUIElementCopyElementAtPosition(axApp(pid), x, y, ref) === 0 ? ref[0] : null
+}
+
+// Only a window's surface: the app hasn't built its tree yet (Chromium, Electron) or draws its own.
+function coarse(el) {
+  var role = axString(el, 'AXRole')
+  return !role || role === 'AXWindow' || role === 'AXApplication' || (role === 'AXGroup' && axActions(el).length === 0 && !axString(el, 'AXTitle'))
+}
+
+function axHit(pid, x, y) {
+  var el = axAt(pid, x, y)
+  if (el && !coarse(el)) return el
+  // Ask Chromium apps for their tree, and give them a moment to build it.
+  try { $.AXUIElementSetAttributeValue(axApp(pid), $('AXEnhancedUserInterface'), $.NSNumber.numberWithBool(true)) } catch (e) {}
+  delay(0.3)
+  return axAt(pid, x, y) || el
+}
+
+function axName(el) {
+  var role = axString(el, 'AXRoleDescription') || axString(el, 'AXRole').replace(/^AX/, '')
+  var name = axString(el, 'AXTitle') || axString(el, 'AXDescription') || axString(el, 'AXHelp')
+  return (role || 'element') + (name ? ' "' + name.slice(0, 60) + '"' : '')
+}
+
+var TEXT_ROLES = ['AXTextField', 'AXTextArea', 'AXComboBox', 'AXSearchField']
+var PICKED_ROLES = ['AXRow', 'AXCell', 'AXOutlineRow', 'AXRadioButton', 'AXTab']
+var STOP_ROLES = ['AXWindow', 'AXApplication', 'AXSheet', 'AXDrawer']
+
+// Presses whatever is at the point, or the nearest thing above it that can be pressed (text
+// inside a button, an icon inside a row). Says what it did, or null when nothing there responds.
+function axClick(pid, x, y, which, count) {
+  var cur = axHit(pid, x, y)
+  for (var depth = 0; depth < 6 && cur; depth++) {
+    var role = axString(cur, 'AXRole')
+    if (STOP_ROLES.indexOf(role) >= 0) break
+    var acts = axActions(cur)
+    at('pressing ' + role)
+    if (which === 'right') {
+      if (acts.indexOf('AXShowMenu') >= 0 && $.AXUIElementPerformAction(cur, $('AXShowMenu')) === 0) return 'Opened the menu of the ' + axName(cur) + ' through Accessibility.'
+    } else {
+      if (TEXT_ROLES.indexOf(role) >= 0 && $.AXUIElementSetAttributeValue(cur, $('AXFocused'), $.NSNumber.numberWithBool(true)) === 0) {
+        return 'Put the text cursor in the ' + axName(cur) + ' through Accessibility.'
+      }
+      var tries = count >= 2 ? ['AXOpen', 'AXPress', 'AXConfirm', 'AXPick'] : ['AXPress', 'AXPick', 'AXConfirm', 'AXOpen']
+      for (var k = 0; k < tries.length; k++) {
+        if (acts.indexOf(tries[k]) >= 0 && $.AXUIElementPerformAction(cur, $(tries[k])) === 0) return 'Pressed the ' + axName(cur) + ' through Accessibility.'
+      }
+      if (PICKED_ROLES.indexOf(role) >= 0 && $.AXUIElementSetAttributeValue(cur, $('AXSelected'), $.NSNumber.numberWithBool(true)) === 0) {
+        return 'Selected the ' + axName(cur) + ' through Accessibility.'
+      }
+    }
+    cur = axGet(cur, 'AXParent')
+  }
+  return null
+}
+
+// Scrolls the scroll area under the point by moving its scroll bar, 1% of the way a line.
+function axScroll(pid, x, y, dx, dy) {
+  var cur = axHit(pid, x, y)
+  for (var depth = 0; depth < 12 && cur; depth++) {
+    if (axString(cur, 'AXRole') === 'AXScrollArea') {
+      var bar = axGet(cur, dy !== 0 ? 'AXVerticalScrollBar' : 'AXHorizontalScrollBar')
+      if (!bar) return null
+      var value = axNumber(bar, 'AXValue')
+      if (value === null) return null
+      // Wheel up (positive) moves toward the top; right (positive) toward the end.
+      var next = Math.min(1, Math.max(0, value + (dy !== 0 ? -dy : dx) * 0.01))
+      at('scrolling ' + axName(cur))
+      if ($.AXUIElementSetAttributeValue(bar, $('AXValue'), $.NSNumber.numberWithDouble(next)) === 0) return 'Scrolled the ' + axName(cur) + ' through Accessibility.'
+      return null
+    }
+    cur = axGet(cur, 'AXParent')
+  }
+  return null
+}
+
 // Down and up event types, and the button number.
 var BUTTONS = { left: [1, 2, 0], right: [3, 4, 1], middle: [25, 26, 2] }
 
 function click(win, x, y, which, count) {
-  var pid = target(win)
+  var pid = windowById(win).kCGWindowOwnerPID
+  var done = axClick(pid, x, y, which, count)
+  if (done) return done
+  // Nothing there takes an Accessibility press (a canvas, a game, a custom control): post the
+  // mouse events, which some apps take, with the app in front.
+  target(win)
   var b = BUTTONS[which] || BUTTONS.left
   postMouse(pid, win, 5, x, y, 0, 0)
   for (var n = 1; n <= Math.max(1, count); n++) {
@@ -175,6 +307,7 @@ function click(win, x, y, which, count) {
     postMouse(pid, win, b[1], x, y, b[2], n)
     if (n < count) delay(0.04)
   }
+  return "Nothing there responds to Accessibility, so I posted mouse events instead. Many Mac apps ignore those: if the screenshot shows no change, the click didn't happen. Use the keyboard instead (Tab, Space, Return, the app's shortcuts)."
 }
 
 function drag(win, x0, y0, x1, y1) {
@@ -187,11 +320,14 @@ function drag(win, x0, y0, x1, y1) {
     postMouse(pid, win, 6, x0 + ((x1 - x0) * i) / steps, y0 + ((y1 - y0) * i) / steps, 0, 0)
   }
   postMouse(pid, win, 2, x1, y1, 0, 1)
+  return "macOS has no way to drag without moving the user's pointer, so this was posted as mouse events, which most Mac apps ignore. If the screenshot shows no change, it didn't work: do it another way (menus, keyboard shortcuts, fields in a settings panel), or ask the user to drag it."
 }
 
 function wheel(win, x, y, dx, dy) {
   if (typeof $.CGEventCreateScrollWheelEvent2 !== 'function') throw new Error("Scrolling without moving the mouse isn't available on this Mac. Use the keyboard instead: Page Down, Space, or the arrow keys")
   var pid = windowById(win).kCGWindowOwnerPID
+  var done = axScroll(pid, x, y, dx, dy)
+  if (done) return done
   at('scrolling')
   // In lines, vertical first.
   var e = $.CGEventCreateScrollWheelEvent2(null, 1, 2, dy, dx, 0)
@@ -199,6 +335,7 @@ function wheel(win, x, y, dx, dy) {
   $.CGEventSetIntegerValueField(e, 91, win)
   $.CGEventSetIntegerValueField(e, 92, win)
   $.CGEventPostToPid(pid, e)
+  return "There's no scroll bar there to move, so I posted a scroll event, which some Mac apps ignore. If nothing moved, use the keyboard (Page Down, Space, the arrow keys)."
 }
 
 function key(code, flags, down) {
@@ -257,10 +394,10 @@ function op(a) {
   var n = function (i) { return Number(a[i]) }
   switch (a[1]) {
     case 'state': return state()
-    case 'click': click(n(2), n(3), n(4), a[5], n(6)); return { done: true }
+    case 'click': return { done: true, note: click(n(2), n(3), n(4), a[5], n(6)) }
     case 'hover': postMouse(windowById(n(2)).kCGWindowOwnerPID, n(2), 5, n(3), n(4), 0, 0); return { done: true }
-    case 'drag': drag(n(2), n(3), n(4), n(5), n(6)); return { done: true }
-    case 'wheel': wheel(n(2), n(3), n(4), n(5), n(6)); return { done: true }
+    case 'drag': return { done: true, note: drag(n(2), n(3), n(4), n(5), n(6)) }
+    case 'wheel': return { done: true, note: wheel(n(2), n(3), n(4), n(5), n(6)) }
     case 'text': typeText(decode(a[2])); return { done: true }
     case 'keys': chord(n(2), n(3), a[4] && a[4] !== '-' ? a[4].split(',').map(Number) : []); return { done: true }
     case 'focus': focusWindow(n(2)); return { done: true }
@@ -405,6 +542,7 @@ export const macDriver = (scriptFile: string, display: () => { w: number; h: num
           ? 'chat-v2 needs Accessibility access: allow it in System Settings → Privacy & Security → Accessibility, then quit and reopen chat-v2'
           : null
   )
+  const note = (reply: Record<string, unknown>) => (typeof reply.note === 'string' ? reply.note : null)
   // Pixels to points and back.
   const pt = (v: number) => v / display().scale
   const px = (v: number) => Math.round(v * display().scale)
@@ -420,11 +558,11 @@ export const macDriver = (scriptFile: string, display: () => { w: number; h: num
       const cursor = r.cursor as DesktopState['cursor']
       return { cursor: { x: px(cursor.x), y: px(cursor.y) }, foreground: r.foreground as number, windows }
     },
-    click: async (win, x, y, button, count) => void (await request('click', win, pt(x), pt(y), button, count)),
+    click: async (win, x, y, button, count) => note(await request('click', win, pt(x), pt(y), button, count)),
     hover: async (win, x, y) => void (await request('hover', win, pt(x), pt(y))),
-    drag: async (win, from, to) => void (await request('drag', win, pt(from.x), pt(from.y), pt(to.x), pt(to.y))),
+    drag: async (win, from, to) => note(await request('drag', win, pt(from.x), pt(from.y), pt(to.x), pt(to.y))),
     // A wheel notch is three lines, as on Windows.
-    wheel: async (win, x, y, dx, dy) => void (await request('wheel', win, pt(x), pt(y), Math.round(dx * 3), Math.round(dy * 3))),
+    wheel: async (win, x, y, dx, dy) => note(await request('wheel', win, pt(x), pt(y), Math.round(dx * 3), Math.round(dy * 3))),
     text: async (text) => void (await request('text', Buffer.from(text, 'utf8').toString('base64'))),
     keys: async (vks) => {
       const { code, flags, mods } = macChord(vks)

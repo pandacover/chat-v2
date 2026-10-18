@@ -1,5 +1,8 @@
 import type { DesktopState } from '@shared/computer'
 
+/** What a driver says about how an action went, if anything. */
+export type Note = string | null | void
+
 /**
  * Input and window state for computer use, one per platform (winHelper.ts, macHelper.ts).
  * Coordinates are physical screen pixels. Pointer actions go to the given top-level window (the
@@ -7,11 +10,15 @@ import type { DesktopState } from '@shared/computer'
  */
 export interface Driver {
   state(): Promise<DesktopState>
-  click(hwnd: number, x: number, y: number, button: 'left' | 'right' | 'middle', count: number): Promise<void>
+  /**
+   * Pointer actions may say how they were done, for the model: on macOS, whether a click went
+   * through Accessibility (it happened) or as posted events (it may not have).
+   */
+  click(hwnd: number, x: number, y: number, button: 'left' | 'right' | 'middle', count: number): Promise<Note>
   hover(hwnd: number, x: number, y: number): Promise<void>
-  drag(hwnd: number, from: { x: number; y: number }, to: { x: number; y: number }): Promise<void>
+  drag(hwnd: number, from: { x: number; y: number }, to: { x: number; y: number }): Promise<Note>
   /** Wheel notches over a point; positive dy scrolls up, positive dx scrolls right. */
-  wheel(hwnd: number, x: number, y: number, dx: number, dy: number): Promise<void>
+  wheel(hwnd: number, x: number, y: number, dx: number, dy: number): Promise<Note>
   /** Text and keys go to the app in front. */
   text(text: string): Promise<void>
   /** A chord as Windows virtual-key codes (see parseKeys); other platforms translate them. */

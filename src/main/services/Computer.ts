@@ -248,6 +248,9 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             return yield* capture(yield* readState)
           })
 
+        /** The driver's word on how an action went goes first, before the screen it led to. */
+        const noted = (look: Look, note: string | null | void): Look => (note ? { ...look, text: `${note}\n${look.text}` } : look)
+
         /** Waits for the screen to react, then looks again. */
         const settleAndLook = (ms: number) =>
           Effect.gen(function* () {
@@ -451,9 +454,9 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const p = yield* toScreen(f, x, y)
               const w = yield* pointerTarget(s, p)
               yield* glide(f, x, y, label, button === 'right' ? 'right' : count > 1 ? 'double' : 'click')
-              yield* attempt('Clicking', () => d.click(w.hwnd, p.x, p.y, button, count))
+              const note = yield* attempt('Clicking', () => d.click(w.hwnd, p.x, p.y, button, count))
               workWindow = w.hwnd
-              return { look: yield* settleAndLook(550), app: nameOf(w) }
+              return { look: noted(yield* settleAndLook(550), note), app: nameOf(w) }
             }),
 
           move: (x, y, label) =>
@@ -478,9 +481,9 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               overlay.send({ type: 'cursor', x: p.x, y: p.y, label, action: 'drag' })
               agentAt = { x: to[0], y: to[1] }
               // The helper moves through the drag over about the time the overlay's cursor takes.
-              yield* attempt('Dragging', () => d.drag(w.hwnd, a, b))
+              const note = yield* attempt('Dragging', () => d.drag(w.hwnd, a, b))
               workWindow = w.hwnd
-              return { look: yield* settleAndLook(500), app: nameOf(w) }
+              return { look: noted(yield* settleAndLook(500), note), app: nameOf(w) }
             }),
 
           scroll: (x, y, dx, dy, label) =>
@@ -489,8 +492,8 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const p = yield* toScreen(f, x, y)
               const w = yield* pointerTarget(s, p)
               yield* glide(f, x, y, label, 'scroll')
-              yield* attempt('Scrolling', () => d.wheel(w.hwnd, p.x, p.y, dx, dy))
-              return { look: yield* settleAndLook(450), app: nameOf(w) }
+              const note = yield* attempt('Scrolling', () => d.wheel(w.hwnd, p.x, p.y, dx, dy))
+              return { look: noted(yield* settleAndLook(450), note), app: nameOf(w) }
             }),
 
           type: (text, label) =>
