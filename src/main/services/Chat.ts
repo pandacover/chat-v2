@@ -6,7 +6,7 @@ import type { MemoryRun, Message, MessageStatus, Session, SessionView, StreamEve
 import { type DbError, InvalidInput, type NotFound, errorMessage } from '../errors'
 import { WRITING_GUIDELINES } from '../guidelines'
 import { BROWSER_INSTRUCTIONS, BROWSER_TOOLS, MAX_AGENT_STEPS, runTool } from '../agent'
-import { COMPUTER_TOOLS, MAX_COMPUTER_STEPS, computerInstructions, runComputerTool } from '../computerTools'
+import { MAX_COMPUTER_STEPS, computerInstructions, computerTools, runComputerTool } from '../computerTools'
 import { MEMORY_INSTRUCTIONS, askedQuestion, memoryPrompt, memorySource, parseMemoryReply, profileBlock } from '../memory'
 import { stepLine, summarizeSteps } from '@shared/steps'
 import { Attachments } from './Attachments'
@@ -199,7 +199,7 @@ export class Chat extends Context.Service<
           messages,
           temperature: settings.temperature,
           ...(hasPdf ? { plugins: [{ id: 'file-parser', pdf: { engine: settings.pdfEngine } }] } : {}),
-          ...(usesComputer(session) ? { tools: [...COMPUTER_TOOLS, ...BROWSER_TOOLS] } : session.browserEnabled ? { tools: BROWSER_TOOLS } : {})
+          ...(usesComputer(session) ? { tools: [...computerTools(process.platform === 'darwin' ? 'darwin' : 'win32'), ...BROWSER_TOOLS] } : session.browserEnabled ? { tools: BROWSER_TOOLS } : {})
         } satisfies ChatRequest as ChatRequest
       })
 

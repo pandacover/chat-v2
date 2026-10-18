@@ -24,6 +24,8 @@ export interface Driver {
   /** A chord as Windows virtual-key codes (see parseKeys); other platforms translate them. */
   keys(vks: number[]): Promise<void>
   focus(hwnd: number): Promise<void>
+  /** Chooses a menu-bar command by its path, in the app that owns the window (macOS only). */
+  menu?(hwnd: number, path: string[]): Promise<Note>
   /** Installed apps, for opening one by name. */
   apps(): Promise<Array<{ name: string; id: string }>>
   launch(id: string): Promise<void>

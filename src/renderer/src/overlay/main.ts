@@ -46,6 +46,19 @@ addEventListener('storage', () => {
   wake()
 })
 
+/**
+ * Where the window sits on the display (main sends it once shown): drawing is in display
+ * coordinates, and tags stay inside the part of the display the window covers.
+ */
+const view = { dx: 0, dy: 0, w: innerWidth, h: innerHeight }
+/** The visible area, in display coordinates, with a margin. */
+const visible = (margin = 8) => ({
+  x0: Math.max(0, view.dx) + margin,
+  y0: Math.max(0, view.dy) + margin,
+  x1: Math.min(view.w, view.dx + innerWidth) - margin,
+  y1: Math.min(view.h, view.dy + innerHeight) - margin
+})
+
 let dpr = 1
 const resize = () => {
   dpr = window.devicePixelRatio || 1
@@ -149,8 +162,10 @@ const setPill = () => {
 }
 
 /** Keeps the bar out of the way of where the cursor is about to work. */
-const dodge = (p: Pt) => {
+const dodge = (at: Pt) => {
   if (pill.hidden) return
+  // The bar is placed in the window, the point on the display.
+  const p = { x: at.x - view.dx, y: at.y - view.dy }
   const r = pill.getBoundingClientRect()
   const near = (y0: number, y1: number) => p.x > r.left - 60 && p.x < r.right + 60 && p.y > y0 - 60 && p.y < y1 + 60
   if (!pill.classList.contains('low') && near(r.top, r.bottom)) pill.classList.add('low')
@@ -191,7 +206,7 @@ const setMarks = (marks: Mark[]) => {
   const known = new Set(drawn.map((d) => d.ink.id))
   const fresh = marks.filter((m) => !known.has(m.id))
   const budget = Math.min(MARK_MS, MARKS_MAX_MS / Math.max(1, fresh.length))
-  for (const m of fresh) drawn.push({ ink: ink(m, { w: innerWidth, h: innerHeight }), budget, plan: null, start: 0, end: 0, fadeAt: null, drop: TAIL })
+  for (const m of fresh) drawn.push({ ink: ink(m, { w: view.w, h: view.h }), budget, plan: null, start: 0, end: 0, fadeAt: null, drop: TAIL })
   if (fresh.length) {
     driven = true
     // The tags say what's marked; "Drawing on the screen" would only crowd them.
@@ -231,6 +246,7 @@ bridge.onEvent((e) => {
   else if (e.type === 'marks') setMarks(e.marks)
   else if (e.type === 'clear') clearMarks()
   else if (e.type === 'mode') follow = e.follow
+  else if (e.type === 'frame') Object.assign(view, { dx: e.dx, dy: e.dy, w: e.w, h: e.h })
   else if (e.type === 'hint') hint = e.label
   else if (e.type === 'pointer') pointer = e.x === null ? null : { x: e.x, y: e.y }
   else if (e.type === 'status' && e.state !== 'off') setStatus(e.state, e.label)
@@ -382,16 +398,18 @@ const SNUG = 10
 
 /** Where a tag hangs: `drop` under a point, kept on screen and clear of tags already placed. */
 const placeTag = (at: Pt, size: Layout, taken: Rect[], drop = TAIL): Rect => {
-  let x = at.x + 4
-  let y = at.y + drop
-  if (x + size.w > innerWidth - 8) x = Math.max(8, innerWidth - 8 - size.w)
-  if (y + size.h > innerHeight - 8) y = at.y - size.h - 10
-  const rect = { x, y, w: size.w, h: size.h }
+  const v = visible()
+  // Below the point, or above it when there's no room below.
+  const below = at.y + drop + size.h <= v.y1
+  const rect = { x: at.x + 4, y: below ? at.y + drop : at.y - size.h - 10, w: size.w, h: size.h }
   for (let i = 0; i < 6; i++) {
     const hit = taken.find((r) => rect.x < r.x + r.w && rect.x + rect.w > r.x && rect.y < r.y + r.h && rect.y + rect.h > r.y)
     if (!hit) break
-    rect.y = hit.y + hit.h + 5
+    rect.y = below ? hit.y + hit.h + 5 : hit.y - rect.h - 5
   }
+  // Last, whatever happened above: wholly on screen. A tag wider than the screen starts at its left.
+  rect.x = Math.max(v.x0, Math.min(rect.x, v.x1 - rect.w))
+  rect.y = Math.max(v.y0, Math.min(rect.y, v.y1 - rect.h))
   return rect
 }
 
@@ -453,8 +471,9 @@ const render = () => {
   const dt = Math.min(64, t - last)
   last = t
   let busy = false
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  ctx.clearRect(0, 0, innerWidth, innerHeight)
+  // Display coordinates: the window may sit offset from the display's corner.
+  ctx.setTransform(dpr, 0, 0, dpr, -view.dx * dpr, -view.dy * dpr)
+  ctx.clearRect(view.dx, view.dy, innerWidth, innerHeight)
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
 
@@ -537,7 +556,12 @@ const render = () => {
     cursor.y = cursor.to.y
     cursor.dur = 0
   } else if (following) {
-    const target = { x: pointer!.x + BESIDE.x, y: pointer!.y + BESIDE.y }
+    // Beside the pointer, on whichever side keeps the arrowhead on screen.
+    const v = visible(0)
+    const target = {
+      x: pointer!.x + BESIDE.x + 22 > v.x1 ? pointer!.x - BESIDE.x - 18 : pointer!.x + BESIDE.x,
+      y: pointer!.y + BESIDE.y + 24 > v.y1 ? pointer!.y - BESIDE.y - 22 : pointer!.y + BESIDE.y
+    }
     if (cursor.alpha < 0.05) {
       cursor.x = target.x
       cursor.y = target.y
@@ -550,8 +574,8 @@ const render = () => {
     }
   }
 
-  const visible = pen !== null || (state === 'working' && (driven || pointer !== null)) || following
-  const goal = visible ? 1 : 0
+  const shown = pen !== null || (state === 'working' && (driven || pointer !== null)) || following
+  const goal = shown ? 1 : 0
   if (Math.abs(cursor.alpha - goal) > 0.01) {
     cursor.alpha += (goal - cursor.alpha) * Math.min(1, reduced ? 1 : dt / (goal ? 90 : 160))
     busy = true

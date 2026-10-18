@@ -338,6 +338,12 @@ export type OverlayEvent =
   | { type: 'mode'; follow: boolean }
   /** A few words under the sketch cursor while the assistant thinks or reads, before it acts. */
   | { type: 'hint'; label: string }
+  /**
+   * Where the overlay's window landed relative to the display (DIPs). The system may move or trim
+   * a window meant to cover the screen (macOS keeps them clear of the menu bar), and everything is
+   * placed in display coordinates.
+   */
+  | { type: 'frame'; dx: number; dy: number; w: number; h: number }
   /** Where the user's pointer is (DIPs), or null when it's on another display. */
   | { type: 'pointer'; x: number; y: number }
   | { type: 'pointer'; x: null; y: null }

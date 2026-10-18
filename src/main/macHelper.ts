@@ -10,7 +10,8 @@ import { helperProcess } from './helperProcess'
 // osascript process runs JavaScript for Automation, which reaches CoreGraphics, AppKit and the
 // Accessibility API through its Objective-C bridge. Same line protocol as the Windows helper:
 //   <id> state | click win x y left|right|middle count | hover win x y | drag win x0 y0 x1 y1
-//   <id> wheel win x y dx dy | text <base64 utf-8> | keys keycode flags | focus win
+//   <id> wheel win x y dx dy | text <base64 utf-8> | keys keycode flags mods | focus win
+//   <id> menu win <base64 JSON path>
 // `win` is a CGWindowID. Coordinates here are points (macOS's global display coordinates); the
 // driver below converts to and from the physical pixels the rest of computer use works in.
 //
@@ -178,9 +179,31 @@ function axApp(pid) {
   return app
 }
 
+// Out-parameters: the bridge wants a Ref of the right type, and refused an untyped one ("Ref has
+// incompatible types") on a real Mac. Each kind of call tries the likely types once, in order,
+// and keeps the first the bridge accepts.
+var REF_TYPES = {
+  element: ['^{__AXUIElement=}', '@', null],
+  value: ['@', '^v', null],
+  list: ['^{__CFArray=}', '@', null]
+}
+var refType = {}
+function out(kind, call) {
+  var types = refType.hasOwnProperty(kind) ? [refType[kind]] : REF_TYPES[kind]
+  var failure = null
+  for (var i = 0; i < types.length; i++) {
+    try {
+      var ref = types[i] === null ? Ref() : Ref(types[i])
+      var err = call(ref)
+      refType[kind] = types[i]
+      return err === 0 ? ref[0] : null
+    } catch (e) { failure = e }
+  }
+  throw failure
+}
+
 function axGet(el, name) {
-  var ref = Ref()
-  return $.AXUIElementCopyAttributeValue(el, $(name), ref) === 0 ? ref[0] : null
+  return out(name === 'AXParent' || name.indexOf('ScrollBar') >= 0 ? 'element' : 'value', function (ref) { return $.AXUIElementCopyAttributeValue(el, $(name), ref) })
 }
 
 function axString(el, name) {
@@ -202,18 +225,17 @@ function axNumber(el, name) {
 }
 
 function axActions(el) {
-  var ref = Ref()
-  if ($.AXUIElementCopyActionNames(el, ref) !== 0) return []
+  var names = out('list', function (ref) { return $.AXUIElementCopyActionNames(el, ref) })
+  if (!names) return []
   try {
-    var list = ObjC.deepUnwrap(ObjC.castRefToObject(ref[0]))
+    var list = ObjC.deepUnwrap(ObjC.castRefToObject(names))
     return Array.isArray(list) ? list : []
   } catch (e) { return [] }
 }
 
 function axAt(pid, x, y) {
   at('finding what is at ' + Math.round(x) + ',' + Math.round(y))
-  var ref = Ref()
-  return $.AXUIElementCopyElementAtPosition(axApp(pid), x, y, ref) === 0 ? ref[0] : null
+  return out('element', function (ref) { return $.AXUIElementCopyElementAtPosition(axApp(pid), x, y, ref) })
 }
 
 // Only a window's surface: the app hasn't built its tree yet (Chromium, Electron) or draws its own.
@@ -269,6 +291,63 @@ function axClick(pid, x, y, which, count) {
   return null
 }
 
+// AppleScript run in this process; null when it fails. System Events does its own Accessibility
+// work, so this keeps working where the bridge can't make a call.
+function appleScript(source) {
+  var script = $.NSAppleScript.alloc.initWithSource($(source))
+  var result
+  try { result = script.executeAndReturnError(null) } catch (e) { result = script.executeAndReturnError(Ref()) }
+  if (!result || result.isNil()) return null
+  try { return result.stringValue.js || '' } catch (e) { return '' }
+}
+
+function quoted(s) {
+  return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
+}
+
+// System Events' "click at" presses the element at a point, in the app given, without the pointer.
+function systemEventsClick(pid, x, y) {
+  at('clicking through System Events')
+  var said = appleScript('tell application "System Events" to tell (first process whose unix id is ' + pid + ') to click at {' + Math.round(x) + ', ' + Math.round(y) + '}')
+  if (said === null) return null
+  return 'Pressed ' + (said ? said.replace(/ of application process .*$/, '') : 'the element there') + ' through System Events.'
+}
+
+// A menu-bar command by its path, e.g. ["Timeline", "Add Transition"]. Menus belong to the window
+// server, so they can't be clicked; System Events picks them by name instead. On a wrong name,
+// says what that menu does have.
+function menu(pid, path) {
+  if (!path.length) throw new Error('Give the menu path, e.g. ["File", "Save"]')
+  var proc = '(first process whose unix id is ' + pid + ')'
+  var ref = 'menu bar item ' + quoted(path[0]) + ' of menu bar 1'
+  for (var i = 1; i < path.length; i++) ref = 'menu item ' + quoted(path[i]) + ' of menu 1 of ' + ref
+  at('choosing ' + path.join(' > '))
+  if (appleScript('tell application "System Events" to tell ' + proc + ' to click ' + ref) !== null) return 'Chose ' + path.join(' > ') + '.'
+  // Find the first name that isn't there, and list what is.
+  var parent = 'menu bar 1'
+  var kind = 'menu bar item'
+  for (var j = 0; j < path.length; j++) {
+    // A list doesn't come back as text, so the script joins the names itself, a line each.
+    var names = appleScript([
+      'tell application "System Events" to tell ' + proc + ' to set found to name of every ' + kind + ' of ' + parent,
+      'set joined to ""',
+      'repeat with one in found',
+      'try',
+      'set joined to joined & (one as text) & linefeed',
+      'end try',
+      'end repeat',
+      'return joined'
+    ].join('\n')) || ''
+    var list = names.split('\n').filter(function (n) { return n && n !== 'missing value' })
+    if (list.indexOf(path[j]) < 0) {
+      throw new Error('No menu item "' + path[j] + '"' + (j ? ' in ' + path.slice(0, j).join(' > ') : ' in the menu bar') + (list.length ? '. It has: ' + list.join(', ') : '') + '.')
+    }
+    parent = (j === 0 ? 'menu 1 of menu bar item ' : 'menu 1 of menu item ') + quoted(path[j]) + ' of ' + parent
+    kind = 'menu item'
+  }
+  throw new Error('Choosing ' + path.join(' > ') + " didn't work. The item may be greyed out; select what it applies to first.")
+}
+
 // Scrolls the scroll area under the point by moving its scroll bar, 1% of the way a line.
 function axScroll(pid, x, y, dx, dy) {
   var cur = axHit(pid, x, y)
@@ -294,8 +373,13 @@ var BUTTONS = { left: [1, 2, 0], right: [3, 4, 1], middle: [25, 26, 2] }
 
 function click(win, x, y, which, count) {
   var pid = windowById(win).kCGWindowOwnerPID
-  var done = axClick(pid, x, y, which, count)
+  var done = null
+  try { done = axClick(pid, x, y, which, count) } catch (e) { at('accessibility refused: ' + ((e && e.message) || e)) }
   if (done) return done
+  if (which === 'left' && count === 1) {
+    try { done = systemEventsClick(pid, x, y) } catch (e) { at('System Events refused: ' + ((e && e.message) || e)) }
+    if (done) return done
+  }
   // Nothing there takes an Accessibility press (a canvas, a game, a custom control): post the
   // mouse events, which some apps take, with the app in front.
   target(win)
@@ -326,7 +410,8 @@ function drag(win, x0, y0, x1, y1) {
 function wheel(win, x, y, dx, dy) {
   if (typeof $.CGEventCreateScrollWheelEvent2 !== 'function') throw new Error("Scrolling without moving the mouse isn't available on this Mac. Use the keyboard instead: Page Down, Space, or the arrow keys")
   var pid = windowById(win).kCGWindowOwnerPID
-  var done = axScroll(pid, x, y, dx, dy)
+  var done = null
+  try { done = axScroll(pid, x, y, dx, dy) } catch (e) { at('accessibility refused: ' + ((e && e.message) || e)) }
   if (done) return done
   at('scrolling')
   // In lines, vertical first.
@@ -401,6 +486,7 @@ function op(a) {
     case 'text': typeText(decode(a[2])); return { done: true }
     case 'keys': chord(n(2), n(3), a[4] && a[4] !== '-' ? a[4].split(',').map(Number) : []); return { done: true }
     case 'focus': focusWindow(n(2)); return { done: true }
+    case 'menu': return { done: true, note: menu(windowById(n(2)).kCGWindowOwnerPID, JSON.parse(decode(a[3]))) }
     default: throw new Error('unknown op ' + a[1])
   }
 }
@@ -569,6 +655,7 @@ export const macDriver = (scriptFile: string, display: () => { w: number; h: num
       await request('keys', code, flags, mods.length ? mods.join(',') : '-')
     },
     focus: async (win) => void (await request('focus', win)),
+    menu: async (win, path) => note(await request('menu', win, Buffer.from(JSON.stringify(path), 'utf8').toString('base64'))),
     apps: async () => {
       if (apps) return apps
       apps = listApps()

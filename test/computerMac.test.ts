@@ -9,7 +9,7 @@ import { Layer, ManagedRuntime, type Effect } from 'effect'
 import { parseKeys, protectedAppName, protectedChord, protectedReason, protectedAppsFor } from '../src/shared/computer'
 import { MAC_HELPER_SCRIPT, macChord } from '../src/main/macHelper'
 import { helperProcess } from '../src/main/helperProcess'
-import { runComputerTool } from '../src/main/computerTools'
+import { computerTools, runComputerTool } from '../src/main/computerTools'
 import { AppPaths } from '../src/main/services/AppPaths'
 import { Computer } from '../src/main/services/Computer'
 import { SettingsStore } from '../src/main/services/SettingsStore'
@@ -146,6 +146,27 @@ describe('mac computer service', () => {
     await t.run(Computer.use((c) => c.begin('r')))
     const look = await t.tool('computer_screenshot')
     expect(look.text).toContain('- A window (TextEdit) at')
+  })
+
+  test('menu commands by name go to the app it works in, and only a Mac offers them', async () => {
+    expect(computerTools('darwin').map((t) => t.function.name)).toContain('computer_menu')
+    expect(computerTools('win32').map((t) => t.function.name)).not.toContain('computer_menu')
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    const out = await t.tool('computer_menu', { path: ['Timeline', 'Add Transition'] })
+    expect(out.step.label).toBe('Chose Timeline > Add Transition in TextEdit')
+    expect(t.desktop.input).toEqual(['menu 1 Timeline > Add Transition'])
+  })
+
+  test('menu commands are refused in a protected app', async () => {
+    const t = service()
+    t.desktop.state.windows = [win({ hwnd: 7, pid: 300, exe: 'Terminal', title: 'zsh', bundle: 'com.apple.Terminal' })]
+    t.desktop.state.foreground = 7
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    expect((await t.tool('computer_menu', { path: ['Shell', 'New Window'] })).halt).toContain('Terminals')
+    expect(t.desktop.input).toEqual([])
   })
 
   test("the model hears how a click went, so it doesn't take a posted click for a done one", async () => {

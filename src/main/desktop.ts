@@ -177,6 +177,8 @@ export const electronOverlay = (headless: boolean): OverlayPort => {
       w.showInactive()
       // Windows fits a new window to the work area; the overlay also covers the taskbar.
       w.setBounds(d.bounds)
+      const got = w.getBounds()
+      w.webContents.send('overlay:event', { type: 'frame', dx: got.x - d.bounds.x, dy: got.y - d.bounds.y, w: d.bounds.width, h: d.bounds.height } satisfies OverlayEvent)
       w.webContents.send('overlay:event', mode)
       for (const e of queue.splice(0)) w.webContents.send('overlay:event', e)
       followPointer(w)

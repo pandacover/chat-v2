@@ -65,6 +65,8 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'da
         d.input.push(`focus ${hwnd}`)
         d.state.foreground = hwnd
       },
+      // Menus by name are a Mac thing.
+      ...(os === 'darwin' ? { menu: async (hwnd: number, path: string[]) => void d.input.push(`menu ${hwnd} ${path.join(' > ')}`) } : {}),
       apps: async () => d.apps,
       launch: async (id) => {
         d.input.push(`launch ${id}`)

@@ -98,6 +98,8 @@ export interface ComputerApi {
   readonly keys: (combo: string, label: string) => Effect.Effect<Acted, ComputerError>
   readonly openApp: (name: string) => Effect.Effect<Acted, ComputerError>
   readonly focusWindow: (title: string) => Effect.Effect<Acted, ComputerError>
+  /** A menu-bar command by its path, in the app it last worked in (macOS). */
+  readonly menu: (path: string[]) => Effect.Effect<Acted, ComputerError>
   readonly annotate: (marks: MarkInput[], label: string) => Effect.Effect<number, ComputerError>
   readonly clearMarks: Effect.Effect<void>
   readonly tips: Effect.Effect<AppTip[]>
@@ -566,6 +568,20 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               yield* attempt('Switching windows', () => d.focus(w.hwnd))
               workWindow = w.hwnd
               return { look: yield* settleAndLook(500), app: appName(w) }
+            }),
+
+          menu: (path) =>
+            Effect.gen(function* () {
+              const label = `Choosing ${path.join(' > ')}`
+              const { d, f, s } = yield* before(label)
+              const choose = d.menu?.bind(d)
+              if (!choose) return yield* Effect.fail(fail("Choosing menu commands by name only works on a Mac. Use the app's keyboard shortcuts or click the menu."))
+              // The app it last worked in, brought forward and checked like keystrokes are.
+              const w = yield* keyTarget(d, s)
+              if (!w) return yield* Effect.fail(fail('No app is in front to choose a menu command in. Click in the app first.'))
+              yield* showTyping(f, label)
+              const note = yield* attempt('Choosing from the menu', () => choose(w.hwnd, path))
+              return { look: noted(yield* settleAndLook(500), note), app: nameOf(w) }
             }),
 
           annotate: (input, label) =>
