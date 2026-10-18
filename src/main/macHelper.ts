@@ -23,16 +23,20 @@ export const MAC_HELPER_SCRIPT = String.raw`
 ObjC.import('Cocoa')
 ObjC.import('CoreGraphics')
 ObjC.import('ApplicationServices')
-ObjC.import('stdlib')
+
+// Nothing here is released by hand: the bridge owns what CoreGraphics' Create and Copy functions
+// return and frees it itself, so a CFRelease would free it twice and crash the helper.
 
 var stdout = $.NSFileHandle.fileHandleWithStandardOutput
+var stderr = $.NSFileHandle.fileHandleWithStandardError
 
 function send(obj) {
   stdout.writeData($(JSON.stringify(obj) + '\n').dataUsingEncoding($.NSUTF8StringEncoding))
 }
 
-function release(ref) {
-  try { $.CFRelease(ref) } catch (e) {}
+// Each step is noted on stderr first, so if the bridge ever crashes the process, the app can say where.
+function at(step) {
+  stderr.writeData($('at: ' + step + '\n').dataUsingEncoding($.NSUTF8StringEncoding))
 }
 
 function point(x, y) {
@@ -42,9 +46,6 @@ function point(x, y) {
 function unwrapList(ref) {
   var list = null
   try { list = ObjC.deepUnwrap(ObjC.castRefToObject(ref)) } catch (e) {}
-  if (!Array.isArray(list)) {
-    try { list = ObjC.deepUnwrap($.CFBridgingRelease(ref)) } catch (e) {}
-  }
   return Array.isArray(list) ? list : []
 }
 
@@ -66,10 +67,12 @@ function frontPid() {
 
 // On screen only, without the desktop picture and icons; frontmost first.
 function windowList() {
+  at('listing windows')
   return unwrapList($.CGWindowListCopyWindowInfo(1 | 16, 0))
 }
 
 function windowById(win) {
+  at('finding window ' + win)
   var list = unwrapList($.CGWindowListCopyWindowInfo(8, win))
   for (var i = 0; i < list.length; i++) if (list[i].kCGWindowNumber === win) return list[i]
   throw new Error('That window is gone')
@@ -79,6 +82,7 @@ function state() {
   bundles = {}
   var front = frontPid()
   var raw = windowList()
+  at('reading ' + raw.length + ' windows')
   var windows = []
   var foreground = 0
   for (var i = 0; i < raw.length && windows.length < 80; i++) {
@@ -96,16 +100,18 @@ function state() {
     if (!foreground && pid === front && layer === 0) foreground = info.hwnd
     windows.push(info)
   }
-  var here = $.CGEventCreate(null)
-  var c = $.CGEventGetLocation(here)
-  release(here)
-  return { cursor: { x: c.x, y: c.y }, foreground: foreground, windows: windows }
+  // AppKit counts up from the bottom of the main display; CoreGraphics, like everything here, down from the top.
+  at('reading the pointer')
+  var m = $.NSEvent.mouseLocation
+  var top = $.NSScreen.screens.objectAtIndex(0).frame.size.height
+  return { cursor: { x: m.x, y: top - m.y }, foreground: foreground, windows: windows }
 }
 
 // Raises one window of an app and makes the app frontmost, through Accessibility, which needs
 // no other permission; activation by AppKit is a second try.
 function focusWindow(win) {
   var info = windowById(win)
+  at('bringing window ' + win + ' forward')
   var pid = info.kCGWindowOwnerPID
   var title = info.kCGWindowName || ''
   try {
@@ -147,13 +153,13 @@ function target(win) {
 }
 
 function postMouse(pid, win, type, x, y, button, clicks) {
+  at('posting mouse event ' + type)
   var e = $.CGEventCreateMouseEvent(null, type, point(x, y), button)
   if (clicks) $.CGEventSetIntegerValueField(e, 1, clicks)
   // The window under the pointer, and the one under it that takes this event.
   $.CGEventSetIntegerValueField(e, 91, win)
   $.CGEventSetIntegerValueField(e, 92, win)
   $.CGEventPostToPid(pid, e)
-  release(e)
 }
 
 // Down and up event types, and the button number.
@@ -186,20 +192,20 @@ function drag(win, x0, y0, x1, y1) {
 function wheel(win, x, y, dx, dy) {
   if (typeof $.CGEventCreateScrollWheelEvent2 !== 'function') throw new Error("Scrolling without moving the mouse isn't available on this Mac. Use the keyboard instead: Page Down, Space, or the arrow keys")
   var pid = windowById(win).kCGWindowOwnerPID
+  at('scrolling')
   // In lines, vertical first.
   var e = $.CGEventCreateScrollWheelEvent2(null, 1, 2, dy, dx, 0)
   $.CGEventSetLocation(e, point(x, y))
   $.CGEventSetIntegerValueField(e, 91, win)
   $.CGEventSetIntegerValueField(e, 92, win)
   $.CGEventPostToPid(pid, e)
-  release(e)
 }
 
 function key(code, flags, down) {
+  at('pressing key ' + code)
   var e = $.CGEventCreateKeyboardEvent(null, code, down)
   $.CGEventSetFlags(e, flags)
   $.CGEventPost(0, e)
-  release(e)
 }
 
 // Modifiers go down first and come up last, each with the flags held at that moment, as a
@@ -222,26 +228,13 @@ function chord(code, flags, mods) {
   }
 }
 
-// Text as Unicode key events, so it doesn't depend on the keyboard layout; System Events'
-// keystroke (which asks for Automation permission) if the bridge can't pass the characters.
+// Text through System Events (macOS asks once to let chat-v2 control it). Posting the characters
+// as key events would need a raw character buffer, which the bridge can't safely hand over.
+var systemEvents = null
 function typeChunk(chunk) {
-  try {
-    var ns = $(chunk)
-    var n = ns.length
-    var buf = $.malloc(n * 2)
-    ns.getCharactersRange(buf, $.NSMakeRange(0, n))
-    var down = $.CGEventCreateKeyboardEvent(null, 0, true)
-    $.CGEventKeyboardSetUnicodeString(down, n, buf)
-    $.CGEventPost(0, down)
-    var up = $.CGEventCreateKeyboardEvent(null, 0, false)
-    $.CGEventKeyboardSetUnicodeString(up, n, buf)
-    $.CGEventPost(0, up)
-    release(down)
-    release(up)
-    $.free(buf)
-  } catch (e) {
-    Application('System Events').keystroke(chunk)
-  }
+  at('typing')
+  if (!systemEvents) systemEvents = Application('System Events')
+  systemEvents.keystroke(chunk)
 }
 
 function typeText(text) {
@@ -282,9 +275,6 @@ function run() {
     postToPid: typeof $.CGEventPostToPid === 'function',
     scroll2: typeof $.CGEventCreateScrollWheelEvent2 === 'function',
     pointMake: typeof $.CGPointMake === 'function',
-    makeRange: typeof $.NSMakeRange === 'function',
-    malloc: typeof $.malloc === 'function',
-    unicode: typeof $.CGEventKeyboardSetUnicodeString === 'function',
     ax: typeof $.AXUIElementCreateApplication === 'function',
     windows: typeof $.CGWindowListCopyWindowInfo === 'function'
   }
@@ -302,6 +292,7 @@ function run() {
       buf = buf.slice(i + 1)
       if (!line) continue
       var a = line.split(' ')
+      at('request ' + a[1])
       try {
         var r = op(a) || {}
         r.id = Number(a[0])

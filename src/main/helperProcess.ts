@@ -57,10 +57,18 @@ export const helperProcess = (spawnHelper: () => ChildProcessWithoutNullStreams,
         }
       })
       p.stderr.on('data', (chunk: Buffer) => (errors = (errors + chunk.toString()).slice(-2000)))
-      p.on('exit', () => {
+      p.on('exit', (_code, signal) => {
         clearTimeout(timer)
         if (child === p) child = null
-        const error = new Error(`the input helper stopped${errors.trim() ? `: ${errors.trim().split('\n')[0]}` : ''}`)
+        // Lines starting "at: " are the helper noting each step; the rest are its errors.
+        const lines = errors.split('\n').map((l) => l.trim()).filter(Boolean)
+        const step = lines.filter((l) => l.startsWith('at: ')).pop()?.slice(4)
+        const said = lines.find((l) => !l.startsWith('at: '))
+        const error = new Error(
+          signal
+            ? `the input helper crashed (${signal})${step ? ` while ${step}` : ''}`
+            : `the input helper stopped${said ? `: ${said}` : step ? ` while ${step}` : ''}`
+        )
         reject(error)
         for (const waiter of pending.values()) waiter.reject(error)
         pending.clear()

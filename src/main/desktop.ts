@@ -147,6 +147,9 @@ export const electronOverlay = (headless: boolean): OverlayPort => {
       hasShadow: false,
       show: false,
       backgroundColor: '#00000000',
+      // On macOS a non-activating panel: it floats over apps in full screen without taking focus
+      // from the chat (or anything else) when it appears.
+      ...(process.platform === 'darwin' ? { type: 'panel' } : {}),
       webPreferences: {
         preload: join(__dirname, '../preload/overlay.cjs'),
         contextIsolation: true,
@@ -158,8 +161,10 @@ export const electronOverlay = (headless: boolean): OverlayPort => {
     w.setIgnoreMouseEvents(true)
     w.setContentProtection(true)
     w.setAlwaysOnTop(true, 'screen-saver')
-    // On macOS, also over apps in full screen, which live in their own Space.
-    w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    // On macOS, also over apps in full screen, which live in their own Space. Without
+    // skipTransformProcessType, Electron briefly turns the whole app into a background app to do
+    // this, which hides its windows for a moment and hands focus to whatever app is behind.
+    w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
     forwarding = false
     w.on('closed', () => {
       if (win === w) win = null

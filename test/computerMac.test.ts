@@ -1,12 +1,14 @@
 // Computer use on macOS, as far as it can be checked away from a Mac: the guard's list, shortcut
 // handling, the key-code translation and the helper script itself (which only runs on a Mac).
 import { describe, expect, test } from 'bun:test'
+import { spawn } from 'node:child_process'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Layer, ManagedRuntime, type Effect } from 'effect'
 import { parseKeys, protectedAppName, protectedChord, protectedReason, protectedAppsFor } from '../src/shared/computer'
 import { MAC_HELPER_SCRIPT, macChord } from '../src/main/macHelper'
+import { helperProcess } from '../src/main/helperProcess'
 import { runComputerTool } from '../src/main/computerTools'
 import { AppPaths } from '../src/main/services/AppPaths'
 import { Computer } from '../src/main/services/Computer'
@@ -86,6 +88,18 @@ describe('mac helper script', () => {
     expect(MAC_HELPER_SCRIPT).not.toContain('CGWarpMouseCursorPosition')
     expect(MAC_HELPER_SCRIPT).not.toMatch(/CGEventPost\(0, e\)[\s\S]*CGEventCreateMouseEvent|postMouse[^\n]*CGEventPost\(/)
     expect(MAC_HELPER_SCRIPT).toContain('CGEventPostToPid(pid, e)')
+  })
+
+  test('never releases what the bridge owns (a double free crashed the helper on a real Mac)', () => {
+    expect(MAC_HELPER_SCRIPT).not.toMatch(/\$\.(CFRelease|CFBridgingRelease|free)\(/)
+  })
+
+  test('a helper that dies says which step it was on', async () => {
+    // Stands in for the helper: ready, two steps noted, then it exits mid-request.
+    const script = `process.stdout.write(JSON.stringify({ ready: true }) + '\\n'); process.stdin.once('data', () => { process.stderr.write('at: request state\\nat: listing windows\\n'); setTimeout(() => process.exit(1), 20) })`
+    const helper = helperProcess(() => spawn(process.execPath, ['-e', script]))
+    await expect(helper.request('state')).rejects.toThrow('the input helper stopped while listing windows')
+    helper.close()
   })
 
   test('the script survives being embedded: escapes are still escapes', () => {
