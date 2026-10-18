@@ -10,6 +10,9 @@ import { Sketches } from './services/Sketches'
 import { Attachments } from './services/Attachments'
 import { Browser } from './services/Browser'
 import { Broadcaster, Chat } from './services/Chat'
+import { Computer } from './services/Computer'
+import { electronChatWindows, electronOverlay, electronScreen } from './desktop'
+import { windowsDriver } from './winHelper'
 import { Db } from './services/Db'
 import { ElevenLabs } from './services/ElevenLabs'
 import { OpenRouter } from './services/OpenRouter'
@@ -57,7 +60,14 @@ const makeRuntime = () => {
   const db = Db.layer(join(root, 'chat.db'))
   const settings = SettingsStore.layer(cipher).pipe(Layer.provide(paths))
   const base = Layer.mergeAll(db, settings, paths)
-  const providers = Layer.mergeAll(OpenRouter.layer, ElevenLabs.layer, Attachments.layer, Browser.layer(emitBrowser, (id) => webContents.fromId(id))).pipe(
+  const computer = Computer.layer({
+    driver: process.platform === 'win32' ? windowsDriver(join(root, 'computer-helper.ps1')) : null,
+    screen: electronScreen,
+    overlay: electronOverlay(headless),
+    chatWindows: electronChatWindows(headless),
+    selfPid: process.pid
+  })
+  const providers = Layer.mergeAll(OpenRouter.layer, ElevenLabs.layer, Attachments.layer, Browser.layer(emitBrowser, (id) => webContents.fromId(id)), computer).pipe(
     Layer.provideMerge(base)
   )
   const chat = Chat.layer.pipe(

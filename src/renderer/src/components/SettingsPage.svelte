@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tip } from '@/lib/tooltip'
   import { onDestroy, onMount } from 'svelte'
-  import type { MemoryRevision, MemoryRun, Settings } from '@shared/types'
+  import type { AppTip, MemoryRevision, MemoryRun, Settings } from '@shared/types'
   import { CALL_TOKENS, callCost } from '@shared/estimates'
   import { money } from '@/lib/pricing'
   import { CODE_FONTS, READING_FONTS, READING_SIZES, UI_FONTS, appearance, type FontOption, type ReadingSize } from '@/lib/appearance.svelte'
@@ -23,6 +23,7 @@
     { id: 'model', label: 'Model' },
     { id: 'instructions', label: 'Instructions' },
     { id: 'memory', label: 'Memory' },
+    ...(window.api.computer.supported ? [{ id: 'computer', label: 'Computer use' }] : []),
     { id: 'voice', label: 'Voice & files' },
     { id: 'appearance', label: 'Appearance' },
     { id: 'about', label: 'About' }
@@ -82,6 +83,26 @@
   }
 
   const close = () => (app.page = 'chat')
+
+  // Computer use: what stays off limits, and what the assistant learned about apps.
+  let builtIn = $state<string[]>([])
+  let tips = $state<AppTip[] | null>(null)
+  let newProtected = $state('')
+  onMount(() => {
+    if (!window.api.computer.supported) return
+    void app.attempt(() => window.api.computer.protectedApps()).then((list) => list && (builtIn = list))
+    void app.attempt(() => window.api.computer.tips()).then((list) => (tips = list ?? []))
+  })
+  const addProtected = () => {
+    const word = newProtected.trim()
+    if (!word) return
+    if (!form.computerProtected.some((w) => w.toLowerCase() === word.toLowerCase())) form.computerProtected = [...form.computerProtected, word]
+    newProtected = ''
+  }
+  const removeTip = async (id: string) => {
+    const list = await app.attempt(() => window.api.computer.removeTip(id))
+    if (list) tips = list
+  }
 
   // Memory: what the app has learned, edited in place. Every change is a new version.
   onMount(() => void app.loadMemory())
@@ -483,6 +504,66 @@
             {/if}
           {/if}
         </section>
+
+        {#if window.api.computer.supported}
+          <section id="settings-computer" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
+            <h2 class="font-serif text-[20px]">Computer use</h2>
+            <p class="mt-1 max-w-prose text-muted">
+              Turn on <span class="text-fg-2">Computer</span> in a chat's composer and the assistant can see your main screen and use the mouse and keyboard there.
+              A sketched cursor shows each move. Move your mouse and it stops at once.
+            </p>
+
+            <h3 class="mt-6 font-medium text-fg">Always off limits</h3>
+            <p class="mt-0.5 max-w-prose text-muted">
+              These are painted grey in what the assistant sees, and it can't click or type into them or open them, whatever it's asked.
+            </p>
+            <div class="mt-2.5 flex max-w-xl flex-wrap gap-1.5">
+              {#each builtIn as label (label)}
+                <span class="rounded-full bg-hover px-2.5 py-0.5 text-[12.5px] text-fg-2">{label}</span>
+              {/each}
+              <span class="rounded-full bg-hover px-2.5 py-0.5 text-[12.5px] text-fg-2">chat-v2 itself</span>
+            </div>
+
+            <h3 class="mt-6 font-medium text-fg">Also protect</h3>
+            <p class="mt-0.5 max-w-prose text-muted">An app (its name or .exe) or a word in window titles, such as <span class="text-fg-2">Steam</span> or <span class="text-fg-2">bank</span>.</p>
+            <ul class="mt-2.5 max-w-md divide-y divide-line overflow-hidden rounded-lg bg-surface shadow-[0_0_0_1px_var(--line)]">
+              {#each form.computerProtected as word (word)}
+                <li class="group flex min-h-9 items-center gap-2 px-3 py-1.5">
+                  <span class="min-w-0 flex-1 text-fg">{word}</span>
+                  <button
+                    class="icon-btn !p-1 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
+                    use:tip={'Stop protecting this'}
+                    onclick={() => (form.computerProtected = form.computerProtected.filter((w) => w !== word))}><Icon name="trash" size={13} /></button
+                  >
+                </li>
+              {/each}
+              <li class="flex items-center gap-2 px-3 py-1.5">
+                <Icon name="plus" size={13} class="shrink-0 text-muted" />
+                <input
+                  bind:value={newProtected}
+                  placeholder="Add an app or title word"
+                  class="h-7 min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted"
+                  onkeydown={(e) => e.key === 'Enter' && addProtected()}
+                />
+                {#if newProtected.trim()}<button class="shrink-0 rounded-md bg-fg px-2.5 py-1 text-[12px] font-medium text-bg" in:fade={{ duration: 120 }} onclick={addProtected}>Add</button>{/if}
+              </li>
+            </ul>
+
+            <h3 class="mt-6 font-medium text-fg">What it learned about apps</h3>
+            <p class="mt-0.5 max-w-prose text-muted">Tips the assistant saved while using an app, often after looking it up. They come back when that app is in front.</p>
+            <ul class="mt-2.5 max-w-xl divide-y divide-line overflow-hidden rounded-lg bg-surface shadow-[0_0_0_1px_var(--line)]">
+              {#each tips ?? [] as t (t.id)}
+                <li class="group flex items-start gap-2 px-3 py-2">
+                  <span class="mt-px shrink-0 rounded bg-hover px-1.5 text-[12px] text-fg-2">{t.app}</span>
+                  <span class="min-w-0 flex-1 text-fg">{t.tip}</span>
+                  <button class="icon-btn !p-1 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100" use:tip={'Forget this'} onclick={() => removeTip(t.id)}><Icon name="trash" size={13} /></button>
+                </li>
+              {:else}
+                <li class="px-3 py-2.5 text-muted">{tips ? 'Nothing yet.' : 'Loading…'}</li>
+              {/each}
+            </ul>
+          </section>
+        {/if}
 
         <section id="settings-voice" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
           <h2 class="font-serif text-[20px]">Voice & files</h2>

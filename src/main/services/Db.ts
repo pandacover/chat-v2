@@ -91,7 +91,9 @@ const MIGRATIONS: string[] = [
   );
   create index memory_facts_added on memory_facts(added_rev);
   create index memory_facts_removed on memory_facts(removed_rev);
-  alter table sessions add column memory_rev integer;`
+  alter table sessions add column memory_rev integer;`,
+  // Per-chat switch that lets the model see the screen and use the mouse and keyboard.
+  `alter table sessions add column computer_enabled integer not null default 0;`
 ]
 
 /** At most this many facts are kept; past it, new ones are dropped until some are removed. */
@@ -105,6 +107,7 @@ interface SessionRow {
   root_id: string
   forked_from_session_id: string | null
   browser_enabled: number
+  computer_enabled: number
   pinned_at: number | null
   created_at: number
   updated_at: number
@@ -149,6 +152,7 @@ const toSession = (r: SessionRow): Session => ({
   rootId: r.root_id,
   forkedFromSessionId: r.forked_from_session_id,
   browserEnabled: r.browser_enabled === 1,
+  computerEnabled: r.computer_enabled === 1,
   pinnedAt: r.pinned_at,
   createdAt: r.created_at,
   updatedAt: r.updated_at
@@ -393,6 +397,7 @@ export const makeDb = (file: string) => {
         forkedFromSessionId: source.id
       })
       if (source.browserEnabled) run('update sessions set browser_enabled = 1 where id = ?', fork.id)
+      if (source.computerEnabled) run('update sessions set computer_enabled = 1 where id = ?', fork.id)
       let parentId = fork.rootId
       const stored = attachmentsFor(path.map((m) => m.id))
       for (const m of path) {
@@ -574,6 +579,7 @@ export const makeDb = (file: string) => {
         model?: string | null
         systemPrompt?: string | null
         browserEnabled?: boolean
+        computerEnabled?: boolean
         pinned?: boolean
       }
     ) => {
@@ -582,6 +588,8 @@ export const makeDb = (file: string) => {
       if (patch.pinned === false) run('update sessions set pinned_at = null where id = ?', id)
       if (patch.browserEnabled !== undefined)
         run('update sessions set browser_enabled = ? where id = ?', patch.browserEnabled ? 1 : 0, id)
+      if (patch.computerEnabled !== undefined)
+        run('update sessions set computer_enabled = ? where id = ?', patch.computerEnabled ? 1 : 0, id)
       if (patch.title !== undefined) run('update sessions set title = ? where id = ?', patch.title, id)
       if (patch.model !== undefined) run('update sessions set model = ? where id = ?', patch.model, id)
       if (patch.systemPrompt !== undefined)

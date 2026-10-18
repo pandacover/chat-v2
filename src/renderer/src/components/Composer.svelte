@@ -17,7 +17,9 @@
     customInstructions = false,
     oninstructions,
     browserEnabled = false,
-    onbrowser
+    onbrowser,
+    computerEnabled = false,
+    oncomputer
   }: {
     placeholder?: string
     model: string
@@ -26,6 +28,8 @@
     oninstructions: () => void
     browserEnabled?: boolean
     onbrowser: () => void
+    computerEnabled?: boolean
+    oncomputer: () => void
   } = $props()
 
   let text = $state('')
@@ -347,6 +351,22 @@
     >
       <Icon name="globe" size={14} /><span class="hidden @sm:inline">Browser</span>
     </button>
+    {#if window.api.computer.supported}
+      <button
+        class="flex h-7 items-center gap-1.5 rounded-full px-2.5 text-[12.5px] transition-colors {computerEnabled
+          ? 'bg-fg text-bg'
+          : 'text-fg-2 hover:bg-hover hover:text-fg'}"
+        role="switch"
+        aria-checked={computerEnabled}
+        aria-label="Computer"
+        use:tip={computerEnabled
+          ? 'The assistant can see your screen and work in your apps in this chat, with its own cursor. Your mouse stays yours.'
+          : 'Let the assistant see your screen and use the mouse and keyboard in this chat'}
+        onclick={oncomputer}
+      >
+        <Icon name="monitor" size={14} /><span class="hidden @sm:inline">Computer</span>
+      </button>
+    {/if}
     <span class="ml-auto"></span>
     <button class="icon-btn relative" use:tip={'Instructions for this chat'} onclick={oninstructions}>
       <Icon name="sliders" size={16} />

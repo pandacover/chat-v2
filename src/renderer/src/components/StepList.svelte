@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Step } from '@shared/steps'
+  import { type Step, isDesktopRun } from '@shared/steps'
   import { fly, slide } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
   import Icon from './Icon.svelte'
@@ -10,6 +10,7 @@
   let toggled = $state<boolean | null>(null)
   const open = $derived(toggled ?? false)
   const failed = $derived(steps.filter((s) => !s.ok).length)
+  const desktop = $derived(isDesktopRun(steps))
   const working = $derived(running && app.control.active)
   // What the folded line shows while the reply is still going: the action under way, else the last one.
   const current = $derived<{ label: string; ok: boolean } | null>(
@@ -26,8 +27,8 @@
 <div class="flex flex-col gap-0.5 rounded-lg bg-surface px-3 py-2 shadow-[0_0_0_1px_var(--line)]">
   <div class="flex items-center gap-1.5 text-[12px] text-muted {open ? 'mb-0.5' : ''}">
     <button class="-mx-1 flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 text-left hover:text-fg" aria-expanded={open} onclick={() => (toggled = !open)}>
-      <Icon name="globe" size={12} />
-      <span>Browser</span>
+      <Icon name={desktop ? 'monitor' : 'globe'} size={12} />
+      <span>{desktop ? 'Computer' : 'Browser'}</span>
       {#if done}
         <span>· {steps.length} {steps.length === 1 ? 'step' : 'steps'}{#if failed}, <span class="text-danger">{failed} failed</span>{/if}</span>
       {:else if !open && current}

@@ -1,0 +1,174 @@
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+}
+
+#ink {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* The status bar: the one part of the overlay that takes the mouse. Plain and dark, so it reads over any app. */
+#pill {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(640px, calc(100vw - 40px));
+  padding: 6px 6px 6px 12px;
+  background: rgb(24 24 27 / 0.94);
+  color: #fafaf9;
+  border: 1px solid rgb(255 255 255 / 0.1);
+  border-radius: 999px;
+  box-shadow:
+    0 12px 32px rgb(0 0 0 / 0.32),
+    0 2px 6px rgb(0 0 0 / 0.2);
+  font: 500 13px/1.25 var(--font-ui, system-ui, sans-serif);
+  -webkit-font-smoothing: antialiased;
+  animation: drop 280ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition:
+    top 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    bottom 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+#pill[hidden] {
+  display: none;
+}
+/* Moved out of the way when the assistant works near the top of the screen. */
+#pill.low {
+  top: calc(100vh - 62px);
+}
+
+.badge {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+}
+.spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid rgb(232 89 12 / 0.25);
+  border-top-color: #ff8a3d;
+  animation: spin 0.9s linear infinite;
+}
+.check {
+  display: none;
+  width: 22px;
+  height: 22px;
+  padding: 4px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  background: rgb(81 207 102 / 0.18);
+  fill: none;
+  stroke: #69db7c;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+#pill[data-state='done'] .spinner {
+  display: none;
+}
+#pill[data-state='done'] .check {
+  display: block;
+}
+
+.text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding-right: 4px;
+}
+.title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgb(250 250 249 / 0.55);
+  font-size: 11.5px;
+}
+.sub:empty {
+  display: none;
+}
+
+#pill button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.08);
+  color: #fafaf9;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms;
+}
+#pill button:hover {
+  background: rgb(255 255 255 / 0.15);
+}
+#pill button.primary {
+  background: #fafaf9;
+  color: #18181b;
+}
+#pill button.primary:hover {
+  background: #e7e5e4;
+}
+#pill button.stop {
+  background: rgb(250 82 82 / 0.16);
+  color: #ffa8a8;
+}
+#pill button.stop:hover {
+  background: rgb(250 82 82 / 0.28);
+}
+.square {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+#pill[data-state='working'] [data-command='show-chat'],
+#pill[data-state='working'] [data-command='clear'],
+#pill[data-state='done'] [data-command='stop'] {
+  display: none;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes drop {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -8px) scale(0.98);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #pill,
+  .spinner {
+    animation: none;
+    transition: none;
+  }
+}

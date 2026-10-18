@@ -11,6 +11,8 @@ import { Db } from '../src/main/services/Db'
 import { type ChatDelta, type ChatRequest, OpenRouter } from '../src/main/services/OpenRouter'
 import { Browser, type BrowserApi, type PageSnapshot } from '../src/main/services/Browser'
 import { SettingsStore } from '../src/main/services/SettingsStore'
+import { Computer } from '../src/main/services/Computer'
+import { type FakeDesktop, fakeDesktop, win } from './fakeDesktop'
 import { ProviderError } from '../src/main/errors'
 import { layoutBoard, parseMoodboard } from '../src/shared/moodboard'
 
@@ -34,6 +36,8 @@ const fakeBrowser = (log: string[]) =>
       navigate: (url) => Effect.sync(() => (log.push(`navigate ${url}`), page({ url }))),
       history: (d) => Effect.sync(() => (log.push(d), page())),
       snapshot: Effect.sync(() => (log.push('snapshot'), page())),
+      search: (q) => Effect.sync(() => (log.push(`search ${q}`), [{ title: 'Camera guide', url: 'https://wiki.test/camera', snippet: 'How to change the camera' }])),
+      read: (url) => Effect.sync(() => (log.push(`read ${url}`), { url: url ?? 'http://shop.test/', title: 'Camera guide', text: '# Camera\n1. Open Settings\n2. Pick Controls' })),
       click: (t) => Effect.sync(() => (log.push(`click ${t.ref}`), page({ elements: '[e1] button "Bought!"' }))),
       type: (ref, text) => Effect.sync(() => (log.push(`type ${ref} ${text}`), page())),
       press: (k) => Effect.sync(() => (log.push(`press ${k}`), page())),
@@ -63,7 +67,8 @@ const setup = (
   browserLog: string[] = [],
   models: ModelInfo[] = [],
   // Titling and memory are off unless a test is about them, so every request a script sees is a reply.
-  config: Record<string, unknown> = { titleModel: '', memoryModel: '' }
+  config: Record<string, unknown> = { titleModel: '', memoryModel: '' },
+  desktop: FakeDesktop = fakeDesktop()
 ) => {
   dirs.push(dir)
   writeFileSync(join(dir, 'config.json'), JSON.stringify(config))
@@ -85,7 +90,7 @@ const setup = (
       generateImage: () => Effect.succeed({ data: new Uint8Array([137, 80, 78, 71]), mime: 'image/png', cost: 0.008 })
     })
   )
-  const providers = Layer.mergeAll(fakeOpenRouter, Attachments.layer).pipe(Layer.provideMerge(base))
+  const providers = Layer.mergeAll(fakeOpenRouter, Attachments.layer, Computer.layer(desktop.ports)).pipe(Layer.provideMerge(base))
   const broadcaster = Broadcaster.of({
     send: (e) => {
       events.push(e)
@@ -107,7 +112,7 @@ const setup = (
   const waitForDone = async (n: number) => {
     while (doneCount() < n) await new Promise<void>((r) => waiters.push(r))
   }
-  return { runtime, run, events, requests, waitForDone, dir }
+  return { runtime, run, events, requests, waitForDone, dir, desktop }
 }
 
 const newSession = Effect.gen(function* () {
@@ -506,6 +511,74 @@ describe('chat', () => {
     expect(t.requests.map((r) => r.model)).toEqual(['blind/model', 'eye/model'])
     const view = await t.run(Chat.use((c) => c.view(s.id)))
     expect(view.path[1]!.message.model).toBe('eye/model')
+    await t.runtime.dispose()
+  })
+
+  test('computer use: desktop and browser tools, control handed back, old screenshots dropped', async () => {
+    const tool = (id: string, name: string, args: object): ChatDelta => ({ type: 'tool', index: 0, id, name, args: JSON.stringify(args) })
+    const desktop = fakeDesktop()
+    const t = setup(
+      (req) => {
+        const turns = req.messages.filter((m) => m.role === 'tool').length
+        if (turns === 0) return Stream.make<Array<string | ChatDelta>>(tool('c0', 'computer_screenshot', {}))
+        if (turns < 5) return Stream.make(tool(`c${turns}`, 'computer_click', { x: 10 * turns, y: 10, target: `Button ${turns}` }))
+        return Stream.make('Done clicking.')
+      },
+      undefined,
+      [],
+      [],
+      undefined,
+      desktop
+    )
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { computerEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'click things', attachmentIds: [] })))
+    await t.waitForDone(1)
+
+    const names = t.requests[0]!.tools!.map((x) => x.function.name)
+    expect(names).toContain('computer_click')
+    expect(names).toContain('browser_navigate')
+    expect(String(t.requests[0]!.messages[0]!.content)).toContain('research before you act')
+    expect(desktop.input.filter((i) => i.startsWith('click ') && i.endsWith(' left'))).toHaveLength(4)
+    // The chat got out of the way, and came back when the reply ended.
+    expect(desktop.chat).toEqual(['hide', 'show'])
+    expect(desktop.overlay.at(-1)).toEqual({ type: 'status', state: 'off', label: '' })
+    // Five screenshots were taken; the last request carries only the newest three.
+    const last = t.requests.at(-1)!.messages
+    const withImages = last.filter((m) => Array.isArray(m.content) && m.content.some((p) => p.type === 'image_url'))
+    expect(withImages).toHaveLength(3)
+    expect(last.filter((m) => m.content === '[An earlier screenshot, removed to save space.]')).toHaveLength(2)
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    expect(view.path[1]!.message.content).toContain('"label":"Clicked “Button 1” in Notepad"')
+    await t.runtime.dispose()
+  })
+
+  test('computer use: a refused action ends the reply with a plain explanation', async () => {
+    const desktop = fakeDesktop([win({ hwnd: 7, pid: 300, exe: 'SystemSettings.exe', title: 'Settings' })])
+    const t = setup(
+      (req) => {
+        const turns = req.messages.filter((m) => m.role === 'tool').length
+        if (turns === 0) return Stream.make<Array<string | ChatDelta>>({ type: 'tool', index: 0, id: 'a', name: 'computer_screenshot', args: '{}' })
+        return Stream.make<Array<string | ChatDelta>>(
+          { type: 'tool', index: 0, id: 'b', name: 'computer_click', args: '{"x":5,"y":5,"target":"Bluetooth"}' },
+          { type: 'tool', index: 1, id: 'c', name: 'computer_type', args: '{"text":"x"}' }
+        )
+      },
+      undefined,
+      [],
+      [],
+      undefined,
+      desktop
+    )
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { computerEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'turn on bluetooth', attachmentIds: [] })))
+    await t.waitForDone(1)
+    expect(t.requests).toHaveLength(2)
+    expect(desktop.input).toEqual([])
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    expect(view.path[1]!.message.content.split('\n').at(-1)).toBe("I stopped here: Windows Settings is protected, so I can't use it. You'll need to do this step yourself.")
+    expect(view.path[1]!.message.status).toBe('complete')
     await t.runtime.dispose()
   })
 

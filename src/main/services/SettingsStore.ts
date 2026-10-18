@@ -21,7 +21,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // Reads messages that talk about the user for facts; about $0.0003 a message, thinking off.
   // Small models (Mistral NeMo) made facts up and missed ones said in passing.
   memoryModel: 'google/gemini-2.5-flash',
-  alwaysOnTop: false
+  alwaysOnTop: false,
+  computerProtected: []
 }
 
 const PDF_ENGINES: ReadonlyArray<Settings['pdfEngine']> = ['cloudflare-ai', 'mistral-ocr', 'native']
@@ -45,7 +46,10 @@ export const normalizeSettings = (raw: unknown): Settings => {
     sketchModel: str('sketchModel', DEFAULT_SETTINGS.sketchModel).trim() || DEFAULT_SETTINGS.sketchModel,
     titleModel: str('titleModel', DEFAULT_SETTINGS.titleModel).trim(),
     memoryModel: str('memoryModel', DEFAULT_SETTINGS.memoryModel).trim(),
-    alwaysOnTop: typeof input.alwaysOnTop === 'boolean' ? input.alwaysOnTop : DEFAULT_SETTINGS.alwaysOnTop
+    alwaysOnTop: typeof input.alwaysOnTop === 'boolean' ? input.alwaysOnTop : DEFAULT_SETTINGS.alwaysOnTop,
+    computerProtected: Array.isArray(input.computerProtected)
+      ? [...new Set(input.computerProtected.filter((s): s is string => typeof s === 'string').map((s) => s.trim()).filter(Boolean))].slice(0, 100)
+      : DEFAULT_SETTINGS.computerProtected
   }
 }
 

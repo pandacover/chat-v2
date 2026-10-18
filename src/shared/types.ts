@@ -76,6 +76,8 @@ export interface Session {
   forkedFromSessionId: string | null
   /** When on, the model gets browser tools for this chat. */
   browserEnabled: boolean
+  /** When on, the model can see the screen and use the mouse and keyboard (and the browser). */
+  computerEnabled: boolean
   /** When the chat was pinned to the top of the sidebar; null when it isn't. */
   pinnedAt: number | null
   createdAt: number
@@ -128,6 +130,7 @@ export interface SessionPatch {
   model?: string | null
   systemPrompt?: string | null
   browserEnabled?: boolean
+  computerEnabled?: boolean
   pinned?: boolean
 }
 
@@ -161,6 +164,16 @@ export interface Settings {
   memoryModel: string
   /** Keeps the window above other apps on the same desktop. */
   alwaysOnTop: boolean
+  /** Apps or window-title words computer use must never see or touch, on top of the built-in list. */
+  computerProtected: string[]
+}
+
+/** Something the assistant learned about an app while using it, offered again when it's in front. */
+export interface AppTip {
+  id: string
+  app: string
+  tip: string
+  at: number
 }
 
 export interface SettingsView {
@@ -291,6 +304,16 @@ export interface Api {
     savePng(name: string, data: ArrayBuffer): Promise<string | null>
   }
   browser: BrowserApi
+  computer: {
+    /** False where computer use isn't available yet (it's Windows-only for now). */
+    supported: boolean
+    tips(): Promise<AppTip[]>
+    removeTip(id: string): Promise<AppTip[]>
+    /** The apps and title words that are always protected, for Settings to list. */
+    protectedApps(): Promise<string[]>
+    /** Tells the app whether this window shows a chat with computer use on (the sketch cursor stays up). */
+    setMode(on: boolean): void
+  }
   updates: {
     get(): Promise<UpdateState>
     check(): Promise<UpdateState>

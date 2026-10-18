@@ -2,16 +2,18 @@ import { Cause, Context, Effect, Exit, FiberMap, Layer, Semaphore, Stream } from
 import { ARTIFACT_INSTRUCTIONS, replaceArtifacts } from '@shared/artifacts'
 import { MOODBOARD_INSTRUCTIONS, docToSpec, parseBoardDoc, specToJson } from '@shared/moodboard'
 import { makeLineBuffer } from '@shared/lines'
-import type { MemoryRun, Message, MessageStatus, SessionView, StreamEvent, Usage } from '@shared/types'
+import type { MemoryRun, Message, MessageStatus, Session, SessionView, StreamEvent, Usage } from '@shared/types'
 import { type DbError, InvalidInput, type NotFound, errorMessage } from '../errors'
 import { WRITING_GUIDELINES } from '../guidelines'
 import { BROWSER_INSTRUCTIONS, BROWSER_TOOLS, MAX_AGENT_STEPS, runTool } from '../agent'
+import { COMPUTER_INSTRUCTIONS, COMPUTER_TOOLS, MAX_COMPUTER_STEPS, runComputerTool } from '../computerTools'
 import { MEMORY_INSTRUCTIONS, askedQuestion, memoryPrompt, memorySource, parseMemoryReply, profileBlock } from '../memory'
 import { stepLine, summarizeSteps } from '@shared/steps'
 import { Attachments } from './Attachments'
 import { Db } from './Db'
 import { type ChatMessage, type ChatRequest, type ContentPart, OpenRouter } from './OpenRouter'
 import { Browser } from './Browser'
+import { Computer } from './Computer'
 import { SettingsStore } from './SettingsStore'
 
 /** Pushes stream events to every open window. */
@@ -20,6 +22,9 @@ export class Broadcaster extends Context.Service<Broadcaster, { readonly send: (
 ) {}
 
 export const NEW_SESSION_TITLE = 'New chat'
+
+/** Screenshots a run keeps in its request; each costs about a thousand tokens per step. */
+const KEEP_SCREENSHOTS = 3
 
 export const titleFrom = (text: string): string => {
   const line = text.replace(/\s+/g, ' ').trim()
@@ -46,6 +51,28 @@ export const cleanTitle = (reply: string): string | null => {
 }
 
 type ChatError = DbError | NotFound | InvalidInput
+
+/** What the sketch cursor says while a computer-use reply works in the browser. */
+const browserHint = (name: string, rawArgs: string) => {
+  let args: Record<string, unknown> = {}
+  try {
+    args = JSON.parse(rawArgs || '{}') as Record<string, unknown>
+  } catch {
+    // Unreadable arguments still get a generic hint.
+  }
+  const host = (url: unknown) => {
+    try {
+      return new URL(String(url)).hostname.replace(/^www\./, '')
+    } catch {
+      return 'a page'
+    }
+  }
+  const query = String(args.query ?? '').trim()
+  if (name === 'browser_search' && query) return `Searching “${query.length > 48 ? `${query.slice(0, 48)}…` : query}”`
+  if (name === 'browser_read') return args.url ? `Reading ${host(args.url)}` : 'Reading the page'
+  if (name === 'browser_navigate' && args.url) return `Opening ${host(args.url)}`
+  return 'Looking things up'
+}
 
 export class Chat extends Context.Service<
   Chat,
@@ -84,6 +111,8 @@ export class Chat extends Context.Service<
       const attachments = yield* Attachments
       const broadcaster = yield* Broadcaster
       const browser = yield* Browser
+      const computer = yield* Computer
+      const usesComputer = (session: Session) => session.computerEnabled && computer.supported
 
       // One fiber per streaming assistant message. Closing the layer (app quit)
       // interrupts them all, which marks their messages `interrupted`.
@@ -142,7 +171,9 @@ export class Chat extends Context.Service<
           WRITING_GUIDELINES,
           settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : '',
           settings.artifactsEnabled ? MOODBOARD_INSTRUCTIONS : '',
-          session.browserEnabled ? BROWSER_INSTRUCTIONS : '',
+          // Computer use brings the browser along, for looking up how unfamiliar apps work.
+          usesComputer(session) ? COMPUTER_INSTRUCTIONS : '',
+          session.browserEnabled || usesComputer(session) ? BROWSER_INSTRUCTIONS : '',
           profileBlock(facts)
         ]
           .map((s) => s.trim())
@@ -168,7 +199,7 @@ export class Chat extends Context.Service<
           messages,
           temperature: settings.temperature,
           ...(hasPdf ? { plugins: [{ id: 'file-parser', pdf: { engine: settings.pdfEngine } }] } : {}),
-          ...(session.browserEnabled ? { tools: BROWSER_TOOLS } : {})
+          ...(usesComputer(session) ? { tools: [...COMPUTER_TOOLS, ...BROWSER_TOOLS] } : session.browserEnabled ? { tools: BROWSER_TOOLS } : {})
         } satisfies ChatRequest as ChatRequest
       })
 
@@ -227,6 +258,7 @@ export class Chat extends Context.Service<
         // Flushes a half-finished text line so a step line never lands in the middle of it.
         const endLine = Effect.suspend(() => Effect.forEach(buffer.flush(), emit, { discard: true }))
         let usedBrowser = false
+        let usedComputer = false
         // A continued reply keeps counting from what it already used.
         let usage: Usage | null = assistant.usage ? { ...assistant.usage } : null
         let answeredBy: string | null = null
@@ -248,6 +280,10 @@ export class Chat extends Context.Service<
           const chatModel = request.model
           const settings = yield* settingsStore.get.pipe(Effect.orElseSucceed(() => null))
           const refs = new Map<string, string>()
+          const computerRun = request.tools?.some((t) => t.function.name.startsWith('computer_')) ?? false
+          const maxSteps = computerRun ? MAX_COMPUTER_STEPS : MAX_AGENT_STEPS
+          // The screenshot messages this run added, oldest first, so old ones can be dropped.
+          const shots: ChatMessage[] = []
           for (let step = 0; ; step++) {
             const calls = new Map<number, { id: string; name: string; args: string }>()
             let text = ''
@@ -256,6 +292,8 @@ export class Chat extends Context.Service<
             request.model =
               vision && vision !== chatModel && hasImages(request.messages) && !(yield* seesImages(chatModel)) ? vision : chatModel
             if (request.model !== chatModel) answeredBy = request.model
+            // The sketch cursor says what's going on while the model thinks, before and between actions.
+            if (computerRun) yield* computer.hint('Thinking…')
             yield* openRouter.streamChat(request).pipe(
               Stream.runForEach((delta) => {
                 if (delta.type === 'usage') {
@@ -275,9 +313,9 @@ export class Chat extends Context.Service<
               })
             )
             if (calls.size === 0 || !request.tools) return
-            if (step >= MAX_AGENT_STEPS) {
+            if (step >= maxSteps) {
               yield* endLine
-              yield* emit(`Stopped after ${MAX_AGENT_STEPS} browser steps. Ask me to keep going if you want me to continue.`)
+              yield* emit(`Stopped after ${maxSteps} steps. Ask me to keep going if you want me to continue.`)
               return
             }
 
@@ -288,28 +326,58 @@ export class Chat extends Context.Service<
               function: { name: c.name, arguments: c.args || '{}' }
             }))
             request.messages.push({ role: 'assistant', content: text || null, tool_calls: toolCalls })
-            const images: string[] = []
+            const images: Array<{ url: string; desktop: boolean }> = []
+            let halt: string | null = null
             for (const call of toolCalls) {
-              usedBrowser = true
-              const outcome = yield* runTool(browser, refs, call.function.name, call.function.arguments)
+              // Every call needs a result, even ones after a refusal, or the request is malformed.
+              if (halt !== null) {
+                request.messages.push({ role: 'tool', tool_call_id: call.id, content: 'Not run: control was handed back to the user.' })
+                continue
+              }
+              const desktop = call.function.name.startsWith('computer_')
+              if (desktop && !usedComputer) {
+                usedComputer = true
+                const taken = yield* computer.begin(assistant.id).pipe(Effect.as(null), Effect.catch((e) => Effect.succeed(e.message)))
+                if (taken !== null) {
+                  yield* emit(stepLine({ tool: call.function.name, label: 'Could not use the computer', ok: false, detail: taken }))
+                  request.messages.push({ role: 'tool', tool_call_id: call.id, content: `Error: ${taken}` })
+                  usedComputer = false
+                  continue
+                }
+              }
+              if (!desktop) usedBrowser = true
+              if (!desktop && computerRun) yield* computer.hint(browserHint(call.function.name, call.function.arguments))
+              const outcome = desktop
+                ? yield* runComputerTool(computer, call.function.name, call.function.arguments)
+                : yield* runTool(browser, refs, call.function.name, call.function.arguments)
               yield* emit(stepLine(outcome.step))
               request.messages.push({ role: 'tool', tool_call_id: call.id, content: outcome.text })
-              if (outcome.image) images.push(outcome.image)
+              if (outcome.image) images.push({ url: outcome.image, desktop })
+              if (outcome.halt) halt = outcome.halt
             }
+            if (halt !== null) return yield* emit(halt)
             // Tool results are text-only on most providers, so screenshots follow as a user turn.
             if (images.length > 0) {
-              request.messages.push({
+              const shot: ChatMessage = {
                 role: 'user',
                 content: [
-                  { type: 'text', text: 'Screenshot of the browser viewport you asked for:' },
-                  ...images.map((url) => ({ type: 'image_url' as const, image_url: { url } }))
+                  { type: 'text', text: images.some((i) => i.desktop) ? 'Screenshot after that step:' : 'Screenshot of the browser viewport you asked for:' },
+                  ...images.map((i) => ({ type: 'image_url' as const, image_url: { url: i.url } }))
                 ]
-              })
+              }
+              request.messages.push(shot)
+              shots.push(shot)
+              // Only the latest few screenshots are worth their tokens; older ones become a note.
+              for (const old of shots.splice(0, Math.max(0, shots.length - KEEP_SCREENSHOTS))) {
+                old.content = '[An earlier screenshot, removed to save space.]'
+              }
             }
           }
         }).pipe(
-          // Hand the browser back however the reply ends (done, error, Stop, Take over).
+          // Hand the browser and computer back however the reply ends (done, error, Stop, Take over).
           Effect.ensuring(Effect.suspend(() => (usedBrowser ? browser.release : Effect.void))),
+          Effect.ensuring(Effect.suspend(() => (usedComputer ? computer.end(assistant.id) : Effect.void))),
+          Effect.ensuring(Effect.suspend(() => computer.hint(''))),
           Effect.onExit((exit) =>
             Effect.gen(function* () {
               // The unfinished line is kept (and marked partial) so nothing received is lost.
@@ -541,6 +609,9 @@ export class Chat extends Context.Service<
           stopRequested.add(messageId)
           yield* FiberMap.remove(generations, messageId)
         })
+
+      // Stop on the screen overlay, for when the chat window is out of the way.
+      computer.onStop((messageId) => void Effect.runFork(stop(messageId)))
 
       const switchBranch = Effect.fn('Chat.switchBranch')(function* (input: { sessionId: string; messageId: string }) {
         yield* messageIn(input.sessionId, input.messageId)

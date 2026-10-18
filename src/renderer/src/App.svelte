@@ -31,6 +31,11 @@
     ready = true
   })
 
+  // While the open chat has computer use on, the sketch cursor stays on screen and follows the pointer.
+  $effect(() => {
+    if (window.api.computer.supported) window.api.computer.setMode(ready && app.chat.computerEnabled)
+  })
+
   const onkeydown = (e: KeyboardEvent) => {
     if (!e.ctrlKey) return
     const key = e.key.toLowerCase()

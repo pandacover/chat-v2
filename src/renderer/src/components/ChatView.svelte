@@ -85,6 +85,16 @@
     if (info && !info.supportsTools) app.toast(`${info.name} can't use tools, so it can't drive the browser. Pick a model marked "tools".`)
   }
 
+  const toggleComputer = async () => {
+    const next = !app.chat.computerEnabled
+    await app.updateSession({ computerEnabled: next })
+    if (!next) return
+    const info = app.models.find((m) => m.id === model)
+    if (info && !info.supportsTools) app.toast(`${info.name} can't use tools, so it can't use the computer. Pick a model marked "tools".`)
+    else if (info && !info.inputModalities.includes('image')) app.toast(`${info.name} can't see images, so it can't see your screen. Pick a model that takes images.`)
+    else app.toast('The assistant can now see your screen and work in your apps in this chat, with its own cursor: your mouse stays yours. Settings, passwords and terminals stay off limits. Press Stop to take over.', 'info')
+  }
+
   const openPrompt = () => {
     promptDraft = app.chat.systemPrompt ?? app.settings?.settings.systemPrompt ?? ''
     promptOpen = true
@@ -176,6 +186,8 @@
       oninstructions={openPrompt}
       browserEnabled={app.chat.browserEnabled}
       onbrowser={toggleBrowser}
+      computerEnabled={app.chat.computerEnabled}
+      oncomputer={toggleComputer}
     />
   </div>
 

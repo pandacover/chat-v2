@@ -16,6 +16,8 @@ export default defineConfig({
     resolve: { alias: shared },
     build: {
       rollupOptions: {
+        // The overlay that draws computer use on screen gets its own, much smaller bridge.
+        input: { index: resolve(__dirname, 'src/preload/index.ts'), overlay: resolve(__dirname, 'src/preload/overlay.ts') },
         // Sandboxed preloads must be a single CommonJS file.
         output: { format: 'cjs', entryFileNames: '[name].cjs' }
       }
@@ -23,6 +25,11 @@ export default defineConfig({
   },
   renderer: {
     resolve: { alias: { ...shared, '@': resolve(__dirname, 'src/renderer/src') } },
-    plugins: [svelte(), tailwindcss()]
+    plugins: [svelte(), tailwindcss()],
+    build: {
+      rollupOptions: {
+        input: { index: resolve(__dirname, 'src/renderer/index.html'), overlay: resolve(__dirname, 'src/renderer/overlay.html') }
+      }
+    }
   }
 })

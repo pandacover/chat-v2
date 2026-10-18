@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; base-uri 'none'"
+    />
+    <title>chat-v2 overlay</title>
+  </head>
+  <body>
+    <canvas id="ink"></canvas>
+    <div id="pill" hidden>
+      <span class="badge" aria-hidden="true">
+        <span class="spinner"></span>
+        <svg class="check" viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-7" /></svg>
+      </span>
+      <span class="text">
+        <span class="title"></span>
+        <span class="sub"></span>
+      </span>
+      <button data-command="stop" class="stop"><span class="square" aria-hidden="true"></span>Stop</button>
+      <button data-command="show-chat">Show chat</button>
+      <button data-command="clear" class="primary">Clear marks</button>
+    </div>
+    <script type="module" src="./src/overlay/main.ts"></script>
+  </body>
+</html>

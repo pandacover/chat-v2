@@ -48,8 +48,13 @@ export const splitSteps = (content: string): Segment[] => {
   return out
 }
 
+/** Whether a run of steps drove the desktop (computer_* tools) or only the browser. */
+export const isDesktopRun = (steps: Step[]) => steps.some((s) => s.tool.startsWith('computer_'))
+
+const usedWhat = (steps: Step[]) => (isDesktopRun(steps) ? 'Used the computer' : 'Used the browser')
+
 /** History sent back to a model: step lines become one plain-language summary per run. */
 export const summarizeSteps = (content: string): string =>
   splitSteps(content)
-    .map((s) => (s.type === 'text' ? s.content : `[Used the browser: ${s.steps.map((x) => x.label).join('; ')}]`))
+    .map((s) => (s.type === 'text' ? s.content : `[${usedWhat(s.steps)}: ${s.steps.map((x) => x.label).join('; ')}]`))
     .join('\n')

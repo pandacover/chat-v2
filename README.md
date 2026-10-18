@@ -15,6 +15,7 @@ A desktop chatbot built with Electron, Svelte 5 and Effect. It talks to any mode
 | **Chat titles** | A new chat is titled with the start of its first message right away. In the background, a small model (`titleModel`, Mistral NeMo by default, about $0.00001 a title) reads that message and renames the chat. A rename you make first is kept, and forks keep their "(fork)" title. Pick "None" in Settings to keep the first-message titles. |
 | **File uploads** | Attach with the paperclip, drag and drop, or paste. Images go to vision models as `image_url` parts, PDFs as OpenRouter `file` parts (parsing engine set in Settings), and text/code files are inlined. 25 MB per file. |
 | **Interactive artifacts** | The model wraps self-contained HTML/CSS/JS in `<artifact>` tags. Artifacts open in a side panel inside an opaque-origin sandboxed iframe, served from a custom `artifact://` scheme with its own CSP. The panel has preview/code tabs, a version switcher, copy, download and reload. |
+| **Computer use** (Windows) | Turn on **Computer** in a chat's composer and the model can see the main screen and work in your apps there with its own cursor (your mouse stays yours), with the built-in browser to look up how an unfamiliar app works (it saves what it learns as per-app tips, listed in Settings). While computer mode is on, a sketched cursor follows your pointer. Give it a task or ask how to do something and it goes and does it: it glides to each target with a tag underneath saying what it's doing, and draws on the screen (circles, boxes, arrows, highlights, freehand lines) with labelled tags to show you where things are. A bar at the top of the screen has **Stop**. See [Computer use](#computer-use). |
 | **Speech-to-text** | Push-to-talk on the mic button: hold to talk, or click to start and stop (`Ctrl+M`). Audio is recorded as WebM/Opus and transcribed by ElevenLabs (`scribe_v2` by default). |
 | **Lists in the composer** | Shift+Enter on a Markdown list item (`-`, `*`, `+`, `1.`, `1)`, `- [ ]`) starts the next one, numbered. Shift+Enter on an empty item ends the list, or moves a nested item out a level. Tab and Shift+Tab nest and un-nest items. Numbered lists renumber when items are added, nested or deleted, and every change can be undone with Ctrl+Z. |
 | **Reply to a passage** | Select text in a reply and a **Reply** button appears above it. It opens a one-line box; press Enter and the passage goes into the composer as a Markdown quote, with what you typed under it. Quote several passages, then send. |
@@ -81,6 +82,23 @@ Files live in Electron's user-data folder (`%APPDATA%\chat-v2` on Windows, `~/Li
 
 For automated testing, `OPENROUTER_BASE_URL` and `ELEVENLABS_BASE_URL` point the app at a mock server, and `CHAT_V2_HEADLESS=1` keeps the window hidden (it still renders, so Playwright can drive it and take screenshots).
 
+## Computer use
+
+Input goes through one long-lived PowerShell process that compiles a small C# class over `user32` (`src/main/winHelper.ts`), so there are no native modules. It's per-monitor DPI aware, so coordinates are physical pixels on scaled displays too. It never moves the mouse. Clicks, drags and scrolls are posted to the innermost window under the point, inside the top-level window the guard checked, as the messages a real mouse would produce. The coordinates are converted for that window's DPI awareness. So you can keep using your mouse while it works. Most Win32, Qt and Chromium apps take these clicks; some apps (games in particular, and some WinUI/UWP apps) ignore them, and the model is told to use the keyboard then. Keys and text go through `SendInput`, which needs the target app in front, so the app the model last clicked in is brought forward first. The screen is captured with Electron's `desktopCapturer` and sent at up to 1280×800. The model gives coordinates in those pixels. The overlay is a transparent, click-through window with content protection (`WDA_EXCLUDEFROMCAPTURE`), so the model never sees its own cursor or marks.
+
+The guard (`src/shared/computer.ts`) runs in the main process on every action, whatever the model asks:
+
+- **Off limits:** Windows Settings and Control Panel, Windows Security, passkey and Windows Hello prompts, admin tools, terminals, Start, search and Run, password managers, browser pages about passwords, passkeys or settings, and chat-v2 itself. Add more apps or title words in Settings → Computer use.
+- **Hidden:** the visible parts of protected windows are painted grey before the model sees the screen, and their titles aren't sent.
+- **Refused:** clicks, drags and scrolls that would land in a protected window, typing or keys while one has focus, Windows-key shortcuts, Ctrl+Alt+Delete and Ctrl+Shift+Esc, and opening protected apps by name. A refusal ends the reply and tells you to do that step yourself.
+- **Never reachable at all:** UAC prompts run on the secure desktop, where nothing can capture or click them, and Windows drops input to apps running as administrator.
+
+To work out an app it doesn't know, the model searches with `browser_search` and reads pages with `browser_read`, which returns a page's main text (headings, numbered steps, tables) without menus, cookie banners or footers, about 10,000 characters at a time. Its instructions say to read two sources before acting, and to click or mark only what it can see in the latest screenshot. `computer_zoom` captures part of the screen at full resolution, so it can read small menu text first. Pages count as loaded once their own document is parsed and its text stops growing, so ad and tracker frames that never finish don't hold a read up. (Scripts run through `webContents.mainFrame`: `webContents.executeJavaScript` waits for the whole page, frames included.)
+
+While a chat with computer use is open, the overlay stays up and its cursor follows your pointer (the main process polls the pointer, since the overlay lets every event through). Before the model starts acting, the cursor's tag shows what it's doing, like "Reading brawlhalla.wiki.gg". After a task, the cursor comes back to you. The marks are hand-drawn by the cursor itself, stroke by stroke. Labels and the status bar are plain dark tags in the interface font from Settings → Appearance, so they read over any app. The status bar moves to the bottom when the cursor works near the top. Mouse forwarding, which on Windows takes a system-wide mouse hook, is on only while the bar is showing.
+
+Only one chat can use the computer at a time. The chat window minimises while it works and comes back when the reply ends. If the model left marks on screen, the window stays down until you press **Show chat** or **Clear**. Only the latest three screenshots are kept in a request, so long runs don't grow without limit. It's Windows-only for now: the switch doesn't appear on macOS or Linux.
+
 ## Architecture
 
 ```
@@ -88,7 +106,8 @@ src/
   shared/      types, line buffer, artifact parser (used by main and renderer)
   main/        Electron main process: Effect services wired with Layers
     services/  Db (SQLite repo), SettingsStore, OpenRouter (SSE stream), ElevenLabs,
-               Attachments, Chat (generation fibers, branching, durable streaming)
+               Attachments, Chat (generation fibers, branching, durable streaming),
+               Browser (the built-in browser), Computer (computer use)
     ipc.ts     IPC handlers → Effect programs; typed errors serialized as { tag, message }
     protocols.ts  artifact:// and attachment:// schemes
   preload/     contextBridge API (`window.api`)

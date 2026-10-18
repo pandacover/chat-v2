@@ -16,6 +16,19 @@ export interface PageSnapshot {
   scroll: { y: number; height: number; viewport: number }
 }
 
+/** A page's readable text: headings, paragraphs, lists, tables and code, in order. */
+export interface Reading {
+  url: string
+  title: string
+  text: string
+}
+
+export interface SearchResult {
+  title: string
+  url: string
+  snippet: string
+}
+
 export interface Shot {
   /** JPEG data URL, downscaled for sending to a model. */
   dataUrl: string
@@ -25,7 +38,7 @@ export interface Shot {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /** Runs in the page: tags visible interactive elements with refs and summarises the page. */
-const SNAPSHOT_JS = `(() => {
+export const SNAPSHOT_JS = `(() => {
   const MAX = 300
   const visible = (el) => {
     const r = el.getBoundingClientRect()
@@ -63,6 +76,76 @@ const SNAPSHOT_JS = `(() => {
     text: (document.body ? document.body.innerText : '').replace(/\\n{3,}/g, '\\n\\n').slice(0, 5000),
     scroll: { y: Math.round(scrollY), height: document.documentElement.scrollHeight, viewport: innerHeight }
   }
+})()`
+
+/**
+ * Runs in the page: the main content as plain lines, without navigation, headers, footers,
+ * sidebars, cookie banners or ads. Headings keep their level; list items and table rows keep
+ * their shape, so steps like "Settings > Controls > Camera" survive.
+ */
+export const READ_JS = `(() => {
+  const SKIP = 'nav,header,footer,aside,script,style,noscript,template,svg,form,iframe,button,select,[role=navigation],[role=banner],[role=contentinfo],[role=complementary],[role=search],[aria-hidden=true],[hidden],.ad,.ads,.advert,[class*=cookie],[id*=cookie],[class*=consent],[class*=newsletter],[class*=related],[class*=share],[class*=comment]'
+  const pickRoot = () => {
+    const tries = ['article', 'main', '[role=main]', '#mw-content-text', '.mw-parser-output', '#content', '.content', '.post', '.entry-content', '#main']
+    let best = null
+    for (const sel of tries) {
+      for (const el of document.querySelectorAll(sel)) {
+        const n = (el.innerText || '').length
+        if (n > 400 && (!best || n > (best.innerText || '').length * 0.6)) { best = el; break }
+      }
+      if (best) break
+    }
+    return best || document.body
+  }
+  const root = pickRoot()
+  if (!root) return { url: location.href, title: document.title, text: '' }
+  const BLOCK = 'h1,h2,h3,h4,h5,h6,p,li,pre,blockquote,dt,dd,figcaption,tr,caption'
+  const clean = (s) => String(s || '').replace(/[ \\t\\u00a0]+/g, ' ').replace(/\\n{3,}/g, '\\n\\n').trim()
+  const lines = []
+  let last = ''
+  for (const el of root.querySelectorAll(BLOCK)) {
+    if (el.closest(SKIP) && !root.matches(SKIP)) continue
+    // The innermost block holds the text; an outer one would repeat it.
+    if (el.tagName !== 'TR' && el.tagName !== 'PRE' && el.querySelector(BLOCK)) continue
+    if (el.closest('pre') && el.tagName !== 'PRE') continue
+    const r = el.getBoundingClientRect()
+    if (r.width === 0 && r.height === 0) continue
+    const tag = el.tagName
+    let text
+    if (tag === 'TR') text = [...el.children].map((c) => clean(c.innerText)).filter(Boolean).join(' | ')
+    else if (tag === 'PRE') text = '\\x60\\x60\\x60\\n' + String(el.innerText || '').trim() + '\\n\\x60\\x60\\x60'
+    else text = clean(el.innerText)
+    if (!text || text === last) continue
+    last = text
+    if (/^H[1-6]$/.test(tag)) text = '#'.repeat(Number(tag[1])) + ' ' + text
+    else if (tag === 'LI') text = (el.parentElement && el.parentElement.tagName === 'OL' ? ([...el.parentElement.children].indexOf(el) + 1) + '. ' : '- ') + text
+    else if (tag === 'BLOCKQUOTE') text = '> ' + text
+    lines.push(text)
+  }
+  let text = lines.join('\\n')
+  // Pages built from divs alone: fall back to the rendered text of the content area.
+  if (text.length < 300) text = clean(root.innerText)
+  return { url: location.href, title: document.title, text }
+})()`
+
+/** Runs on a search results page (DuckDuckGo's HTML version, or Bing as a fallback). */
+export const RESULTS_JS = `(() => {
+  const out = []
+  const real = (href) => {
+    try {
+      const u = new URL(href, location.href)
+      const target = u.searchParams.get('uddg')
+      return target ? decodeURIComponent(target) : u.href
+    } catch { return href }
+  }
+  for (const r of document.querySelectorAll('.result:not(.result--ad), li.b_algo')) {
+    const a = r.querySelector('.result__a, h2 a')
+    if (!a) continue
+    const snippet = r.querySelector('.result__snippet, .b_caption p, p')
+    out.push({ title: (a.innerText || '').trim(), url: real(a.getAttribute('href')), snippet: ((snippet && snippet.innerText) || '').trim().replace(/\\s+/g, ' ').slice(0, 300) })
+    if (out.length >= 8) break
+  }
+  return out
 })()`
 
 /** Scrolls a ref'd element into view and returns its centre in viewport CSS pixels. */
@@ -137,6 +220,11 @@ export const normalizeUrl = (input: string): string => {
   return `https://duckduckgo.com/?q=${encodeURIComponent(s)}`
 }
 
+/** The search page the agent reads results from: DuckDuckGo without scripts, which loads fast and has no consent wall. */
+const searchUrl = (query: string) =>
+  `${process.env.CHAT_V2_SEARCH_URL ?? 'https://html.duckduckgo.com/html/?q='}${encodeURIComponent(query)}`
+const fallbackSearchUrl = (query: string) => `https://www.bing.com/search?q=${encodeURIComponent(query)}`
+
 type Emit = (event: BrowserEvent) => void
 
 export interface BrowserApi {
@@ -144,6 +232,10 @@ export interface BrowserApi {
   readonly navigate: (url: string) => Effect.Effect<PageSnapshot, BrowserError>
   readonly history: (direction: 'back' | 'forward' | 'reload') => Effect.Effect<PageSnapshot, BrowserError>
   readonly snapshot: Effect.Effect<PageSnapshot, BrowserError>
+  /** Searches the web in the visible browser and returns the results. */
+  readonly search: (query: string) => Effect.Effect<SearchResult[], BrowserError>
+  /** Opens `url` (or stays on the current page) and returns its main text. */
+  readonly read: (url: string | null) => Effect.Effect<Reading, BrowserError>
   readonly click: (target: { ref?: string; x?: number; y?: number }) => Effect.Effect<PageSnapshot, BrowserError>
   readonly type: (ref: string, text: string, submit: boolean) => Effect.Effect<PageSnapshot, BrowserError>
   readonly press: (keys: string) => Effect.Effect<PageSnapshot, BrowserError>
@@ -193,13 +285,54 @@ export class Browser extends Context.Service<Browser, BrowserApi>()('chat-v2/Bro
           return (await wc.debugger.sendCommand(method, params)) as unknown
         })
 
-      const exec = <A>(wc: WebContents, js: string) => attempt('Page script', () => wc.executeJavaScript(js, true) as Promise<A>)
+      // On the main frame, not the WebContents: WebContents.executeJavaScript holds every script until
+      // the page has fully loaded, which an ad frame that never finishes can put off for good.
+      const run = <A>(wc: WebContents, js: string) => wc.mainFrame.executeJavaScript(js, true) as Promise<A>
+      const exec = <A>(wc: WebContents, js: string) => attempt('Page script', () => run<A>(wc, js))
 
       const settle = (wc: WebContents, ms = 500) =>
         attempt('Waiting for the page', async () => {
           await sleep(ms)
           const started = Date.now()
           while (wc.isLoading() && Date.now() - started < 12000) await sleep(150)
+        })
+
+      /**
+       * Loads a page: done once its own document is parsed and its text stops
+       * growing, without waiting for the ads and trackers in its frames, which can take many
+       * seconds or never finish.
+       */
+      const loadPage = (wc: WebContents, url: string) =>
+        attempt('Navigation', async () => {
+          let ready: () => void = () => {}
+          const parsed = new Promise<void>((resolve) => (ready = resolve))
+          wc.once('dom-ready', ready)
+          // The full load carries on in the background; only a failure of the page itself counts.
+          const loaded = wc.loadURL(url).then(
+            () => undefined,
+            (e: Error) => {
+              // Redirects abort the first load, and so does moving on to the next page.
+              if (!/ERR_ABORTED/.test(e.message)) throw e
+            }
+          )
+          loaded.catch(() => undefined)
+          try {
+            await Promise.race([parsed, loaded, sleep(15000)])
+          } finally {
+            wc.off('dom-ready', ready)
+          }
+          // A load that already failed is reported; one still going is fine.
+          await Promise.race([loaded, sleep(0)])
+          // Pages that render their article with script fill in after parsing: wait for the text to hold still.
+          let last = -1
+          const started = Date.now()
+          while (Date.now() - started < 4000) {
+            const size = await run<number>(wc, 'document.body ? document.body.innerText.length : 0').catch(() => 0)
+            if (size > 200 && size === last) break
+            if (!wc.isLoading() && size === last) break
+            last = size
+            await sleep(250)
+          }
         })
 
       const snapshotOf = (wc: WebContents) => exec<PageSnapshot>(wc, SNAPSHOT_JS)
@@ -281,11 +414,7 @@ export class Browser extends Context.Service<Browser, BrowserApi>()('chat-v2/Bro
         navigate: (url) =>
           Effect.gen(function* () {
             const wc = yield* ensure
-            yield* attempt('Navigation', () => wc.loadURL(normalizeUrl(url)).catch((e: Error) => {
-              // Redirects abort the first load; the page still arrives.
-              if (!/ERR_ABORTED/.test(e.message)) throw e
-            }))
-            yield* settle(wc, 300)
+            yield* loadPage(wc, normalizeUrl(url))
             return yield* snapshotOf(wc)
           }),
 
@@ -300,6 +429,27 @@ export class Browser extends Context.Service<Browser, BrowserApi>()('chat-v2/Bro
           }),
 
         snapshot: Effect.flatMap(ensure, snapshotOf),
+
+        search: (query) =>
+          Effect.gen(function* () {
+            const wc = yield* ensure
+            const load = (url: string) =>
+              Effect.gen(function* () {
+                yield* loadPage(wc, url)
+                return yield* exec<SearchResult[]>(wc, RESULTS_JS)
+              })
+            const results = yield* load(searchUrl(query))
+            // DuckDuckGo sometimes answers automated traffic with a challenge page instead.
+            if (results.length > 0 || process.env.CHAT_V2_SEARCH_URL) return results
+            return yield* load(fallbackSearchUrl(query))
+          }),
+
+        read: (url) =>
+          Effect.gen(function* () {
+            const wc = yield* ensure
+            if (url) yield* loadPage(wc, normalizeUrl(url))
+            return yield* exec<Reading>(wc, READ_JS)
+          }),
 
         click: (target) =>
           Effect.gen(function* () {
