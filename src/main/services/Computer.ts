@@ -173,6 +173,12 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
           Effect.orElseSucceed(() => ({ selfPid: ports.selfPid, extra: [] as string[], os: ports.os }))
         )
 
+        /** Whether the user lets drags (and Mac clicks nothing else reaches) borrow the real pointer. */
+        const borrowPointer = settings.get.pipe(
+          Effect.map((s) => s.computerBorrowPointer),
+          Effect.orElseSucceed(() => false)
+        )
+
         // --- Tips the model saved about apps ---------------------------------------------------
 
         const readTips = (): AppTip[] => {
@@ -456,7 +462,8 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const p = yield* toScreen(f, x, y)
               const w = yield* pointerTarget(s, p)
               yield* glide(f, x, y, label, button === 'right' ? 'right' : count > 1 ? 'double' : 'click')
-              const note = yield* attempt('Clicking', () => d.click(w.hwnd, p.x, p.y, button, count))
+              const borrow = yield* borrowPointer
+              const note = yield* attempt('Clicking', () => d.click(w.hwnd, p.x, p.y, button, count, { borrow }))
               workWindow = w.hwnd
               return { look: noted(yield* settleAndLook(550), note), app: nameOf(w) }
             }),
@@ -483,7 +490,8 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               overlay.send({ type: 'cursor', x: p.x, y: p.y, label, action: 'drag' })
               agentAt = { x: to[0], y: to[1] }
               // The helper moves through the drag over about the time the overlay's cursor takes.
-              const note = yield* attempt('Dragging', () => d.drag(w.hwnd, a, b))
+              const borrow = yield* borrowPointer
+              const note = yield* attempt('Dragging', () => d.drag(w.hwnd, a, b, { borrow }))
               workWindow = w.hwnd
               return { look: noted(yield* settleAndLook(500), note), app: nameOf(w) }
             }),

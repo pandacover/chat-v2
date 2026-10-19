@@ -172,7 +172,7 @@ export class Chat extends Context.Service<
           settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : '',
           settings.artifactsEnabled ? MOODBOARD_INSTRUCTIONS : '',
           // Computer use brings the browser along, for looking up how unfamiliar apps work.
-          usesComputer(session) ? computerInstructions(process.platform === 'darwin' ? 'darwin' : 'win32') : '',
+          usesComputer(session) ? computerInstructions(process.platform === 'darwin' ? 'darwin' : 'win32', { borrowPointer: settings.computerBorrowPointer }) : '',
           session.browserEnabled || usesComputer(session) ? BROWSER_INSTRUCTIONS : '',
           profileBlock(facts)
         ]

@@ -22,7 +22,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // Small models (Mistral NeMo) made facts up and missed ones said in passing.
   memoryModel: 'google/gemini-2.5-flash',
   alwaysOnTop: false,
-  computerProtected: []
+  computerProtected: [],
+  computerBorrowPointer: true
 }
 
 const PDF_ENGINES: ReadonlyArray<Settings['pdfEngine']> = ['cloudflare-ai', 'mistral-ocr', 'native']
@@ -49,7 +50,8 @@ export const normalizeSettings = (raw: unknown): Settings => {
     alwaysOnTop: typeof input.alwaysOnTop === 'boolean' ? input.alwaysOnTop : DEFAULT_SETTINGS.alwaysOnTop,
     computerProtected: Array.isArray(input.computerProtected)
       ? [...new Set(input.computerProtected.filter((s): s is string => typeof s === 'string').map((s) => s.trim()).filter(Boolean))].slice(0, 100)
-      : DEFAULT_SETTINGS.computerProtected
+      : DEFAULT_SETTINGS.computerProtected,
+    computerBorrowPointer: typeof input.computerBorrowPointer === 'boolean' ? input.computerBorrowPointer : DEFAULT_SETTINGS.computerBorrowPointer
   }
 }
 

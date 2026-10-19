@@ -9,7 +9,7 @@ import { helperProcess } from './helperProcess'
 // macOS input and window inspection for computer use, without native modules: one long-lived
 // osascript process runs JavaScript for Automation, which reaches CoreGraphics, AppKit and the
 // Accessibility API through its Objective-C bridge. Same line protocol as the Windows helper:
-//   <id> state | click win x y left|right|middle count | hover win x y | drag win x0 y0 x1 y1
+//   <id> state | click win x y left|right|middle count borrow | hover win x y | drag win x0 y0 x1 y1 borrow
 //   <id> wheel win x y dx dy | text <base64 utf-8> | keys keycode flags mods | focus win
 //   <id> menu win <base64 JSON path>
 // `win` is a CGWindowID. Coordinates here are points (macOS's global display coordinates); the
@@ -17,9 +17,10 @@ import { helperProcess } from './helperProcess'
 //
 // The mouse is never moved. A click presses the element under the point through Accessibility
 // (buttons, menus, rows, links, text fields), which apps can't ignore and which says whether it
-// worked; where nothing takes a press, mouse events are posted to the app that owns the window,
-// which many Mac apps ignore, and the model is told so. Dragging can only be posted, since macOS
-// has no way to drag without the pointer. Keys and text reach the app in front.
+// worked. Where nothing takes a press, and for every drag, only the real pointer works: when the
+// user allows it (borrow = 1), the pointer is borrowed for under a second and put back. Otherwise
+// mouse events are posted to the app, which many Mac apps ignore, and the model is told so. Keys
+// and text reach the app in front.
 
 export const MAC_HELPER_SCRIPT = String.raw`
 ObjC.import('Cocoa')
@@ -371,7 +372,79 @@ function axScroll(pid, x, y, dx, dy) {
 // Down and up event types, and the button number.
 var BUTTONS = { left: [1, 2, 0], right: [3, 4, 1], middle: [25, 26, 2] }
 
-function click(win, x, y, which, count) {
+// --- Borrowing the pointer ------------------------------------------------------------------
+// Only the real pointer can drag, or click where nothing responds to Accessibility (a timeline,
+// a canvas). When the user allows it, these move the pointer through the action as system
+// events, then put it back where the user left it, in under a second.
+
+function pointerNow() {
+  var m = $.NSEvent.mouseLocation
+  var top = $.NSScreen.screens.objectAtIndex(0).frame.size.height
+  return { x: m.x, y: top - m.y }
+}
+
+function hid(type, x, y, button, clicks) {
+  var e = $.CGEventCreateMouseEvent(null, type, point(x, y), button)
+  if (clicks) $.CGEventSetIntegerValueField(e, 1, clicks)
+  $.CGEventPost(0, e)
+}
+
+function borrowed(work) {
+  var home = pointerNow()
+  at('borrowing the pointer')
+  try {
+    work()
+  } finally {
+    delay(0.06)
+    $.CGWarpMouseCursorPosition(point(home.x, home.y))
+    // A warp holds the pointer still for a moment afterwards; hand it straight back.
+    try { $.CGAssociateMouseAndMouseCursorPosition(true) } catch (e) {}
+  }
+}
+
+function borrowDrag(win, x0, y0, x1, y1) {
+  target(win)
+  var held = false
+  borrowed(function () {
+    try {
+      hid(5, x0, y0, 0, 0)
+      delay(0.05)
+      hid(1, x0, y0, 0, 1)
+      held = true
+      delay(0.1)
+      var steps = 24
+      for (var i = 1; i <= steps; i++) {
+        hid(6, x0 + ((x1 - x0) * i) / steps, y0 + ((y1 - y0) * i) / steps, 0, 0)
+        delay(0.018)
+      }
+      // Drop targets light up on hover before they take a drop.
+      delay(0.12)
+      hid(2, x1, y1, 0, 1)
+      held = false
+    } finally {
+      if (held) hid(2, x1, y1, 0, 1)
+    }
+  })
+  return 'Dragged with the real pointer, borrowed for a moment and put back.'
+}
+
+function borrowClick(win, x, y, which, count) {
+  target(win)
+  var b = BUTTONS[which] || BUTTONS.left
+  borrowed(function () {
+    hid(5, x, y, 0, 0)
+    delay(0.04)
+    for (var n = 1; n <= Math.max(1, count); n++) {
+      hid(b[0], x, y, b[2], n)
+      delay(0.03)
+      hid(b[1], x, y, b[2], n)
+      if (n < count) delay(0.04)
+    }
+  })
+  return 'Nothing there responds to Accessibility, so I clicked with the real pointer, borrowed for a moment and put back.'
+}
+
+function click(win, x, y, which, count, borrow) {
   var pid = windowById(win).kCGWindowOwnerPID
   var done = null
   try { done = axClick(pid, x, y, which, count) } catch (e) { at('accessibility refused: ' + ((e && e.message) || e)) }
@@ -380,6 +453,7 @@ function click(win, x, y, which, count) {
     try { done = systemEventsClick(pid, x, y) } catch (e) { at('System Events refused: ' + ((e && e.message) || e)) }
     if (done) return done
   }
+  if (borrow) return borrowClick(win, x, y, which, count)
   // Nothing there takes an Accessibility press (a canvas, a game, a custom control): post the
   // mouse events, which some apps take, with the app in front.
   target(win)
@@ -479,9 +553,9 @@ function op(a) {
   var n = function (i) { return Number(a[i]) }
   switch (a[1]) {
     case 'state': return state()
-    case 'click': return { done: true, note: click(n(2), n(3), n(4), a[5], n(6)) }
+    case 'click': return { done: true, note: click(n(2), n(3), n(4), a[5], n(6), a[7] === '1') }
     case 'hover': postMouse(windowById(n(2)).kCGWindowOwnerPID, n(2), 5, n(3), n(4), 0, 0); return { done: true }
-    case 'drag': return { done: true, note: drag(n(2), n(3), n(4), n(5), n(6)) }
+    case 'drag': return { done: true, note: a[7] === '1' ? borrowDrag(n(2), n(3), n(4), n(5), n(6)) : drag(n(2), n(3), n(4), n(5), n(6)) }
     case 'wheel': return { done: true, note: wheel(n(2), n(3), n(4), n(5), n(6)) }
     case 'text': typeText(decode(a[2])); return { done: true }
     case 'keys': chord(n(2), n(3), a[4] && a[4] !== '-' ? a[4].split(',').map(Number) : []); return { done: true }
@@ -644,9 +718,9 @@ export const macDriver = (scriptFile: string, display: () => { w: number; h: num
       const cursor = r.cursor as DesktopState['cursor']
       return { cursor: { x: px(cursor.x), y: px(cursor.y) }, foreground: r.foreground as number, windows }
     },
-    click: async (win, x, y, button, count) => note(await request('click', win, pt(x), pt(y), button, count)),
+    click: async (win, x, y, button, count, opts) => note(await request('click', win, pt(x), pt(y), button, count, opts?.borrow ? 1 : 0)),
     hover: async (win, x, y) => void (await request('hover', win, pt(x), pt(y))),
-    drag: async (win, from, to) => note(await request('drag', win, pt(from.x), pt(from.y), pt(to.x), pt(to.y))),
+    drag: async (win, from, to, opts) => note(await request('drag', win, pt(from.x), pt(from.y), pt(to.x), pt(to.y), opts?.borrow ? 1 : 0)),
     // A wheel notch is three lines, as on Windows.
     wheel: async (win, x, y, dx, dy) => note(await request('wheel', win, pt(x), pt(y), Math.round(dx * 3), Math.round(dy * 3))),
     text: async (text) => void (await request('text', Buffer.from(text, 'utf8').toString('base64'))),

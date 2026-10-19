@@ -243,8 +243,18 @@ describe('computer service', () => {
     expect(next.halt).toBeUndefined()
     await t.tool('computer_drag', { from: [100, 100], to: [200, 150], target: 'Clip' })
     await t.tool('computer_scroll', { x: 400, y: 300, direction: 'down', amount: 3 })
-    expect(desktop.input).toEqual(['hover 1 15,15', 'click 1 30,30 left', 'drag 1 150,150 to 300,225', 'wheel 1 600,450 0,-3'])
+    // Only the drag borrows the pointer (apps follow drags from the real mouse alone); it's on by default.
+    expect(desktop.input).toEqual(['hover 1 15,15', 'click 1 30,30 left', 'pointer drag 1 150,150 to 300,225', 'wheel 1 600,450 0,-3'])
     expect(desktop.state.cursor).toEqual({ x: 900, y: 700 })
+  })
+
+  test('with borrowing the pointer turned off, drags never touch it', async () => {
+    const desktop = fakeDesktop()
+    const t = service(desktop, { computerBorrowPointer: false })
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    await t.tool('computer_drag', { from: [100, 100], to: [200, 150], target: 'Clip' })
+    expect(desktop.input).toEqual(['drag 1 150,150 to 300,225'])
   })
 
   test('keys go to the app it last clicked in, brought back to the front if the user moved on', async () => {

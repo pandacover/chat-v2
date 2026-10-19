@@ -57,7 +57,7 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'da
       state: async () => structuredClone(d.state),
       click: async (hwnd, x, y, button, count) => void d.input.push(`click ${hwnd} ${Math.round(x)},${Math.round(y)} ${button}${count > 1 ? ` x${count}` : ''}`),
       hover: async (hwnd, x, y) => void d.input.push(`hover ${hwnd} ${Math.round(x)},${Math.round(y)}`),
-      drag: async (hwnd, a, b) => void d.input.push(`drag ${hwnd} ${Math.round(a.x)},${Math.round(a.y)} to ${Math.round(b.x)},${Math.round(b.y)}`),
+      drag: async (hwnd, a, b, opts) => void d.input.push(`${opts?.borrow ? 'pointer drag' : 'drag'} ${hwnd} ${Math.round(a.x)},${Math.round(a.y)} to ${Math.round(b.x)},${Math.round(b.y)}`),
       wheel: async (hwnd, x, y, dx, dy) => void d.input.push(`wheel ${hwnd} ${Math.round(x)},${Math.round(y)} ${dx},${dy}`),
       text: async (text) => void d.input.push(`text ${text}`),
       keys: async (vks) => void d.input.push(`keys ${vks.join(',')}`),

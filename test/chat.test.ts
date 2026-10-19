@@ -538,7 +538,7 @@ describe('chat', () => {
     const names = t.requests[0]!.tools!.map((x) => x.function.name)
     expect(names).toContain('computer_click')
     expect(names).toContain('browser_navigate')
-    expect(String(t.requests[0]!.messages[0]!.content)).toContain('research before you act')
+    expect(String(t.requests[0]!.messages[0]!.content)).toContain('Work from the screen first')
     expect(desktop.input.filter((i) => i.startsWith('click ') && i.endsWith(' left'))).toHaveLength(4)
     // The chat got out of the way, and came back when the reply ended.
     expect(desktop.chat).toEqual(['hide', 'show'])

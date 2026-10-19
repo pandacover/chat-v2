@@ -4,6 +4,14 @@ import type { DesktopState } from '@shared/computer'
 export type Note = string | null | void
 
 /**
+ * Whether the real pointer may be borrowed for a moment (and put back) where nothing else works:
+ * drags, and on macOS clicks that nothing responds to. See Settings.computerBorrowPointer.
+ */
+export interface Borrow {
+  borrow?: boolean
+}
+
+/**
  * Input and window state for computer use, one per platform (winHelper.ts, macHelper.ts).
  * Coordinates are physical screen pixels. Pointer actions go to the given top-level window (the
  * one the guard checked) without moving the user's mouse.
@@ -14,9 +22,9 @@ export interface Driver {
    * Pointer actions may say how they were done, for the model: on macOS, whether a click went
    * through Accessibility (it happened) or as posted events (it may not have).
    */
-  click(hwnd: number, x: number, y: number, button: 'left' | 'right' | 'middle', count: number): Promise<Note>
+  click(hwnd: number, x: number, y: number, button: 'left' | 'right' | 'middle', count: number, opts?: Borrow): Promise<Note>
   hover(hwnd: number, x: number, y: number): Promise<void>
-  drag(hwnd: number, from: { x: number; y: number }, to: { x: number; y: number }): Promise<Note>
+  drag(hwnd: number, from: { x: number; y: number }, to: { x: number; y: number }, opts?: Borrow): Promise<Note>
   /** Wheel notches over a point; positive dy scrolls up, positive dx scrolls right. */
   wheel(hwnd: number, x: number, y: number, dx: number, dy: number): Promise<Note>
   /** Text and keys go to the app in front. */

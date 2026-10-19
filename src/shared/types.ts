@@ -166,6 +166,12 @@ export interface Settings {
   alwaysOnTop: boolean
   /** Apps or window-title words computer use must never see or touch, on top of the built-in list. */
   computerProtected: string[]
+  /**
+   * Lets computer use borrow the real pointer for a moment where nothing else works: drags (apps
+   * follow a drag only from the real mouse) and, on a Mac, clicks in areas an app draws itself.
+   * Off, the pointer is never touched and those drags and clicks mostly don't happen.
+   */
+  computerBorrowPointer: boolean
 }
 
 /** Something the assistant learned about an app while using it, offered again when it's in front. */

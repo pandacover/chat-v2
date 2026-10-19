@@ -10,12 +10,16 @@ import { helperProcess, runCommand } from './helperProcess'
 // Requests are a line of space-separated words (text is base64, so it holds no spaces):
 //   <id> state | click hwnd x y left|right|middle count | hover hwnd x y | drag hwnd x0 y0 x1 y1
 //   <id> wheel hwnd x y dx dy | hit hwnd x y | text <base64 utf-8> | keys vk,vk,... | focus hwnd | affinity hwnd
+//   <id> borrowdrag x0 y0 x1 y1
 // Replies are one JSON object per line: {"id":1,"ok":true,...} or {"id":1,"ok":false,"error":"..."}.
 // Coordinates are physical screen pixels: the process opts into per-monitor DPI awareness first,
 // so nothing is scaled behind our back on a 125% or 150% display.
 //
-// The mouse is never moved. Clicks, drags and scrolls are posted to the window under the point,
-// as the messages the real mouse would have produced, so the user keeps their pointer. Keys and
+// The mouse is never moved, with one exception the user can turn off. Clicks, drags and scrolls
+// are posted to the window under the point, as the messages the real mouse would have produced,
+// so the user keeps their pointer. Many apps follow a drag only from the real mouse (drag and drop
+// between panels, a clip onto a timeline), so borrowdrag moves the pointer through the drag and
+// puts it back where the user left it, in under a second. Keys and
 // text go through SendInput, which doesn't touch the mouse either; they reach the foreground window.
 
 export const HELPER_SOURCE = String.raw`
@@ -29,7 +33,7 @@ namespace ChatV2 {
 public static class Helper {
   [StructLayout(LayoutKind.Sequential)] struct POINT { public int X; public int Y; }
   [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
-  // Never sent; it sets the size of INPUT, which SendInput checks.
+  // Sent only by BorrowDrag; it also sets the size of INPUT, which SendInput checks.
   [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
   [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
   [StructLayout(LayoutKind.Sequential)] struct HARDWAREINPUT { public uint uMsg; public ushort wParamL; public ushort wParamH; }
@@ -41,6 +45,8 @@ public static class Helper {
   [DllImport("user32.dll")] static extern IntPtr GetThreadDpiAwarenessContext();
   [DllImport("user32.dll")] static extern int GetAwarenessFromDpiAwarenessContext(IntPtr value);
   [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+  [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
   [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint n, INPUT[] inputs, int size);
   [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hwnd);
@@ -238,6 +244,55 @@ public static class Helper {
     Post(hwnd, 0x202, 0, Local(hwnd, x1, y1, false));
   }
 
+  // --- Borrowing the pointer ------------------------------------------------------------------
+
+  // An absolute move, in the 0..65535 range SendInput uses over the whole virtual desktop.
+  static INPUT MoveTo(int x, int y) {
+    int vx = GetSystemMetrics(76), vy = GetSystemMetrics(77), vw = GetSystemMetrics(78), vh = GetSystemMetrics(79);
+    var i = new INPUT { type = 0 };
+    i.U.mi = new MOUSEINPUT {
+      dx = (int)(((long)(x - vx) * 65535) / Math.Max(1, vw - 1)),
+      dy = (int)(((long)(y - vy) * 65535) / Math.Max(1, vh - 1)),
+      dwFlags = 0x0001 | 0x8000 | 0x4000
+    };
+    return i;
+  }
+
+  static INPUT LeftButton(bool down) {
+    var i = new INPUT { type = 0 };
+    i.U.mi = new MOUSEINPUT { dwFlags = down ? 0x0002u : 0x0004u };
+    return i;
+  }
+
+  static void One(INPUT input) { Send(new List<INPUT> { input }); }
+
+  // A drag with the real mouse: down, through, up, and the pointer back where it was.
+  static void BorrowDrag(int x0, int y0, int x1, int y1) {
+    POINT home;
+    GetCursorPos(out home);
+    bool held = false;
+    try {
+      One(MoveTo(x0, y0));
+      System.Threading.Thread.Sleep(40);
+      One(LeftButton(true));
+      held = true;
+      System.Threading.Thread.Sleep(90);
+      const int steps = 24;
+      for (int i = 1; i <= steps; i++) {
+        One(MoveTo(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps));
+        System.Threading.Thread.Sleep(18);
+      }
+      // Drop targets light up on hover before they take a drop.
+      System.Threading.Thread.Sleep(120);
+      One(LeftButton(false));
+      held = false;
+    } finally {
+      if (held) { try { One(LeftButton(false)); } catch (Exception) { } }
+      System.Threading.Thread.Sleep(60);
+      SetCursorPos(home.X, home.Y);
+    }
+  }
+
   // Wheel messages carry screen coordinates, and the distance (120 a notch) in the high word.
   static void Wheel(IntPtr top, int x, int y, int dx, int dy) {
     IntPtr hwnd = Deepest(top, x, y);
@@ -293,6 +348,7 @@ public static class Helper {
       case "hover": Hover(Hwnd(a[2]), int.Parse(a[3]), int.Parse(a[4])); return "\"done\":true";
       case "drag": Drag(Hwnd(a[2]), int.Parse(a[3]), int.Parse(a[4]), int.Parse(a[5]), int.Parse(a[6])); return "\"done\":true";
       case "wheel": Wheel(Hwnd(a[2]), int.Parse(a[3]), int.Parse(a[4]), int.Parse(a[5]), int.Parse(a[6])); return "\"done\":true";
+      case "borrowdrag": BorrowDrag(int.Parse(a[2]), int.Parse(a[3]), int.Parse(a[4]), int.Parse(a[5])); return "\"done\":true";
       case "hit": {
         // Read-only: which window a click there would go to, and where in it.
         IntPtr hwnd = Deepest(Hwnd(a[2]), int.Parse(a[3]), int.Parse(a[4]));
@@ -360,7 +416,11 @@ export const windowsDriver = (scriptFile: string): Driver => {
     },
     click: async (hwnd, x, y, button, count) => void (await request('click', hwnd, Math.round(x), Math.round(y), button, count)),
     hover: async (hwnd, x, y) => void (await request('hover', hwnd, Math.round(x), Math.round(y))),
-    drag: async (hwnd, from, to) => void (await request('drag', hwnd, Math.round(from.x), Math.round(from.y), Math.round(to.x), Math.round(to.y))),
+    drag: async (hwnd, from, to, opts) => {
+      if (!opts?.borrow) return void (await request('drag', hwnd, Math.round(from.x), Math.round(from.y), Math.round(to.x), Math.round(to.y)))
+      await request('borrowdrag', Math.round(from.x), Math.round(from.y), Math.round(to.x), Math.round(to.y))
+      return 'Dragged with the real pointer, borrowed for a moment and put back.'
+    },
     wheel: async (hwnd, x, y, dx, dy) => void (await request('wheel', hwnd, Math.round(x), Math.round(y), Math.round(dx * 120), Math.round(dy * 120))),
     text: async (text) => void (await request('text', Buffer.from(text, 'utf8').toString('base64'))),
     keys: async (vks) => void (await request('keys', vks.join(','))),

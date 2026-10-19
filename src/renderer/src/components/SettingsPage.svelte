@@ -509,9 +509,29 @@
           <section id="settings-computer" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
             <h2 class="font-serif text-[20px]">Computer use</h2>
             <p class="mt-1 max-w-prose text-muted">
-              Turn on <span class="text-fg-2">Computer</span> in a chat's composer and the assistant can see your main screen and use the mouse and keyboard there.
-              A sketched cursor shows each move. Move your mouse and it stops at once.
+              Turn on <span class="text-fg-2">Computer</span> in a chat's composer and the assistant can see your main screen and work in your apps with its own sketched cursor, while
+              your mouse stays yours. Press <span class="text-fg-2">Stop</span> on the bar at the top of the screen to take over.
             </p>
+
+            <label class="mt-5 flex cursor-pointer items-start gap-3">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={form.computerBorrowPointer}
+                aria-label="Borrow the pointer when needed"
+                class="relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors duration-200 {form.computerBorrowPointer ? 'bg-fg' : 'bg-line'}"
+                onclick={() => (form.computerBorrowPointer = !form.computerBorrowPointer)}
+              >
+                <span class="absolute top-0.5 left-0.5 size-4 rounded-full bg-surface shadow transition-transform duration-200 ease-out {form.computerBorrowPointer ? 'translate-x-4' : ''}"></span>
+              </button>
+              <span>
+                <span class="block font-medium text-fg">Borrow the pointer when needed</span>
+                <span class="block max-w-prose text-muted">
+                  Apps only follow a drag from the real mouse, so drags take your pointer for under a second and put it back. On a Mac, so do clicks in areas an app
+                  draws itself, like a video timeline. Off, your pointer is never touched, and those drags and clicks mostly won't work.
+                </span>
+              </span>
+            </label>
 
             <h3 class="mt-6 font-medium text-fg">Always off limits</h3>
             <p class="mt-0.5 max-w-prose text-muted">

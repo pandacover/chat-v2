@@ -81,13 +81,25 @@ describe('mac keys', () => {
 })
 
 describe('mac helper script', () => {
-  test('parses as JavaScript, defines run(), and never moves the pointer', () => {
+  test('parses as JavaScript, defines run(), and moves the pointer only when borrowing it', () => {
     expect(() => new Function(MAC_HELPER_SCRIPT)).not.toThrow()
     expect(MAC_HELPER_SCRIPT).toContain('function run()')
-    // CGWarpMouseCursorPosition moves the pointer; mouse events go to an app with CGEventPostToPid instead.
-    expect(MAC_HELPER_SCRIPT).not.toContain('CGWarpMouseCursorPosition')
-    expect(MAC_HELPER_SCRIPT).not.toMatch(/CGEventPost\(0, e\)[\s\S]*CGEventCreateMouseEvent|postMouse[^\n]*CGEventPost\(/)
-    expect(MAC_HELPER_SCRIPT).toContain('CGEventPostToPid(pid, e)')
+    // Mouse events go to an app with CGEventPostToPid; system-wide ones (which move the pointer)
+    // only from hid(), which only the borrowing functions call, and the pointer is put back.
+    const body = (name: string) => {
+      const from = MAC_HELPER_SCRIPT.indexOf(`function ${name}(`)
+      return MAC_HELPER_SCRIPT.slice(from, MAC_HELPER_SCRIPT.indexOf('\nfunction ', from + 1))
+    }
+    expect(body('postMouse')).toContain('CGEventPostToPid(pid, e)')
+    expect(body('postMouse')).not.toContain('CGEventPost(0')
+    const callers = MAC_HELPER_SCRIPT.split('\nfunction ').filter((f) => /\bhid\(/.test(f) && !f.startsWith('hid(')).map((f) => f.slice(0, f.indexOf('(')))
+    expect(callers.sort()).toEqual(['borrowClick', 'borrowDrag'])
+    expect(MAC_HELPER_SCRIPT.match(/CGWarpMouseCursorPosition/g)).toHaveLength(1)
+    expect(body('borrowed')).toContain('CGWarpMouseCursorPosition(point(home.x, home.y))')
+    // A click borrows the pointer only after Accessibility and System Events found nothing to press, and only if allowed.
+    const click = body('click')
+    expect(click.indexOf('axClick(')).toBeLessThan(click.indexOf('systemEventsClick('))
+    expect(click.indexOf('systemEventsClick(')).toBeLessThan(click.indexOf('if (borrow) return borrowClick('))
   })
 
   test('never releases what the bridge owns (a double free crashed the helper on a real Mac)', () => {
