@@ -28,7 +28,12 @@ export default defineConfig({
     plugins: [svelte(), tailwindcss()],
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/renderer/index.html'), overlay: resolve(__dirname, 'src/renderer/overlay.html') }
+        // The overlay and the hidden page that streams the screen for computer use are pages of their own.
+        input: {
+          index: resolve(__dirname, 'src/renderer/index.html'),
+          overlay: resolve(__dirname, 'src/renderer/overlay.html'),
+          capture: resolve(__dirname, 'src/renderer/capture.html')
+        }
       }
     }
   }

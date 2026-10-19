@@ -23,10 +23,14 @@ export const DEFAULT_SETTINGS: Settings = {
   memoryModel: 'google/gemini-2.5-flash',
   alwaysOnTop: false,
   computerProtected: [],
-  computerBorrowPointer: true
+  computerBorrowPointer: true,
+  // Each step is a small decision on a fresh screenshot; deep thinking mostly adds waiting.
+  computerReasoningEffort: 'low',
+  computerModel: ''
 }
 
 const PDF_ENGINES: ReadonlyArray<Settings['pdfEngine']> = ['cloudflare-ai', 'mistral-ocr', 'native']
+const EFFORTS: ReadonlyArray<Settings['computerReasoningEffort']> = ['minimal', 'low', 'medium', 'high']
 
 /** Merges whatever is in config.json over the defaults, ignoring values of the wrong type. */
 export const normalizeSettings = (raw: unknown): Settings => {
@@ -34,6 +38,7 @@ export const normalizeSettings = (raw: unknown): Settings => {
   const str = (k: keyof Settings, fallback: string) => (typeof input[k] === 'string' ? (input[k] as string) : fallback)
   const temperature = typeof input.temperature === 'number' ? Math.min(2, Math.max(0, input.temperature)) : undefined
   const pdfEngine = PDF_ENGINES.find((e) => e === input.pdfEngine)
+  const effort = EFFORTS.find((e) => e === input.computerReasoningEffort)
   return {
     defaultModel: str('defaultModel', DEFAULT_SETTINGS.defaultModel).trim() || DEFAULT_SETTINGS.defaultModel,
     systemPrompt: str('systemPrompt', DEFAULT_SETTINGS.systemPrompt),
@@ -51,7 +56,9 @@ export const normalizeSettings = (raw: unknown): Settings => {
     computerProtected: Array.isArray(input.computerProtected)
       ? [...new Set(input.computerProtected.filter((s): s is string => typeof s === 'string').map((s) => s.trim()).filter(Boolean))].slice(0, 100)
       : DEFAULT_SETTINGS.computerProtected,
-    computerBorrowPointer: typeof input.computerBorrowPointer === 'boolean' ? input.computerBorrowPointer : DEFAULT_SETTINGS.computerBorrowPointer
+    computerBorrowPointer: typeof input.computerBorrowPointer === 'boolean' ? input.computerBorrowPointer : DEFAULT_SETTINGS.computerBorrowPointer,
+    computerReasoningEffort: effort ?? DEFAULT_SETTINGS.computerReasoningEffort,
+    computerModel: str('computerModel', DEFAULT_SETTINGS.computerModel).trim()
   }
 }
 

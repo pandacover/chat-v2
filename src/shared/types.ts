@@ -172,6 +172,16 @@ export interface Settings {
    * Off, the pointer is never touched and those drags and clicks mostly don't happen.
    */
   computerBorrowPointer: boolean
+  /**
+   * How hard the model thinks before each computer-use step. Low keeps the waits between actions
+   * short; models that don't think, or don't take an effort, ignore it.
+   */
+  computerReasoningEffort: 'minimal' | 'low' | 'medium' | 'high'
+  /**
+   * Runs the tool loop of computer-use replies (a fast model with vision suits it); '' keeps the
+   * chat's model. If it can't see images, the vision model steps in, then the chat's model.
+   */
+  computerModel: string
 }
 
 /** Something the assistant learned about an app while using it, offered again when it's in front. */
@@ -319,6 +329,8 @@ export interface Api {
     protectedApps(): Promise<string[]>
     /** Tells the app whether this window shows a chat with computer use on (the sketch cursor stays up). */
     setMode(on: boolean): void
+    /** The user is writing in a chat with computer use on: gets the screen ready, so the reply's first look is quick. */
+    prewarm(): void
   }
   updates: {
     get(): Promise<UpdateState>

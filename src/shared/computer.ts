@@ -332,12 +332,14 @@ export type OverlayEvent =
   /**
    * `working`: the assistant has the mouse. `done`: it finished and left marks. `idle`: computer
    * use is on but nothing is running; the sketch cursor keeps the user's company. `off`: gone.
+   * `busy` (here and on a hint): the model is deciding the next step, so the cursor waits where it
+   * is with a spinner beside `label`, until the next status or hint.
    */
-  | { type: 'status'; state: 'working' | 'done' | 'idle' | 'off'; label: string }
+  | { type: 'status'; state: 'working' | 'done' | 'idle' | 'off'; label: string; busy?: boolean }
   /** Whether the sketch cursor follows the user's pointer when the assistant isn't driving it. */
   | { type: 'mode'; follow: boolean }
   /** A few words under the sketch cursor while the assistant thinks or reads, before it acts. */
-  | { type: 'hint'; label: string }
+  | { type: 'hint'; label: string; busy?: boolean }
   /**
    * Where the overlay's window landed relative to the display (DIPs). The system may move or trim
    * a window meant to cover the screen (macOS keeps them clear of the menu bar), and everything is

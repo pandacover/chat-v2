@@ -1,18 +1,18 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Effect, Layer, ManagedRuntime, Stream } from 'effect'
 import type { ModelInfo, StreamEvent } from '../src/shared/types'
 import { AppPaths } from '../src/main/services/AppPaths'
 import { Attachments } from '../src/main/services/Attachments'
-import { Broadcaster, Chat } from '../src/main/services/Chat'
+import { Broadcaster, Chat, DROPPED_SCREENSHOT } from '../src/main/services/Chat'
 import { Db } from '../src/main/services/Db'
 import { type ChatDelta, type ChatRequest, OpenRouter } from '../src/main/services/OpenRouter'
 import { Browser, type BrowserApi, type PageSnapshot } from '../src/main/services/Browser'
 import { SettingsStore } from '../src/main/services/SettingsStore'
-import { Computer } from '../src/main/services/Computer'
-import { type FakeDesktop, fakeDesktop, win } from './fakeDesktop'
+import { Computer, THINKING_LABEL } from '../src/main/services/Computer'
+import { type FakeDesktop, SELF_PID, fakeDesktop, win } from './fakeDesktop'
 import { ProviderError } from '../src/main/errors'
 import { layoutBoard, parseMoodboard } from '../src/shared/moodboard'
 
@@ -514,14 +514,151 @@ describe('chat', () => {
     await t.runtime.dispose()
   })
 
+  test('computer use runs on the computer use model, which the message and the timing log record; other jobs keep theirs', async () => {
+    const model = (id: string, image: boolean): ModelInfo => ({ id, name: id, contextLength: null, inputModalities: image ? ['text', 'image'] : ['text'], supportsTools: true, pricing: { input: null, output: null, cacheRead: null, cacheWrite: null } })
+    const t = setup(
+      (req) => {
+        if (req.model === 'title/model') return Stream.make('Clicking about')
+        const turns = req.messages.filter((m) => m.role === 'tool').length
+        if (req.tools && turns === 0) return Stream.make<Array<string | ChatDelta>>({ type: 'tool', index: 0, id: 'c0', name: 'computer_click', args: '{"x":10,"y":10,"target":"File"}' })
+        return Stream.make('Done.')
+      },
+      undefined,
+      [],
+      [model('luna/chat', true), model('fast/eye', true)],
+      { titleModel: 'title/model', memoryModel: '', defaultModel: 'luna/chat', computerModel: 'fast/eye' }
+    )
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { computerEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'click file', attachmentIds: [] })))
+    await t.waitForDone(1)
+    while (!t.requests.some((r) => r.model === 'title/model')) await new Promise((r) => setTimeout(r, 10))
+    const replies = t.requests.filter((r) => r.model !== 'title/model')
+    expect(replies.map((r) => r.model)).toEqual(['fast/eye', 'fast/eye'])
+    let view = await t.run(Chat.use((c) => c.view(s.id)))
+    expect(view.path[1]!.message.model).toBe('fast/eye')
+    expect(t.events.find((e) => e.type === 'done')).toMatchObject({ model: 'fast/eye' })
+    const log = readFileSync(join(t.dir, 'timing.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+    expect(log.filter((r) => r.kind === 'call').map((r) => r.model)).toEqual(['fast/eye', 'fast/eye'])
+    expect(log.find((r) => r.kind === 'reply')).toMatchObject({ model: 'fast/eye' })
+
+    // A chat without computer use keeps the chat's model.
+    const plain = await t.run(newSession)
+    const before = t.requests.length
+    await t.run(Chat.use((c) => c.send({ sessionId: plain.id, parentId: plain.rootId, text: 'hello', attachmentIds: [] })))
+    await t.waitForDone(2)
+    expect(t.requests.slice(before).filter((r) => r.model !== 'title/model').map((r) => r.model)).toEqual(['luna/chat'])
+    view = await t.run(Chat.use((c) => c.view(plain.id)))
+    expect(view.path[1]!.message.model).toBe('luna/chat')
+    await t.runtime.dispose()
+  })
+
+  test('a computer use model that cannot see images hands the screenshots to the vision model, else to the chat model', async () => {
+    const model = (id: string, image: boolean): ModelInfo => ({ id, name: id, contextLength: null, inputModalities: image ? ['text', 'image'] : ['text'], supportsTools: true, pricing: { input: null, output: null, cacheRead: null, cacheWrite: null } })
+    const t = setup(
+      (req) => {
+        const turns = req.messages.filter((m) => m.role === 'tool').length
+        if (turns === 0) return Stream.make<Array<string | ChatDelta>>({ type: 'tool', index: 0, id: 'c0', name: 'computer_click', args: '{"x":10,"y":10,"target":"File"}' })
+        return Stream.make('Done.')
+      },
+      undefined,
+      [],
+      [model('luna/chat', true), model('blind/fast', false), model('eye/model', true)],
+      { titleModel: '', memoryModel: '', defaultModel: 'luna/chat', computerModel: 'blind/fast', visionModel: 'eye/model' }
+    )
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { computerEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'click file', attachmentIds: [] })))
+    await t.waitForDone(1)
+    // Every request of a computer run carries a screenshot, so none goes to the blind model.
+    expect(t.requests.map((r) => r.model)).toEqual(['eye/model', 'eye/model'])
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    expect(view.path[1]!.message.model).toBe('eye/model')
+
+    await t.run(SettingsStore.use((st) => st.update({ settings: { visionModel: '' } })))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: view.path[1]!.message.id, text: 'again', attachmentIds: [] })))
+    await t.waitForDone(2)
+    expect(t.requests.slice(2).map((r) => r.model)).toEqual(['luna/chat', 'luna/chat'])
+    await t.runtime.dispose()
+  })
+
+  const clickFile = (id: string): ChatDelta => ({ type: 'tool', index: 0, id, name: 'computer_click', args: '{"x":10,"y":10,"target":"File"}' })
+
+  test('computer use: the thinking spinner shows while the model decides, and goes when the reply is stopped', async () => {
+    const desktop = fakeDesktop()
+    const t = setup(
+      (req) => (req.messages.some((m) => m.role === 'tool') ? Stream.never : Stream.make<Array<string | ChatDelta>>(clickFile('c0'))),
+      undefined,
+      [],
+      [],
+      undefined,
+      desktop
+    )
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { computerEnabled: true }))))
+    const sent = await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'click file', attachmentIds: [] })))
+    while (t.requests.length < 2) await new Promise((r) => setTimeout(r, 10))
+    expect(desktop.overlay.at(-1)).toEqual({ type: 'status', state: 'working', label: THINKING_LABEL, busy: true })
+    expect(desktop.spinning).toBe(true)
+    await t.run(Chat.use((c) => c.stop(sent.path[1]!.message.id)))
+    await t.waitForDone(1)
+    expect(desktop.spinning).toBe(false)
+    expect(desktop.overlay.at(-1)).toEqual({ type: 'status', state: 'off', label: '' })
+    expect(desktop.watchedWhileSpinning).toBe(0)
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    expect(view.path[1]!.message.status).toBe('stopped')
+    await t.runtime.dispose()
+  })
+
+  test('computer use: a provider error mid-run takes the spinner down, and the cursor goes back to following the user', async () => {
+    const desktop = fakeDesktop()
+    const t = setup(
+      (req) =>
+        req.messages.some((m) => m.role === 'tool')
+          ? (Stream.fail(new ProviderError({ provider: 'test', status: 500, message: 'upstream died' })) as unknown as Stream.Stream<string>)
+          : Stream.make<Array<string | ChatDelta>>(clickFile('c0')),
+      undefined,
+      [],
+      [],
+      undefined,
+      desktop
+    )
+    await t.runtime.runPromise(Computer.use((c) => c.setMode(true)))
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { computerEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'click file', attachmentIds: [] })))
+    await t.waitForDone(1)
+    // It span before the first step too, on the cursor beside the user's pointer.
+    expect(desktop.overlay).toContainEqual({ type: 'hint', label: THINKING_LABEL, busy: true })
+    expect(desktop.overlay).toContainEqual({ type: 'status', state: 'working', label: THINKING_LABEL, busy: true })
+    expect(desktop.spinning).toBe(false)
+    expect(desktop.overlay.filter((e) => e.type === 'status').at(-1)).toEqual({ type: 'status', state: 'idle', label: '' })
+    expect(desktop.watchedWhileSpinning).toBe(0)
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    expect(view.path[1]!.message.status).toBe('error')
+    await t.runtime.dispose()
+  })
+
+  test('computer use: failing before it ever took control clears the spinner on the hint', async () => {
+    const desktop = fakeDesktop()
+    const t = setup(() => Stream.fail(new ProviderError({ provider: 'test', status: 500, message: 'down' })) as unknown as Stream.Stream<string>, undefined, [], [], undefined, desktop)
+    await t.runtime.runPromise(Computer.use((c) => c.setMode(true)))
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { computerEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'click file', attachmentIds: [] })))
+    await t.waitForDone(1)
+    expect(desktop.overlay.slice(-2)).toEqual([{ type: 'hint', label: THINKING_LABEL, busy: true }, { type: 'hint', label: '' }])
+    expect(desktop.spinning).toBe(false)
+    await t.runtime.dispose()
+  })
+
   test('computer use: desktop and browser tools, control handed back, old screenshots dropped', async () => {
     const tool = (id: string, name: string, args: object): ChatDelta => ({ type: 'tool', index: 0, id, name, args: JSON.stringify(args) })
     const desktop = fakeDesktop()
     const t = setup(
       (req) => {
         const turns = req.messages.filter((m) => m.role === 'tool').length
-        if (turns === 0) return Stream.make<Array<string | ChatDelta>>(tool('c0', 'computer_screenshot', {}))
-        if (turns < 5) return Stream.make(tool(`c${turns}`, 'computer_click', { x: 10 * turns, y: 10, target: `Button ${turns}` }))
+        if (turns < 4) return Stream.make<Array<string | ChatDelta>>(tool(`c${turns}`, 'computer_click', { x: 10 * (turns + 1), y: 10, target: `Button ${turns + 1}` }))
         return Stream.make('Done clicking.')
       },
       undefined,
@@ -540,16 +677,175 @@ describe('chat', () => {
     expect(names).toContain('browser_navigate')
     expect(String(t.requests[0]!.messages[0]!.content)).toContain('Work from the screen first')
     expect(desktop.input.filter((i) => i.startsWith('click ') && i.endsWith(' left'))).toHaveLength(4)
-    // The chat got out of the way, and came back when the reply ended.
-    expect(desktop.chat).toEqual(['hide', 'show'])
+    // The glance left the chat out of its screenshot; then it got out of the way, and came back when the reply ended.
+    expect(desktop.chat).toEqual(['leave out', 'let in', 'hide', 'show'])
     expect(desktop.overlay.at(-1)).toEqual({ type: 'status', state: 'off', label: '' })
-    // Five screenshots were taken; the last request carries only the newest three.
-    const last = t.requests.at(-1)!.messages
-    const withImages = last.filter((m) => Array.isArray(m.content) && m.content.some((p) => p.type === 'image_url'))
-    expect(withImages).toHaveLength(3)
-    expect(last.filter((m) => m.content === '[An earlier screenshot, removed to save space.]')).toHaveLength(2)
     const view = await t.run(Chat.use((c) => c.view(s.id)))
     expect(view.path[1]!.message.content).toContain('"label":"Clicked “Button 1” in Notepad"')
+    await t.runtime.dispose()
+  })
+
+  test('computer use: the first request shows the screen, so the first step can act without taking over first', async () => {
+    const desktop = fakeDesktop([win({ hwnd: 1, w: 900, h: 700 }), win({ hwnd: 3, pid: SELF_PID, exe: 'chat-v2.exe', title: 'chat-v2', x: 960, y: 0, w: 900, h: 700 })])
+    // What the desktop looked like when the first request went out.
+    let atFirst = null as { chat: string[]; overlay: unknown[] } | null
+    const t = setup(
+      (req) => {
+        const turns = req.messages.filter((m) => m.role === 'tool').length
+        if (turns === 0) {
+          atFirst = { chat: [...desktop.chat], overlay: [...desktop.overlay] }
+          return Stream.make<Array<string | ChatDelta>>({ type: 'tool', index: 0, id: 'c0', name: 'computer_click', args: '{"x":100,"y":100,"target":"File"}' })
+        }
+        return Stream.make('Opened the File menu.')
+      },
+      undefined,
+      [],
+      [],
+      undefined,
+      desktop
+    )
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { computerEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'open the file menu', attachmentIds: [] })))
+    await t.waitForDone(1)
+
+    const first = t.requests[0]!.messages
+    const seen = first.at(-1)!
+    expect(seen.role).toBe('user')
+    const parts = seen.content as Array<{ type: string; text?: string }>
+    expect(parts[0]!.text).toStartWith('The screen as this task starts:\nScreenshot: 1280×720 pixels')
+    expect(parts[0]!.text).toContain('"notes.txt - Notepad" (notepad.exe)')
+    // The chat was left out of the capture, so it isn't in the picture or the window list.
+    expect(parts[0]!.text).not.toContain('chat-v2')
+    expect(parts[0]!.text).not.toContain("This chat's own window")
+    expect(parts.filter((p) => p.type === 'image_url')).toHaveLength(1)
+    expect(desktop.shots[0]).toEqual({ fresh: true, chatLeftOut: true, after: 0 })
+    expect(desktop.covers[0]).toEqual([])
+    // Looking took nothing over: the chat was still up (back in captures at once) and the overlay said nothing.
+    expect(atFirst).toEqual({ chat: ['leave out', 'let in'], overlay: [] })
+    // The click aimed at that screenshot and landed, with no computer_screenshot in between.
+    expect(desktop.input).toEqual(['click 1 150,150 left'])
+    expect(t.requests).toHaveLength(2)
+    expect(desktop.chat).toEqual(['leave out', 'let in', 'hide', 'show'])
+    await t.runtime.dispose()
+  })
+
+  test('computer use: on a Mac with the chat window over most of the screen, the first request lists the windows but has no screenshot', async () => {
+    const desktop = fakeDesktop([win({ hwnd: 3, pid: SELF_PID, exe: 'chat-v2.exe', title: 'chat-v2' }), win({ hwnd: 1 })], 'darwin')
+    const t = setup(() => Stream.make('Hi.'), undefined, [], [], undefined, desktop)
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { computerEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'thanks', attachmentIds: [] })))
+    await t.waitForDone(1)
+    const seen = t.requests[0]!.messages.at(-1)!
+    const parts = seen.content as Array<{ type: string; text?: string }>
+    expect(parts).toHaveLength(1)
+    expect(parts[0]!.text).toContain('No screenshot yet')
+    // It points the model at acting first, not at a screenshot it would spend a step on.
+    expect(parts[0]!.text).toContain("Don't start with computer_screenshot: your first action's result includes a screenshot")
+    expect(parts[0]!.text).not.toContain('Start with computer_screenshot')
+    expect(parts[0]!.text).not.toContain('Screenshot: 1280×720')
+    expect(desktop.covers).toEqual([])
+    // A reply that never used the computer never took it over.
+    expect(desktop.chat).toEqual([])
+    await t.runtime.dispose()
+  })
+
+  test('computer use: only the newest screenshot is sent, and each request starts with the one before except where its screenshot was', async () => {
+    const desktop = fakeDesktop()
+    const t = setup(
+      (req) => {
+        const turns = req.messages.filter((m) => m.role === 'tool').length
+        if (turns < 4) return Stream.make<Array<string | ChatDelta>>({ type: 'tool', index: 0, id: `c${turns}`, name: 'computer_click', args: JSON.stringify({ x: 10 + turns, y: 10, target: 'Next' }) })
+        return Stream.make('Done.')
+      },
+      undefined,
+      [],
+      [],
+      undefined,
+      desktop
+    )
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { computerEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'click on', attachmentIds: [] })))
+    await t.waitForDone(1)
+
+    const withImage = (m: ChatRequest['messages'][number]) => Array.isArray(m.content) && m.content.some((p) => p.type === 'image_url')
+    // The glance, then the screenshot after each click: one in every request.
+    expect(t.requests.map((r) => r.messages.filter(withImage).length)).toEqual([1, 1, 1, 1, 1])
+    // The glance's screenshot went too, the same way.
+    expect(t.requests.at(-1)!.messages.filter((m) => m.content === DROPPED_SCREENSHOT)).toHaveLength(4)
+    expect(t.requests[1]!.messages.findIndex((m) => m.content === DROPPED_SCREENSHOT)).toBe(t.requests[0]!.messages.findIndex(withImage))
+    // Each request starts with the one before it, byte for byte, except the previous screenshot,
+    // which is now the note: that was the end of the previous request, so the rest can be cached.
+    for (let i = 1; i < t.requests.length; i++) {
+      const before = t.requests[i - 1]!.messages
+      const now = t.requests[i]!.messages
+      const shot = before.findIndex(withImage)
+      expect(shot).toBe(before.length - 1)
+      expect(JSON.stringify(now.slice(0, shot))).toBe(JSON.stringify(before.slice(0, shot)))
+      expect(now[shot]!.content).toBe(DROPPED_SCREENSHOT)
+    }
+    // The system prompt and the tools never change within a reply.
+    expect(new Set(t.requests.map((r) => JSON.stringify(r.messages[0]))).size).toBe(1)
+    expect(new Set(t.requests.map((r) => JSON.stringify(r.tools))).size).toBe(1)
+    await t.runtime.dispose()
+  })
+
+  test('the model gets its thinking back with its tool calls, in browser runs too', async () => {
+    const t = setup((req) => {
+      const turns = req.messages.filter((m) => m.role === 'tool').length
+      if (turns === 0)
+        return Stream.make<Array<string | ChatDelta>>(
+          { type: 'reasoning', text: 'Look at ', details: [{ type: 'reasoning.text', index: 0, format: 'anthropic-claude-v1', text: 'Look at ' }] },
+          { type: 'reasoning', text: 'the shop', details: [{ type: 'reasoning.text', index: 0, text: 'the shop' }] },
+          { type: 'reasoning', details: [{ type: 'reasoning.text', index: 0, signature: 'sig-1' }] },
+          { type: 'reasoning', details: [{ type: 'reasoning.encrypted', index: 1, format: 'anthropic-claude-v1', data: 'ENCRYPTED' }] },
+          { type: 'tool', index: 0, id: 'n1', name: 'browser_navigate', args: '{"url":"http://shop.test/"}' }
+        )
+      if (turns === 1)
+        return Stream.make<Array<string | ChatDelta>>({ type: 'reasoning', text: 'Now click.' }, { type: 'tool', index: 0, id: 'k1', name: 'browser_click', args: '{"ref":"e1"}' })
+      return Stream.make('Bought it.')
+    })
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { browserEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'buy it', attachmentIds: [] })))
+    await t.waitForDone(1)
+    const steps = t.requests.at(-1)!.messages.filter((m) => m.role === 'assistant' && 'tool_calls' in m && m.tool_calls)
+    // Fragments of a block are joined; blocks keep their order, types and signature as sent.
+    expect(steps[0]).toMatchObject({
+      reasoning_details: [
+        { type: 'reasoning.text', index: 0, format: 'anthropic-claude-v1', text: 'Look at the shop', signature: 'sig-1' },
+        { type: 'reasoning.encrypted', index: 1, format: 'anthropic-claude-v1', data: 'ENCRYPTED' }
+      ]
+    })
+    expect('reasoning' in steps[0]!).toBe(false)
+    // Plain thinking, without structured blocks, goes back as text.
+    expect(steps[1]).toMatchObject({ reasoning: 'Now click.' })
+    expect('reasoning_details' in steps[1]!).toBe(false)
+    // Browser runs don't set an effort; only computer use does.
+    expect(t.requests.every((r) => r.reasoning === undefined)).toBe(true)
+    await t.runtime.dispose()
+  })
+
+  test('computer use asks for low reasoning effort by default, as Settings say, and again without it if refused', async () => {
+    const t = setup((req) => {
+      if (req.reasoning?.effort === 'medium') return Stream.fail(new ProviderError({ provider: 'test', status: 400, message: 'reasoning.effort is not supported' })) as unknown as Stream.Stream<string>
+      return Stream.make('Nothing to do.')
+    })
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { computerEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'hi', attachmentIds: [] })))
+    await t.waitForDone(1)
+    expect(t.requests.map((r) => r.reasoning)).toEqual([{ effort: 'low' }])
+
+    await t.run(SettingsStore.use((st) => st.update({ settings: { computerReasoningEffort: 'medium' } })))
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: view.path[1]!.message.id, text: 'again', attachmentIds: [] })))
+    await t.waitForDone(2)
+    expect(t.requests.slice(1).map((r) => r.reasoning)).toEqual([{ effort: 'medium' }, undefined])
+    const after = await t.run(Chat.use((c) => c.view(s.id)))
+    expect(after.path[3]!.message).toMatchObject({ status: 'complete', content: 'Nothing to do.' })
     await t.runtime.dispose()
   })
 

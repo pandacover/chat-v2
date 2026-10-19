@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Effect, Layer, ManagedRuntime } from 'effect'
+import { Effect, Fiber, Layer, ManagedRuntime } from 'effect'
 import {
   fitShot,
   hiddenRegions,
@@ -17,11 +17,11 @@ import {
   toShot,
   windowAt
 } from '../src/shared/computer'
-import { readMarks, runComputerTool } from '../src/main/computerTools'
+import { computerInstructions, computerTools, readMarks, runComputerTool } from '../src/main/computerTools'
 import { AppPaths } from '../src/main/services/AppPaths'
-import { Computer } from '../src/main/services/Computer'
+import { ANNOTATE_MS, Computer, GLIDE_MS, OPEN_SETTLE_MAX_MS, SETTLE_MAX_MS, THINKING_LABEL, WAIT_MIN_MS, WAIT_QUIET_MS, WAIT_STILL_MS, screenChanged } from '../src/main/services/Computer'
 import { SettingsStore } from '../src/main/services/SettingsStore'
-import { SELF_PID, fakeDesktop, win } from './fakeDesktop'
+import { SELF_PID, fakeDesktop, still, win } from './fakeDesktop'
 
 const ctx = { selfPid: SELF_PID, extra: [] as string[] }
 
@@ -211,7 +211,10 @@ describe('computer service', () => {
   })
 
   test("never touches this app's own window", async () => {
-    const t = service(fakeDesktop([win({ hwnd: 3, pid: SELF_PID, exe: 'chat-v2.exe', title: 'chat-v2' })]))
+    const desktop = fakeDesktop([win({ hwnd: 3, pid: SELF_PID, exe: 'chat-v2.exe', title: 'chat-v2' })])
+    // A chat window that didn't minimise (another of this app's windows, say).
+    desktop.ports.chatWindows.hide = () => {}
+    const t = service(desktop)
     await t.run(Computer.use((c) => c.begin('r')))
     await t.tool('computer_screenshot')
     expect((await t.tool('computer_click', { x: 10, y: 10, target: 'Stop' })).halt).toBeDefined()
@@ -350,6 +353,87 @@ describe('computer service', () => {
     expect(stopped).toEqual(['reply-9'])
   })
 
+  test('while the model decides, the cursor shows a spinner where it is; the next action takes it down before it acts or looks', async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    await t.run(Computer.use((c) => c.thinking))
+    expect(t.desktop.overlay.at(-1)).toEqual({ type: 'status', state: 'working', label: THINKING_LABEL, busy: true })
+    expect(t.desktop.spinning).toBe(true)
+    const from = t.desktop.overlay.length
+    t.desktop.probes = 0
+    await t.tool('computer_click', { x: 100, y: 100, target: 'File' })
+    // Its own status comes first, before the glide, the settle and the capture.
+    expect(t.desktop.overlay[from]).toEqual({ type: 'status', state: 'working', label: 'Clicking File' })
+    expect(t.desktop.watchedWhileSpinning).toBe(0)
+    expect(t.desktop.probes).toBeGreaterThan(0)
+    // The reply ending takes it down too.
+    await t.run(Computer.use((c) => c.thinking))
+    await t.run(Computer.use((c) => c.end('r')))
+    expect(t.desktop.spinning).toBe(false)
+  })
+
+  test('before it has control, the spinner goes on the cursor that follows the user, and only in computer mode', async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.thinking))
+    expect(t.desktop.overlay).toEqual([])
+    await t.run(Computer.use((c) => c.setMode(true)))
+    await t.run(Computer.use((c) => c.thinking))
+    expect(t.desktop.overlay.at(-1)).toEqual({ type: 'hint', label: THINKING_LABEL, busy: true })
+    await t.run(Computer.use((c) => c.hint('')))
+    expect(t.desktop.overlay.at(-1)).toEqual({ type: 'hint', label: '' })
+    expect(t.desktop.spinning).toBe(false)
+  })
+
+  test("marks don't hold the model up; an action straight after waits for them to be drawn before clearing them", async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    const started = performance.now()
+    const out = await t.tool('computer_annotate', { marks: [{ kind: 'circle', x: 100, y: 100, w: 40, h: 20, label: 'Export' }] })
+    expect(out.step.ok).toBe(true)
+    expect(performance.now() - started).toBeLessThan(100)
+    await t.tool('computer_click', { x: 300, y: 300, target: 'Elsewhere' })
+    const cleared = t.desktop.overlay.findIndex((e) => e.type === 'clear')
+    expect(cleared).toBeGreaterThan(t.desktop.overlay.findIndex((e) => e.type === 'marks'))
+    // The click came after the marks had their time on screen.
+    expect(performance.now() - started).toBeGreaterThanOrEqual(300 + ANNOTATE_MS + GLIDE_MS - 10)
+
+    // Ending the reply right after marking doesn't wait: the marks stay up.
+    await t.tool('computer_annotate', { marks: [{ kind: 'box', x: 10, y: 10, w: 40, h: 20, label: 'Here' }] })
+    const t0 = performance.now()
+    await t.run(Computer.use((c) => c.end('r')))
+    expect(performance.now() - t0).toBeLessThan(50)
+    expect(t.desktop.overlay.at(-1)).toEqual({ type: 'status', state: 'done', label: 'Done' })
+  })
+
+  test('getting ready waits for the chat to leave the window list, not for its animation; a look straight after settles first', async () => {
+    const desktop = fakeDesktop([win({}), win({ hwnd: 3, pid: SELF_PID, exe: 'chat-v2.exe', title: 'chat-v2', x: 960, w: 900 })])
+    const t = service(desktop)
+    const started = performance.now()
+    await t.run(Computer.use((c) => c.begin('r')))
+    expect(performance.now() - started).toBeLessThan(100)
+    expect(desktop.state.windows.some((w) => w.pid === SELF_PID)).toBe(false)
+    expect(desktop.probes).toBe(0)
+    await t.tool('computer_screenshot')
+    expect(desktop.probes).toBeGreaterThan(0)
+    // Only once: the next look doesn't wait.
+    const probes = desktop.probes
+    await t.tool('computer_screenshot')
+    expect(desktop.probes).toBe(probes)
+  })
+
+  test('the screen stream opens when computer mode starts or the user writes in a computer chat (not on a Mac)', async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.setMode(true)))
+    expect(t.desktop.prepared).toBe(1)
+    await t.run(Computer.use((c) => c.prewarm))
+    expect(t.desktop.prepared).toBe(2)
+    const mac = service(fakeDesktop([win({})], 'darwin'))
+    await mac.run(Computer.use((c) => c.prewarm))
+    expect(mac.desktop.prepared).toBe(0)
+  })
+
   test('saved tips come back when their app is in front', async () => {
     const t = service(fakeDesktop([win({ hwnd: 4, exe: 'Resolve.exe', title: 'DaVinci Resolve - Project 1' })]))
     await t.run(Computer.use((c) => c.begin('r')))
@@ -397,5 +481,350 @@ describe('zoom', () => {
     // Clicks still use the full screenshot's coordinates.
     await t.tool('computer_click', { x: 100, y: 100, target: 'x' })
     expect(desktop.input).toEqual(['click 1 150,150 left'])
+  })
+})
+
+describe('settling', () => {
+  test("the user's pointer or a blinking caret isn't a change; a menu opening is", () => {
+    const a = still(100)
+    const pointer = still(100)
+    pointer.set([255, 255, 255, 255], 600)
+    expect(screenChanged(a, pointer)).toBe(false)
+    expect(screenChanged(a, still(103))).toBe(false)
+    const menu = still(100)
+    menu.fill(240, 300, 600)
+    expect(screenChanged(a, menu)).toBe(true)
+  })
+
+  test('a click waits only until the screen stops changing, and says the screenshot is current', async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    const started = performance.now()
+    const out = await t.tool('computer_click', { x: 100, y: 100, target: 'File' })
+    const took = performance.now() - started
+    // The glide, then at least 150 before looking and two still looks 80 apart: well under the old 970.
+    expect(took).toBeGreaterThanOrEqual(GLIDE_MS + 150 + 160 - 5)
+    expect(took).toBeLessThan(800)
+    expect(out.text).toContain('It is current: it was taken once the screen stopped changing.')
+  })
+
+  test('while the screen keeps changing, the click waits for it, and gives up at the cap saying so', async () => {
+    const desktop = fakeDesktop()
+    const t = service(desktop)
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    // A menu animating open over five looks, then still.
+    let n = 0
+    desktop.look = () => still(n < 5 ? 40 * n++ : 200)
+    desktop.probes = 0
+    await t.tool('computer_click', { x: 100, y: 100, target: 'Menu' })
+    expect(n).toBe(5)
+    // The five changing looks, the first still one, and two that match it.
+    expect(desktop.probes).toBe(8)
+
+    // A spinner that never stops: the wait ends at the cap, and the model is told.
+    let level = 0
+    desktop.look = () => still((level += 50) % 256)
+    const started = performance.now()
+    const out = await t.tool('computer_click', { x: 200, y: 100, target: 'Spinner' })
+    expect(performance.now() - started).toBeGreaterThanOrEqual(150 + SETTLE_MAX_MS - 5)
+    expect(out.text).toContain('The screen was still changing when it was taken')
+  })
+
+  test('on a Mac, where the screen is not probed, actions wait their fixed time', async () => {
+    const desktop = fakeDesktop([win({})], 'darwin')
+    const t = service(desktop)
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    const started = performance.now()
+    await t.tool('computer_click', { x: 100, y: 100, target: 'File' })
+    expect(performance.now() - started).toBeGreaterThanOrEqual(150 + 550 - 5)
+    expect(desktop.probes).toBe(0)
+  })
+
+  test('opening an app waits until its new window has drawn and held still, so the screenshot shows it loaded', async () => {
+    const desktop = fakeDesktop()
+    const t = service(desktop)
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    const launch = desktop.ports.driver!.launch
+    let shown = 0
+    desktop.ports.driver!.launch = async (id) => {
+      await launch(id)
+      // The window shows blank, holds still a moment while the app loads, then draws its content.
+      let n = 0
+      desktop.look = () => still(n++ < 5 ? 10 : n < 10 ? 20 * n : 230)
+      shown = performance.now()
+    }
+    const out = await t.tool('computer_open_app', { name: 'davinci' })
+    const took = performance.now() - shown
+    expect(out.step.label).toBe('Opened DaVinci Resolve')
+    // Past the blank pause (which the old two-still-looks rule took for done) and the drawing,
+    // then half a second of stillness.
+    expect(took).toBeGreaterThanOrEqual(8 * 80 + WAIT_QUIET_MS)
+    expect(took).toBeLessThan(OPEN_SETTLE_MAX_MS)
+    expect(out.text).toContain('It is current: it was taken once the screen stopped changing.')
+  })
+
+  test('an app still loading when the wait for it runs out says so; on a Mac it waits a fixed time', async () => {
+    const desktop = fakeDesktop()
+    const t = service(desktop)
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    let level = 0
+    desktop.look = () => still((level += 50) % 256)
+    const started = performance.now()
+    const out = await t.tool('computer_open_app', { name: 'davinci' })
+    expect(performance.now() - started).toBeGreaterThanOrEqual(OPEN_SETTLE_MAX_MS - 5)
+    expect(performance.now() - started).toBeLessThan(OPEN_SETTLE_MAX_MS + 1000)
+    expect(out.text).toContain('The screen was still changing when it was taken')
+
+    const mac = fakeDesktop([win({})], 'darwin')
+    const m = service(mac)
+    await m.run(Computer.use((c) => c.begin('r')))
+    const t0 = performance.now()
+    const opened = await m.tool('computer_open_app', { name: 'davinci' })
+    expect(performance.now() - t0).toBeGreaterThanOrEqual(1000 - 5)
+    expect(performance.now() - t0).toBeLessThan(2000)
+    expect(opened.step.ok).toBe(true)
+    expect(mac.probes).toBe(0)
+  }, 15_000)
+
+  test('opening an app that was already in front waits for its new window, not the whole timeout', async () => {
+    const desktop = fakeDesktop([win({ hwnd: 99, pid: 500, exe: 'Resolve.exe', title: 'DaVinci Resolve - Untitled Project' })])
+    const t = service(desktop)
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    desktop.ports.driver!.launch = async (id) => {
+      desktop.input.push(`launch ${id}`)
+      // Resolve was in front already; it opens a project window.
+      desktop.state.windows = [win({ hwnd: 98, pid: 500, exe: 'Resolve.exe', title: 'Project Manager' }), ...desktop.state.windows]
+    }
+    const started = performance.now()
+    const out = await t.tool('computer_open_app', { name: 'davinci' })
+    expect(out.step.label).toBe('Opened DaVinci Resolve')
+    expect(performance.now() - started).toBeLessThan(2000)
+  })
+})
+
+describe('glance', () => {
+  test('looks without taking over, and the reply that glanced can act on it straight away', async () => {
+    const t = service(fakeDesktop([win({ hwnd: 1, w: 900 }), win({ hwnd: 3, pid: SELF_PID, exe: 'chat-v2.exe', title: 'chat-v2', x: 960, w: 900 })]))
+    const g = await t.run(Computer.use((c) => c.glance('r')))
+    expect(g!.image).toBe('data:image/jpeg;base64,SHOT')
+    expect(g!.text).toContain('Screenshot: 1280×720 pixels')
+    expect(t.desktop.overlay).toEqual([])
+    // Windows: the chat was left out of a fresh capture, and let back in straight after. The
+    // capture may use a stream frame from after the chat was left out (marked before), not older.
+    expect(t.desktop.chat).toEqual(['leave out', 'let in'])
+    expect(t.desktop.shots).toEqual([{ fresh: true, chatLeftOut: true, after: 0 }])
+    expect(t.desktop.covers).toEqual([[]])
+    expect(g!.text).not.toContain('chat-v2')
+    await t.run(Computer.use((c) => c.begin('r')))
+    const out = await t.tool('computer_click', { x: 100, y: 100, target: 'File' })
+    expect(out.step.ok).toBe(true)
+    expect(t.desktop.input).toEqual(['click 1 150,150 left'])
+  })
+
+  test('on Windows, a chat over the whole screen still gets a screenshot of what is under it, and the first click lands there', async () => {
+    const t = service(fakeDesktop([win({ hwnd: 3, pid: SELF_PID, exe: 'chat-v2.exe', title: 'chat-v2' }), win({ hwnd: 1 })]))
+    const g = await t.run(Computer.use((c) => c.glance('r')))
+    expect(g!.image).toBe('data:image/jpeg;base64,SHOT')
+    expect(g!.text).toContain('Active window: this chat, which minimises when you first act')
+    expect(g!.text).toContain('- "notes.txt - Notepad" (notepad.exe) at 0,0')
+    // Not listed as hidden or covering anything, and not painted over.
+    expect(g!.text).not.toContain('chat-v2')
+    expect(g!.text).not.toContain('Hidden from you')
+    expect(g!.text).not.toContain('No screenshot yet')
+    expect(t.desktop.covers).toEqual([[]])
+    expect(t.desktop.shots).toEqual([{ fresh: true, chatLeftOut: true, after: 0 }])
+    // The first action minimises the chat, then acts on the glance's screenshot: the click goes to
+    // Notepad, which was under the chat.
+    await t.run(Computer.use((c) => c.begin('r')))
+    expect(t.desktop.chat).toEqual(['leave out', 'let in', 'hide'])
+    const out = await t.tool('computer_click', { x: 640, y: 360, target: 'Text' })
+    expect(out.step.ok).toBe(true)
+    expect(t.desktop.input).toEqual(['click 1 960,540 left'])
+  })
+
+  test('a protected window under the chat is painted over in full, not shown through where the chat was', async () => {
+    const t = service(
+      fakeDesktop([
+        win({ hwnd: 3, pid: SELF_PID, exe: 'chat-v2.exe', title: 'chat-v2' }),
+        win({ hwnd: 7, pid: 700, exe: '1Password.exe', title: '1Password', x: 300, y: 150, w: 600, h: 450 }),
+        win({ hwnd: 1 })
+      ])
+    )
+    const g = await t.run(Computer.use((c) => c.glance('r')))
+    expect(g!.image).not.toBeNull()
+    // 600×450 physical at 300,150 is 400×300 shot pixels at 200,100, plus the margin.
+    expect(t.desktop.covers).toEqual([[{ x: 198, y: 98, w: 404, h: 304 }]])
+    expect(g!.text).toContain('- Password managers at 200,100 400×300')
+  })
+
+  test('if the chat cannot be left out, it is painted grey, and past half the screen there is no screenshot', async () => {
+    const desktop = fakeDesktop([win({ hwnd: 3, pid: SELF_PID, exe: 'chat-v2.exe', title: 'chat-v2' }), win({ hwnd: 1 })])
+    desktop.ports.chatWindows.leaveOut = async () => {
+      throw new Error('SetWindowDisplayAffinity failed')
+    }
+    const t = service(desktop)
+    const g = await t.run(Computer.use((c) => c.glance('r')))
+    expect(g!.image).toBeNull()
+    expect(desktop.covers).toEqual([])
+    expect(g!.text).toContain("No screenshot yet: this chat's window covers most of the screen.")
+    expect(g!.text).toContain('start with computer_open_app or computer_focus_window; only otherwise call computer_screenshot')
+    expect(g!.text).not.toContain('Start with computer_screenshot')
+  })
+
+  test('a capture that fails still sends the window list, and the chat is let back into captures', async () => {
+    const desktop = fakeDesktop([win({ hwnd: 3, pid: SELF_PID, exe: 'chat-v2.exe', title: 'chat-v2', x: 960, w: 900 }), win({ hwnd: 1 })])
+    desktop.ports.screen.capture = async () => {
+      throw new Error('the screen could not be captured')
+    }
+    const t = service(desktop)
+    const g = await t.run(Computer.use((c) => c.glance('r')))
+    expect(g!.image).toBeNull()
+    expect(g!.text).toContain('- "notes.txt - Notepad" (notepad.exe)')
+    expect(g!.text).toContain("No screenshot yet: the screen couldn't be captured just now. Don't start with computer_screenshot")
+    expect(desktop.chat).toEqual(['leave out', 'let in'])
+    // Nothing to act on yet, so the first click is asked to look first.
+    await t.run(Computer.use((c) => c.begin('r')))
+    expect((await t.tool('computer_click', { x: 1, y: 1, target: 'x' })).text).toContain('Take a screenshot first')
+  })
+
+  test('a glance stopped while the chat is being left out still lets it back into captures', async () => {
+    const desktop = fakeDesktop([win({ hwnd: 3, pid: SELF_PID, exe: 'chat-v2.exe', title: 'chat-v2' }), win({ hwnd: 1 })])
+    const leaveOut = desktop.ports.chatWindows.leaveOut!
+    // As in the app, it waits for the desktop to recompose before it returns.
+    desktop.ports.chatWindows.leaveOut = async () => {
+      const left = await leaveOut()
+      await new Promise((r) => setTimeout(r, 100))
+      return left
+    }
+    const t = service(desktop)
+    const fiber = t.runtime.runFork(Computer.use((c) => c.glance('r')))
+    await new Promise((r) => setTimeout(r, 20))
+    await t.runtime.runPromise(Fiber.interrupt(fiber))
+    expect(desktop.chat).toEqual(['leave out', 'let in'])
+    expect(desktop.leftOut).toBe(false)
+  })
+
+  test('on a Mac the chat stays in the picture, painted grey and listed, as before', async () => {
+    const desktop = fakeDesktop([win({ hwnd: 1, w: 900 }), win({ hwnd: 3, pid: SELF_PID, exe: 'chat-v2', title: 'chat-v2', x: 960, w: 900 })], 'darwin')
+    const t = service(desktop)
+    const g = await t.run(Computer.use((c) => c.glance('r')))
+    expect(g!.image).toBe('data:image/jpeg;base64,SHOT')
+    expect(g!.text).toContain('- chat-v2 itself at 640,0')
+    expect(g!.text).toContain("This chat's own window is in front for now")
+    expect(desktop.covers).toEqual([[{ x: 638, y: -2, w: 604, h: 697 }]])
+    expect(desktop.shots).toEqual([{ fresh: false, chatLeftOut: false }])
+    expect(desktop.chat).toEqual([])
+  })
+
+  test("another reply's glance doesn't carry over, and nothing is looked at while another reply has control", async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.glance('a')))
+    await t.run(Computer.use((c) => c.begin('b')))
+    expect((await t.tool('computer_click', { x: 1, y: 1, target: 'x' })).text).toContain('Take a screenshot first')
+    const covers = t.desktop.covers.length
+    expect(await t.run(Computer.use((c) => c.glance('c')))).toBeNull()
+    expect(t.desktop.covers.length).toBe(covers)
+  })
+
+  test('on a Mac, nothing is looked at before the permissions have been checked once', async () => {
+    const desktop = fakeDesktop([win({})], 'darwin')
+    let asked = 0
+    desktop.ports.permissions = async () => (asked++, null)
+    const t = service(desktop)
+    expect(await t.run(Computer.use((c) => c.glance('r')))).toBeNull()
+    expect(desktop.covers).toEqual([])
+    expect(asked).toBe(0)
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.run(Computer.use((c) => c.end('r')))
+    expect(await t.run(Computer.use((c) => c.glance('r2')))).not.toBeNull()
+  })
+})
+
+describe('computer_wait', () => {
+  /** A Windows desktop with control taken, timing one computer_wait. */
+  const waiting = async (look: (n: number) => Uint8Array, seconds = 10, os: 'win32' | 'darwin' = 'win32') => {
+    const desktop = fakeDesktop([win({})], os)
+    const t = service(desktop)
+    await t.run(Computer.use((c) => c.begin('r')))
+    let n = 0
+    desktop.look = () => look(n++)
+    desktop.probes = 0
+    const started = performance.now()
+    const out = await t.tool('computer_wait', { seconds })
+    return { out, ms: performance.now() - started, desktop }
+  }
+
+  test('ends soon after the screen changes and holds still, not at the most it was given', async () => {
+    // Still for three looks, changing for four (an app's window drawing), then still.
+    const { out, ms } = await waiting((n) => still(n < 3 ? 0 : n < 7 ? 40 * n : 220))
+    // The last change shows at the 8th look (about 560 ms), then 500 ms of stillness.
+    expect(ms).toBeGreaterThanOrEqual(560 + WAIT_QUIET_MS - 20)
+    expect(ms).toBeLessThan(1700)
+    expect(out.text).toStartWith('Waited 1')
+    expect(out.text).toContain('the screen changed, then held still, so it is ready to act on.')
+    expect(out.text).toContain('The screenshot follows as an image.')
+    expect(out.image).toBe('data:image/jpeg;base64,SHOT')
+    expect(out.step.label).toMatch(/^Waited 1(\.\d)?s$/)
+  })
+
+  test('a change during the first half second still counts, and it never ends before that minimum', async () => {
+    const { out, ms } = await waiting((n) => still(n === 0 ? 0 : n === 1 ? 100 : 200))
+    expect(ms).toBeGreaterThanOrEqual(WAIT_MIN_MS + 80)
+    expect(ms).toBeLessThan(1100)
+    expect(out.text).toContain('the screen changed, then held still')
+  })
+
+  test('a screen that never changes ends the wait after 2 seconds, so a still loading screen gets a chance', async () => {
+    const { out, ms } = await waiting(() => still())
+    expect(ms).toBeGreaterThanOrEqual(WAIT_STILL_MS - 5)
+    expect(ms).toBeLessThan(WAIT_STILL_MS + 600)
+    expect(out.text).toStartWith('Waited 2')
+    expect(out.text).toContain('nothing on the screen changed in that time')
+    expect(out.step.label).toMatch(/^Waited 2(\.\d)?s$/)
+  })
+
+  test("the user's pointer moving across a still screen doesn't count as a change", async () => {
+    // Each thumbnail pixel is about 30 screen pixels square, so a pointer darkens one or two of
+    // them, somewhere else on each look.
+    const { out, ms } = await waiting((n) => {
+      const sig = still(90)
+      for (let i = 0; i < 2; i++) sig[(n * 7 + i) % sig.length] = 250
+      return sig
+    })
+    expect(ms).toBeGreaterThanOrEqual(WAIT_STILL_MS - 5)
+    expect(ms).toBeLessThan(WAIT_STILL_MS + 600)
+    expect(out.text).toContain('nothing on the screen changed')
+  })
+
+  test('a screen that keeps changing ends the wait at the most it was given, and the model is told', async () => {
+    const { out, ms } = await waiting((n) => still((n * 50) % 256), 1.5)
+    expect(ms).toBeGreaterThanOrEqual(1500 - 5)
+    expect(ms).toBeLessThan(2100)
+    expect(out.text).toStartWith('Waited 1.5s, the most you gave: the screen was still changing')
+    expect(out.step.label).toBe('Waited 1.5s')
+  })
+
+  test('on a Mac, where the screen is not probed, it waits the whole time', async () => {
+    const { out, ms, desktop } = await waiting(() => still(), 1, 'darwin')
+    expect(ms).toBeGreaterThanOrEqual(1000 - 5)
+    expect(desktop.probes).toBe(0)
+    expect(out.text).toStartWith("Waited 1s, the whole time: the screen can't be watched for changes here.\n")
+    expect(out.step.label).toBe('Waited 1s')
+  })
+
+  test('tells the model a long wait is cheap on Windows, and not on a Mac', () => {
+    const desc = (os: 'win32' | 'darwin') => computerTools(os).find((t) => t.function.name === 'computer_wait')!.function.description
+    expect(desc('win32')).toContain('a generous maximum costs nothing')
+    expect(desc('darwin')).toContain('it waits the whole time')
+    expect(computerInstructions('win32')).toContain('it returns as soon as the screen is ready, so a long wait costs nothing')
+    expect(computerInstructions('darwin')).toContain("can't tell when the screen is ready")
+    // With no screenshot to start from, acting comes first.
+    expect(computerInstructions('win32')).toContain("you still don't start with computer_screenshot")
   })
 })

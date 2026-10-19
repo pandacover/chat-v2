@@ -70,6 +70,16 @@
     textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`
   }
 
+  // Writing in a computer chat opens the screen stream ahead of the reply (it closes on its own
+  // when idle), so the reply's first look at the screen doesn't wait for it.
+  let prewarmed = 0
+  const oninput = () => {
+    fit()
+    if (!computerEnabled || !window.api.computer.supported || Date.now() - prewarmed < 5000) return
+    prewarmed = Date.now()
+    window.api.computer.prewarm()
+  }
+
   // Each chat keeps its own unsent text and attachments ('' is the new chat).
   const key = $derived(app.view?.session.id ?? '')
   let loaded: string | null = null
@@ -291,7 +301,7 @@
       bind:this={textarea}
       bind:value={text}
       use:listEditing
-      oninput={fit}
+      {oninput}
       {onkeydown}
       {onpaste}
       onfocus={() => (focused = true)}

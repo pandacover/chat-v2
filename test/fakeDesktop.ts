@@ -32,7 +32,31 @@ export interface FakeDesktop {
   /** Pretend the helper isn't DPI aware: Electron sees the cursor elsewhere. */
   skewCursor: boolean
   stop: (() => void) | null
+  /**
+   * What the screen looks like to `probe`, asked each time it probes (Windows only, as in the
+   * app): a still screen by default. `probes` counts the looks.
+   */
+  look: () => Uint8Array
+  probes: number
+  /**
+   * Each capture: whether it asked for a fresh frame, and whether this app's windows were left out
+   * of it; `after` when it would take a stream frame newer than that mark (Windows).
+   */
+  shots: Array<{ fresh: boolean; chatLeftOut: boolean; after?: number }>
+  /** This app's windows are out of captures now (Windows, see ChatWindowsPort.leaveOut). */
+  leftOut: boolean
+  /** What the pretend stream's `mark` says the time is (Windows). */
+  markTime: number
+  /** Times the screen was asked to get ready (the stream opened), Windows only. */
+  prepared: number
+  /** The overlay shows the thinking spinner now (a busy status or hint, until the next event). */
+  spinning: boolean
+  /** Captures and probes taken while the spinner was up: there should be none. */
+  watchedWhileSpinning: number
 }
+
+/** A probe thumbnail of a screen of one grey level. */
+export const still = (level = 0) => new Uint8Array(64 * 36).fill(level)
 
 export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'darwin' = 'win32'): FakeDesktop => {
   const d: FakeDesktop = {
@@ -48,8 +72,17 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'da
     ],
     skewCursor: false,
     stop: null,
+    look: () => still(),
+    probes: 0,
+    shots: [],
+    leftOut: false,
+    markTime: 0,
+    prepared: 0,
+    spinning: false,
+    watchedWhileSpinning: 0,
     ports: null as unknown as ComputerPorts
   }
+  const minimised: WindowInfo[] = []
   d.ports = {
     selfPid: SELF_PID,
     os,
@@ -80,19 +113,60 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'da
     screen: {
       display: () => ({ x: 0, y: 0, w: 1920, h: 1080, scale: 1 }),
       cursor: () => (d.skewCursor ? { x: d.state.cursor.x * 1.25, y: d.state.cursor.y * 1.25 } : d.state.cursor),
-      capture: async (size, cover) => {
+      capture: async (size, cover, _crop, opts) => {
+        if (d.spinning) d.watchedWhileSpinning++
         d.covers.push(cover)
-        return { dataUrl: 'data:image/jpeg;base64,SHOT', w: size.w, h: size.h }
-      }
+        d.shots.push({ fresh: opts?.fresh === true, chatLeftOut: d.leftOut, ...(opts?.after !== undefined ? { after: opts.after } : {}) })
+        // Made-up part timings, so tests can see them reach the timing log.
+        return { dataUrl: 'data:image/jpeg;base64,SHOT', w: size.w, h: size.h, ms: { sources: 3, cover: 1, encode: 2 } }
+      },
+      // A Mac has no stream to probe, so it waits fixed times for the screen.
+      ...(os === 'win32'
+        ? {
+            probe: async () => {
+              if (d.spinning) d.watchedWhileSpinning++
+              d.probes++
+              return d.look()
+            },
+            mark: async () => d.markTime,
+            prepare: () => void d.prepared++
+          }
+        : {})
     },
     overlay: {
-      send: (e) => void d.overlay.push(e),
+      send: (e) => {
+        d.overlay.push(e)
+        if (e.type === 'status' || e.type === 'hint') d.spinning = e.busy === true
+        else if (e.type === 'cursor' || e.type === 'marks') d.spinning = false
+      },
       onCommand: (handler) => {
         d.stop = () => handler('stop')
       },
       hiddenWhile: (capture) => capture()
     },
-    chatWindows: { hide: () => void d.chat.push('hide'), show: () => void d.chat.push('show') }
+    // Minimised, this app's windows drop off the window list, as they do from the helper's.
+    chatWindows: {
+      hide: () => {
+        d.chat.push('hide')
+        minimised.push(...d.state.windows.filter((w) => w.pid === SELF_PID))
+        d.state.windows = d.state.windows.filter((w) => w.pid !== SELF_PID)
+      },
+      show: () => {
+        d.chat.push('show')
+        d.state.windows = [...minimised.splice(0), ...d.state.windows]
+      },
+      // Windows leaves this app's windows out of a capture on request; a Mac can't.
+      ...(os === 'win32'
+        ? {
+            leaveOut: async () => {
+              d.chat.push('leave out')
+              d.leftOut = true
+              const hwnds = d.state.windows.filter((w) => w.pid === SELF_PID).map((w) => w.hwnd)
+              return { hwnds, restore: () => void (d.chat.push('let in'), (d.leftOut = false)) }
+            }
+          }
+        : {})
+    }
   }
   return d
 }

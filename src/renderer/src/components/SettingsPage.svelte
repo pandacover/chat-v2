@@ -205,6 +205,12 @@
     { id: 'mistral-ocr', label: 'OCR', hint: 'Reads scanned pages. Billed per page by OpenRouter.' },
     { id: 'native', label: 'Native', hint: 'Sends the file to the model. Needs a model that reads PDFs.' }
   ]
+  const efforts = [
+    { id: 'minimal', label: 'Minimal', hint: 'Acts almost at once. Fine for clicking through menus it can see.' },
+    { id: 'low', label: 'Low', hint: 'Thinks briefly before each step. The default: quick, and enough for most tasks.' },
+    { id: 'medium', label: 'Medium', hint: 'Thinks longer before each step, for fiddly work in apps it finds hard.' },
+    { id: 'high', label: 'High', hint: 'Thinks hardest. Each step takes noticeably longer.' }
+  ]
   const themes = [
     { id: 'system', label: 'System' },
     { id: 'light', label: 'Light' },
@@ -532,6 +538,29 @@
                 </span>
               </span>
             </label>
+
+            <div class="mt-6 max-w-md">
+              <span class="mb-1.5 block font-medium text-fg">Computer use model</span>
+              <ModelPicker
+                block
+                value={form.computerModel}
+                onchange={(id) => (form.computerModel = id)}
+                filter={(m) => m.inputModalities.includes('image')}
+                noneLabel="None: use the chat's model"
+              />
+              <p class="mt-1.5 text-muted">
+                Works the computer in replies that use it, so a chat can talk with one model and act with a faster one. It needs to see images: if it can't, the vision
+                model takes over, then the chat's model.
+              </p>
+            </div>
+
+            <div class="mt-6 max-w-md">
+              <span class="mb-1.5 block font-medium text-fg">Thinking between steps</span>
+              {@render segmented(efforts, form.computerReasoningEffort, (v) => (form.computerReasoningEffort = v as Settings['computerReasoningEffort']))}
+              <p class="mt-1.5 text-muted">
+                {efforts.find((e) => e.id === form.computerReasoningEffort)?.hint} Models that don't think ignore this.
+              </p>
+            </div>
 
             <h3 class="mt-6 font-medium text-fg">Always off limits</h3>
             <p class="mt-0.5 max-w-prose text-muted">

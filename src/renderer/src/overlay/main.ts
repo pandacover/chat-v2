@@ -26,7 +26,9 @@ const pillSub = pill.querySelector('.sub') as HTMLSpanElement
 
 const ACCENT = '#e8590c'
 /** Matches the main process's glide, so the ripple lands as the real click does. */
-const GLIDE_MS = 400
+const GLIDE_MS = 250
+/** A drag takes about as long as the helper takes to move through it. */
+const DRAG_MS = 400
 /** Per mark, as in ANNOTATE_MS / ANNOTATE_MAX_MS in Computer.ts, less a little to finish first. */
 const MARK_MS = 1100
 const MARKS_MAX_MS = 7600
@@ -84,6 +86,11 @@ let driven = false
 /** What the cursor's tag says while working (the step), and while idle (a hint). */
 let workLabel = ''
 let hint = ''
+/**
+ * What the tag says, beside a spinner, while the model decides the next step; null otherwise. The
+ * cursor waits where it is meanwhile. The next status, hint, glide or mark clears it.
+ */
+let thinking: string | null = null
 
 const cursor = {
   x: -100,
@@ -190,7 +197,8 @@ const moveCursor = (e: Extract<OverlayEvent, { type: 'cursor' }>) => {
   const len = dist(cursor.from, cursor.to)
   cursor.bend = arc(cursor.from, cursor.to, `${e.x},${e.y},${t}`, 0.18)
   cursor.t0 = t
-  cursor.dur = reduced || len < 2 ? 1 : e.action === 'drag' ? GLIDE_MS : Math.min(GLIDE_MS, 160 + len * 0.6)
+  // Long enough to follow by eye; short hops a little quicker. The real input fires after GLIDE_MS.
+  cursor.dur = reduced || len < 2 ? 1 : e.action === 'drag' ? DRAG_MS : Math.min(GLIDE_MS, 120 + len * 0.4)
   cursor.action = e.action
   workLabel = e.label
   const color = e.action === 'right' ? '#1c7ed6' : ACCENT
@@ -242,7 +250,15 @@ const setStatus = (next: Exclude<State, 'off'>, label: string) => {
 }
 
 bridge.onEvent((e) => {
-  if (e.type === 'cursor') moveCursor(e)
+  // A busy status or hint brings up the spinner; whatever comes next takes it down.
+  if (e.type === 'status' || e.type === 'hint') thinking = e.busy ? e.label : null
+  else if (e.type === 'cursor' || e.type === 'marks') thinking = null
+  if (e.type === 'status' && e.busy) {
+    // Thinking keeps the step's label for when it's done, and the cursor where the step left it.
+    if (state !== 'working') setStatus('working', '')
+  } else if (e.type === 'hint' && e.busy) {
+    // The idle hint stays as it was.
+  } else if (e.type === 'cursor') moveCursor(e)
   else if (e.type === 'marks') setMarks(e.marks)
   else if (e.type === 'clear') clearMarks()
   else if (e.type === 'mode') follow = e.follow
@@ -413,8 +429,28 @@ const placeTag = (at: Pt, size: Layout, taken: Rect[], drop = TAIL): Rect => {
   return rect
 }
 
-/** A tag: dark, solid and crisp, so it reads over any app. */
-const drawTag = (rect: Rect, layout: Layout, alpha: number) => {
+/** Room a spinner takes at the start of a tag. */
+const SPIN_W = 18
+
+/** A small spinning arc, for the tag while the model decides. */
+const drawSpinner = (cx: number, cy: number, t: number) => {
+  ctx.save()
+  ctx.lineCap = 'round'
+  ctx.lineWidth = 2
+  ctx.strokeStyle = 'rgba(250,250,249,0.25)'
+  ctx.beginPath()
+  ctx.arc(cx, cy, 5.5, 0, Math.PI * 2)
+  ctx.stroke()
+  const a = reduced ? 0 : (t / 900) * Math.PI * 2
+  ctx.strokeStyle = ACCENT
+  ctx.beginPath()
+  ctx.arc(cx, cy, 5.5, a, a + Math.PI * 0.6)
+  ctx.stroke()
+  ctx.restore()
+}
+
+/** A tag: dark, solid and crisp, so it reads over any app. With `spin`, a spinner leads the text. */
+const drawTag = (rect: Rect, layout: Layout, alpha: number, spin?: number) => {
   if (alpha <= 0.01) return
   ctx.save()
   ctx.globalAlpha = alpha
@@ -431,7 +467,8 @@ const drawTag = (rect: Rect, layout: Layout, alpha: number) => {
   ctx.beginPath()
   ctx.roundRect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1, 7.5)
   ctx.stroke()
-  const tx = rect.x + TAG.padX
+  if (spin !== undefined) drawSpinner(rect.x + TAG.padX + 5.5, rect.y + rect.h / 2, spin)
+  const tx = rect.x + TAG.padX + (spin !== undefined ? SPIN_W : 0)
   ctx.font = `600 ${TAG.size}px ${font()}`
   ctx.fillStyle = '#fafaf9'
   ctx.textAlign = 'left'
@@ -638,10 +675,14 @@ const render = () => {
     ctx.globalAlpha = cursor.alpha
     drawPointer(cursor.x, cursor.y)
     ctx.globalAlpha = 1
-    const text = penTag ?? (state === 'working' ? workLabel : !driven ? hint : '')
+    const deciding = penTag === null && thinking !== null && (state === 'working' || !driven)
+    const text = penTag ?? (deciding ? thinking : state === 'working' ? workLabel : !driven ? hint : '')
     if (text) {
-      const layout = layoutTag(text)
-      drawTag(placeTag(cursor, layout, taken), layout, cursor.alpha)
+      const base = layoutTag(text)
+      const layout = deciding ? { ...base, w: base.w + SPIN_W } : base
+      drawTag(placeTag(cursor, layout, taken), layout, cursor.alpha, deciding ? t : undefined)
+      // The spinner turns.
+      if (deciding && !reduced) busy = true
     }
   }
 

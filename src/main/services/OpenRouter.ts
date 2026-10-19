@@ -1,14 +1,20 @@
 import { Context, Effect, Layer, Stream } from 'effect'
 import type { ModelInfo, Usage } from '@shared/types'
 import { type ConfigError, type MissingApiKey, ProviderError, errorMessage } from '../errors'
-import { parseSseLine } from '../sse'
+import { type ReasoningDetail, parseSseLine } from '../sse'
+import { CurrentStopwatch } from '../timing'
 import { SettingsStore } from './SettingsStore'
 
 // Overridable for local testing against a mock server.
 const BASE = process.env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1'
 
+/** Marks the end of a prefix Anthropic should cache (see withCacheBreakpoints). */
+export interface CacheControl {
+  type: 'ephemeral'
+}
+
 export type ContentPart =
-  | { type: 'text'; text: string }
+  | { type: 'text'; text: string; cache_control?: CacheControl }
   | { type: 'image_url'; image_url: { url: string } }
   | { type: 'file'; file: { filename: string; file_data: string } }
 
@@ -20,7 +26,14 @@ export interface ToolCall {
 
 export type ChatMessage =
   | { role: 'system' | 'user'; content: string | ContentPart[] }
-  | { role: 'assistant'; content: string | ContentPart[] | null; tool_calls?: ToolCall[] }
+  | {
+      role: 'assistant'
+      content: string | ContentPart[] | null
+      tool_calls?: ToolCall[]
+      /** The thinking behind the tool calls, sent back so the model keeps it across steps. */
+      reasoning_details?: ReasoningDetail[]
+      reasoning?: string
+    }
   | { role: 'tool'; tool_call_id: string; content: string }
 
 export interface ToolDefinition {
@@ -36,12 +49,15 @@ export interface ChatRequest {
   plugins?: unknown[]
   tools?: ToolDefinition[]
   /** `effort: 'none'` turns thinking off; thinking tokens count against `max_tokens`. */
-  reasoning?: { effort: 'none' | 'minimal' | 'low' | 'medium' | 'high' }
+  reasoning?: { effort: ReasoningEffort }
 }
 
-/** What a streamed completion yields: text, or a fragment of a tool call. */
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high'
+
+/** What a streamed completion yields: text, thinking, or a fragment of a tool call. */
 export type ChatDelta =
   | { type: 'text'; text: string }
+  | { type: 'reasoning'; text?: string; details?: ReasoningDetail[] }
   | { type: 'tool'; index: number; id?: string; name?: string; args?: string }
   | { type: 'usage'; usage: Omit<Usage, 'requests'> }
 
@@ -76,6 +92,47 @@ const headers = (key: string) => ({
 const perMillion = (v: unknown): number | null => {
   const n = typeof v === 'string' || typeof v === 'number' ? Number(v) : NaN
   return Number.isFinite(n) && n >= 0 ? Math.round(n * 1e6 * 1e6) / 1e6 : null
+}
+
+const countImages = (messages: ChatMessage[]) =>
+  messages.reduce((n, m) => n + (Array.isArray(m.content) ? m.content.filter((p) => p.type === 'image_url').length : 0), 0)
+
+/** Claude models, which cache only up to the breakpoints a request marks. */
+export const isAnthropic = (model: string) => /^~?anthropic\//.test(model)
+
+const EPHEMERAL: CacheControl = { type: 'ephemeral' }
+
+/** The message with a cache breakpoint on its last text, or on a text part added for one. */
+const marked = (m: ChatMessage): ChatMessage => {
+  if (m.role === 'tool' || m.content === null) return m
+  if (typeof m.content === 'string') return m.content === '' ? m : ({ ...m, content: [{ type: 'text', text: m.content, cache_control: EPHEMERAL }] } as ChatMessage)
+  const at = m.content.findLastIndex((p) => p.type === 'text')
+  if (at < 0) return m
+  return { ...m, content: m.content.map((p, i) => (i === at && p.type === 'text' ? { ...p, cache_control: EPHEMERAL } : p)) } as ChatMessage
+}
+
+/**
+ * Anthropic caches a request's prefix only up to a `cache_control` breakpoint (OpenAI and Gemini
+ * cache on their own). Two are marked: the system prompt, which also covers the tools (Anthropic
+ * orders them first), and the newest message that can carry one and has no image, so the next step
+ * reads every earlier step from the cache. A message with a screenshot is passed over: the next
+ * step replaces it with a note (see DROPPED_SCREENSHOT in Chat.ts), so a breakpoint there would
+ * never be read. The request's own messages are left as they are, so breakpoints never pile up
+ * past Anthropic's limit of four.
+ */
+export const withCacheBreakpoints = (model: string, messages: ChatMessage[]): ChatMessage[] => {
+  if (!isAnthropic(model)) return messages
+  const out = [...messages]
+  if (out[0]?.role === 'system') out[0] = marked(out[0])
+  for (let i = out.length - 1; i > 0; i--) {
+    const content = out[i]!.content
+    if (Array.isArray(content) && content.some((p) => p.type === 'image_url')) continue
+    const m = marked(out[i]!)
+    if (m === out[i]) continue
+    out[i] = m
+    break
+  }
+  return out
 }
 
 const providerError = (status: number | undefined, message: string) =>
@@ -113,44 +170,65 @@ export class OpenRouter extends Context.Service<
         Stream.unwrap(
           Effect.gen(function* () {
             const key = yield* settings.apiKey('openrouter')
+            // A reply times its calls (see timing.ts); other requests carry no stopwatch.
+            const sw = yield* CurrentStopwatch
             const controller = yield* Effect.acquireRelease(
               Effect.sync(() => new AbortController()),
               (c) => Effect.sync(() => c.abort())
             )
+            const body = JSON.stringify({
+              ...req,
+              messages: withCacheBreakpoints(req.model, req.messages),
+              stream: true,
+              // One action at a time keeps the browser's state predictable.
+              ...(req.tools?.length ? { tool_choice: 'auto', parallel_tool_calls: false } : {})
+            })
+            sw?.note('bytes', Buffer.byteLength(body))
+            sw?.note('images', countImages(req.messages))
             const res = yield* Effect.tryPromise({
               try: () =>
                 fetch(`${BASE}/chat/completions`, {
                   method: 'POST',
                   headers: headers(key),
-                  body: JSON.stringify({
-                    ...req,
-                    stream: true,
-                    // One action at a time keeps the browser's state predictable.
-                    ...(req.tools?.length ? { tool_choice: 'auto', parallel_tool_calls: false } : {})
-                  }),
+                  body,
                   signal: controller.signal
                 }),
               catch: (cause) => providerError(undefined, `Could not reach OpenRouter: ${errorMessage(cause)}`)
             })
+            sw?.mark('headers')
             if (!res.ok || !res.body) {
               const body = yield* Effect.promise(() => res.text().catch(() => ''))
               return yield* Effect.fail(providerError(res.status, describeFailure(res.status, body)))
             }
-            const body = res.body
+            const stream = res.body
             return Stream.fromReadableStream({
-              evaluate: () => body,
+              evaluate: () => stream,
               onError: (cause) => providerError(undefined, `Stream interrupted: ${errorMessage(cause)}`)
             }).pipe(
               Stream.decodeText,
               Stream.splitLines,
-              Stream.flatMap((line) => Stream.fromIterable(parseSseLine(line))),
+              Stream.flatMap((line) => {
+                // Any chunk counts, thinking included; keep-alive comments don't.
+                if (sw && line.startsWith('data:')) sw.mark('firstDelta')
+                return Stream.fromIterable(parseSseLine(line))
+              }),
               Stream.takeWhile((e) => e.type !== 'done'),
+              Stream.tap((e) => {
+                if (!sw) return Effect.void
+                if (e.type === 'delta' || e.type === 'tool') sw.mark('firstContent')
+                else if (e.type === 'usage') sw.note('usage', e.usage)
+                else if (e.type === 'meta') {
+                  if (e.model) sw.note('model', e.model)
+                  if (e.provider) sw.note('provider', e.provider)
+                }
+                return Effect.void
+              }),
               Stream.mapEffect((e): Effect.Effect<ChatDelta | null, ProviderError> =>
                 e.type === 'error'
                   ? Effect.fail(providerError(undefined, e.message))
                   : e.type === 'delta'
                     ? Effect.succeed({ type: 'text', text: e.text })
-                    : e.type === 'tool' || e.type === 'usage'
+                    : e.type === 'tool' || e.type === 'usage' || e.type === 'reasoning'
                       ? Effect.succeed(e)
                       : Effect.succeed(null)
               ),

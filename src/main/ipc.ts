@@ -277,4 +277,5 @@ export const registerIpc = (runtime: ManagedRuntime.ManagedRuntime<MainServices,
     } else if (on !== true) computerWindows.delete(id)
     applyMode()
   })
+  ipcMain.on('computer:prewarm', () => void runtime.runPromise(Computer.use((c) => c.prewarm)).catch(() => undefined))
 }

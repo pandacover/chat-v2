@@ -85,7 +85,8 @@ const api: Api = {
     tips: () => call('computer:tips'),
     removeTip: (id) => call('computer:removeTip', id),
     protectedApps: () => call('computer:protectedApps'),
-    setMode: (on) => ipcRenderer.send('computer:mode', on === true)
+    setMode: (on) => ipcRenderer.send('computer:mode', on === true),
+    prewarm: () => ipcRenderer.send('computer:prewarm')
   },
   browser: {
     attach: (id) => call('browser:attach', id),
