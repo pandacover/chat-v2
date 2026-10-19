@@ -1,0 +1,58 @@
+# Checks a branch before it reaches main: builds the macOS capture helper (Swift, which only
+# builds on a Mac), checks it, and runs the tests there. main itself is checked by release.yml.
+name: Check
+
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run build:mac-capture
+      # Both architectures, ScreenCaptureKit linked, and it starts: --selftest only reports what
+      # is available (no capture, no permission prompt).
+      - name: Check the capture helper
+        run: |
+          helper=native/mac-capture/out/chat-v2-capture
+          lipo -info "$helper"
+          lipo "$helper" -verify_arch arm64 x86_64
+          otool -L "$helper" | grep -q ScreenCaptureKit.framework
+          otool -l "$helper" | grep -A3 LC_BUILD_VERSION | grep -q 'minos 13.0'
+          "$helper" --selftest | tee selftest.json
+          grep -q '"selftest":true' selftest.json
+      # A real stream, screenshot, close-up and change reports: the runners allow Screen
+      # Recording. The pictures are kept to look at.
+      - name: Capture the screen with the helper
+        run: bun scripts/mac-capture-smoke.ts --out smoke
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: capture-smoke
+          path: smoke/
+          if-no-files-found: ignore
+      - run: bun run typecheck
+      - run: bun test
+      - run: bun run build
+      # The installers' app bundles, unpublished, to check the helper ships and is signed in each
+      # (the universal one is merged from the other two).
+      - name: Package the app (no installers)
+        run: bunx electron-builder --mac dir --arm64 --x64 --universal --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+      - name: Check the packaged helper
+        run: |
+          for app in dist/mac/chat-v2.app dist/mac-arm64/chat-v2.app dist/mac-universal/chat-v2.app; do
+            helper="$app/Contents/Resources/chat-v2-capture"
+            codesign --verify --strict --verbose=2 "$helper"
+            codesign -dv --verbose=2 "$helper" 2>&1 | grep -q 'Signature=adhoc'
+            lipo "$helper" -verify_arch arm64 x86_64
+            "$helper" --selftest
+            codesign --verify --deep --strict --verbose=2 "$app"
+          done

@@ -1,6 +1,7 @@
 // A pretend Windows desktop for computer-use tests: windows, a cursor, and logs of what was
 // done to them. Nothing touches the real screen, mouse or keyboard.
 import type { DesktopState, OverlayEvent, WindowInfo } from '../src/shared/computer'
+import type { ScreenChanges } from '../src/main/desktop'
 import type { ComputerPorts } from '../src/main/services/Computer'
 
 export const SELF_PID = 4242
@@ -42,7 +43,7 @@ export interface FakeDesktop {
    * Each capture: whether it asked for a fresh frame, and whether this app's windows were left out
    * of it; `after` when it would take a stream frame newer than that mark (Windows).
    */
-  shots: Array<{ fresh: boolean; chatLeftOut: boolean; after?: number }>
+  shots: Array<{ fresh: boolean; chatLeftOut: boolean; after?: number; withoutApp?: true }>
   /** This app's windows are out of captures now (Windows, see ChatWindowsPort.leaveOut). */
   leftOut: boolean
   /** What the pretend stream's `mark` says the time is (Windows). */
@@ -53,12 +54,25 @@ export interface FakeDesktop {
   spinning: boolean
   /** Captures and probes taken while the spinner was up: there should be none. */
   watchedWhileSpinning: number
+  /** Captures the overlay was hidden for (macOS without its stream). */
+  hides: number
+  /**
+   * With a Mac's ScreenCaptureKit stream (`fakeDesktop(…, 'darwin', { stream: true })`): whether
+   * it is up, what it says about the screen each time it's asked (a still screen by default),
+   * how often it was asked, and whether it can come up at all (`watchable`).
+   */
+  streamUp: boolean
+  screenChanges: () => ScreenChanges
+  changeLooks: number
+  canStream: boolean
+  /** Times the stream was closed (a reply ended, computer mode went off). */
+  released: number
 }
 
 /** A probe thumbnail of a screen of one grey level. */
 export const still = (level = 0) => new Uint8Array(64 * 36).fill(level)
 
-export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'darwin' = 'win32'): FakeDesktop => {
+export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'darwin' = 'win32', opts: { stream?: boolean } = {}): FakeDesktop => {
   const d: FakeDesktop = {
     state: { cursor: { x: 50, y: 50 }, foreground: windows[0]?.hwnd ?? 0, windows },
     input: [],
@@ -80,6 +94,12 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'da
     prepared: 0,
     spinning: false,
     watchedWhileSpinning: 0,
+    hides: 0,
+    streamUp: true,
+    screenChanges: () => ({ count: 0, stillMs: 60_000 }),
+    changeLooks: 0,
+    canStream: true,
+    released: 0,
     ports: null as unknown as ComputerPorts
   }
   const minimised: WindowInfo[] = []
@@ -116,11 +136,32 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'da
       capture: async (size, cover, _crop, opts) => {
         if (d.spinning) d.watchedWhileSpinning++
         d.covers.push(cover)
-        d.shots.push({ fresh: opts?.fresh === true, chatLeftOut: d.leftOut, ...(opts?.after !== undefined ? { after: opts.after } : {}) })
+        d.shots.push({
+          fresh: opts?.fresh === true,
+          chatLeftOut: d.leftOut,
+          ...(opts?.after !== undefined ? { after: opts.after } : {}),
+          ...(opts?.withoutApp ? { withoutApp: true as const } : {})
+        })
         // Made-up part timings, so tests can see them reach the timing log.
         return { dataUrl: 'data:image/jpeg;base64,SHOT', w: size.w, h: size.h, ms: { sources: 3, cover: 1, encode: 2 } }
       },
-      // A Mac has no stream to probe, so it waits fixed times for the screen.
+      // A Mac's stream reports its own changes, and leaves this app (overlay and chat) out.
+      ...(os === 'darwin' && opts.stream
+        ? {
+            changes: async () => {
+              if (d.spinning) d.watchedWhileSpinning++
+              d.changeLooks++
+              return d.streamUp ? d.screenChanges() : null
+            },
+            live: () => d.streamUp,
+            watchable: async () => d.canStream && d.streamUp,
+            keepsAppOut: () => d.streamUp,
+            keepsOverlayOut: true,
+            prepare: () => void d.prepared++,
+            release: () => void d.released++
+          }
+        : {}),
+      // Without a stream a Mac waits fixed times for the screen.
       ...(os === 'win32'
         ? {
             probe: async () => {
@@ -142,7 +183,10 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'da
       onCommand: (handler) => {
         d.stop = () => handler('stop')
       },
-      hiddenWhile: (capture) => capture()
+      hiddenWhile: (capture) => {
+        d.hides++
+        return capture()
+      }
     },
     // Minimised, this app's windows drop off the window list, as they do from the helper's.
     chatWindows: {

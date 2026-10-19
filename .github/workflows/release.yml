@@ -56,6 +56,8 @@ jobs:
       - name: Set version
         run: npm pkg set version=${{ env.VERSION }}
       - run: bun run build
+      # The macOS screen capture helper (Swift); it says it's skipped on Windows.
+      - run: bun run build:mac-capture
       - name: Build and upload installers (draft release)
         run: bunx electron-builder --publish always
         env:
@@ -65,6 +67,9 @@ jobs:
       # electron-builder can skip signing without failing, which shipped a Mac app that kept
       # asking for the microphone. A bare linker signature still passes --verify; the
       # identifier is what tells them apart. Failing here leaves the release a draft.
+      # The capture helper is checked on its own: --deep seals a bare executable in Resources as
+      # a resource without checking its signature. It must be signed, carry both architectures
+      # (the universal app keeps it as it is) and start (--selftest captures and asks nothing).
       - name: Check the macOS signature
         if: runner.os == 'macOS'
         run: |
@@ -75,6 +80,11 @@ jobs:
             grep -qx 'Identifier=com.pandacover.chatv2' <<<"$info"
             codesign -d --entitlements - "$app" 2>&1 | grep -q com.apple.security.device.audio-input
             plutil -p "$app/Contents/Info.plist" | grep -q NSMicrophoneUsageDescription
+            helper="$app/Contents/Resources/chat-v2-capture"
+            codesign --verify --strict --verbose=2 "$helper"
+            codesign -dv --verbose=2 "$helper" 2>&1 | grep -q 'Signature=adhoc'
+            lipo "$helper" -verify_arch arm64 x86_64
+            "$helper" --selftest
           done
 
   publish:

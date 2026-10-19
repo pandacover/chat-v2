@@ -13,9 +13,13 @@ export interface HelperProcess {
 
 /**
  * Starts the helper on first use, and again if it dies. `checkReady` sees the ready line and
- * returns why the helper can't be used, or null.
+ * returns why the helper can't be used, or null. `name` is what errors call it.
  */
-export const helperProcess = (spawnHelper: () => ChildProcessWithoutNullStreams, checkReady: (ready: Record<string, unknown>) => string | null = () => null): HelperProcess => {
+export const helperProcess = (
+  spawnHelper: () => ChildProcessWithoutNullStreams,
+  checkReady: (ready: Record<string, unknown>) => string | null = () => null,
+  name = 'the input helper'
+): HelperProcess => {
   let child: ChildProcessWithoutNullStreams | null = null
   let ready: Promise<void> | null = null
   let nextId = 1
@@ -27,7 +31,7 @@ export const helperProcess = (spawnHelper: () => ChildProcessWithoutNullStreams,
     let buffer = ''
     let errors = ''
     ready = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('the input helper did not start')), 20000)
+      const timer = setTimeout(() => reject(new Error(`${name} did not start`)), 20000)
       p.stdout.setEncoding('utf8')
       p.stdout.on('data', (chunk: string) => {
         buffer += chunk
@@ -57,6 +61,17 @@ export const helperProcess = (spawnHelper: () => ChildProcessWithoutNullStreams,
         }
       })
       p.stderr.on('data', (chunk: Buffer) => (errors = (errors + chunk.toString()).slice(-2000)))
+      // Writing to one that just died fails with EPIPE; its exit fails the requests.
+      p.stdin.on('error', () => {})
+      // One that can't be started at all (a missing binary) fails its requests instead of throwing.
+      p.on('error', (e) => {
+        clearTimeout(timer)
+        if (child === p) child = null
+        const error = new Error(`${name} could not start: ${e.message}`)
+        reject(error)
+        for (const waiter of pending.values()) waiter.reject(error)
+        pending.clear()
+      })
       p.on('exit', (_code, signal) => {
         clearTimeout(timer)
         if (child === p) child = null
@@ -66,8 +81,8 @@ export const helperProcess = (spawnHelper: () => ChildProcessWithoutNullStreams,
         const said = lines.find((l) => !l.startsWith('at: '))
         const error = new Error(
           signal
-            ? `the input helper crashed (${signal})${step ? ` while ${step}` : ''}`
-            : `the input helper stopped${said ? `: ${said}` : step ? ` while ${step}` : ''}`
+            ? `${name} crashed (${signal})${step ? ` while ${step}` : ''}`
+            : `${name} stopped${said ? `: ${said}` : step ? ` while ${step}` : ''}`
         )
         reject(error)
         for (const waiter of pending.values()) waiter.reject(error)

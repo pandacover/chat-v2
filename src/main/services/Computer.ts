@@ -27,7 +27,7 @@ import {
   windowAt
 } from '@shared/computer'
 import type { AppTip } from '@shared/types'
-import type { ChatWindowsPort, OverlayPort, ScreenPort } from '../desktop'
+import type { ChatWindowsPort, OverlayPort, ScreenChanges, ScreenPort } from '../desktop'
 import { errorMessage } from '../errors'
 import type { Driver } from '../driver'
 import { CurrentStopwatch, timed } from '../timing'
@@ -66,8 +66,8 @@ export interface Glance {
 
 /**
  * How a `wait` ended: the screen changed and then held still (`settled`), never changed (`still`),
- * was still changing when the time ran out (`changing`), or couldn't be watched (`unknown`: a
- * Mac, or the stream isn't up), in which case it waited the whole time.
+ * was still changing when the time ran out (`changing`), or wasn't watched (`unknown`: the stream
+ * isn't up, or the run was told it waits the whole time), in which case it waited the whole time.
  */
 export type WaitEnd = 'settled' | 'still' | 'changing' | 'unknown'
 
@@ -92,6 +92,8 @@ export interface ComputerPorts {
   os: DesktopOs
   /** Why computer use can't start yet (a permission the system hasn't granted), or null. */
   permissions?: () => Promise<string | null>
+  /** Whether those permissions are granted already, checked without asking for them (macOS). */
+  hasPermissions?: () => boolean
   screen: ScreenPort
   overlay: OverlayPort
   chatWindows: ChatWindowsPort
@@ -120,19 +122,26 @@ export interface ComputerApi {
    * never took control) clears it. Never on while the screen is settling or being captured.
    */
   readonly thinking: Effect.Effect<void>
-  /** Gets the screen ready to look at (opens the stream on Windows), ahead of a reply. */
+  /** Gets the screen ready to look at (opens the stream), ahead of a reply. */
   readonly prewarm: Effect.Effect<void>
+  /**
+   * Whether `wait` can end as soon as the screen is ready, for a run about to start: Windows' stream
+   * can always be watched; a Mac's once its ScreenCaptureKit stream is up (this waits a moment for
+   * it). The model is told what this says, and the run's waits are held to it (`wait`'s `watch`).
+   */
+  readonly canWatch: Effect.Effect<boolean>
   readonly look: (label: string) => Effect.Effect<Look, ComputerError>
   /**
    * Waits up to `maxMs` for something on screen to finish, then looks: it ends early once the
-   * screen has changed and held still, or has stayed still a while (see WAIT_* below).
+   * screen has changed and held still, or has stayed still a while (see WAIT_* below). With
+   * `watch: false` (the run was told the screen can't be watched) it waits the whole time.
    */
-  readonly wait: (maxMs: number) => Effect.Effect<Waited, ComputerError>
+  readonly wait: (maxMs: number, opts?: { watch?: boolean }) => Effect.Effect<Waited, ComputerError>
   /**
    * The screen as a reply starts, before it has control: no overlay status, and the chat window
-   * stays where it is. On Windows it is left out of the capture, so the screenshot shows what's
-   * under it; on a Mac it's painted grey as protected, and past half the screen there's no
-   * screenshot. The screenshot's frame carries over to `begin` for the same reply, so the model
+   * stays where it is. It is left out of the capture (Windows, or a Mac's stream), so the
+   * screenshot shows what's under it; a Mac without the stream paints it grey as protected, and
+   * past half the screen there's no screenshot. The screenshot's frame carries over to `begin` for the same reply, so the model
    * can act on its first step. Null when computer use isn't ready to look (another reply has it,
    * or macOS permissions haven't been granted yet).
    */
@@ -170,6 +179,11 @@ export const THINKING_LABEL = 'Deciding next step'
 export const SETTLE_MAX_MS = 1500
 /** How often it looks while it waits; the screen counts as settled after two looks in a row show no change. */
 const SETTLE_STEP_MS = 80
+/**
+ * Where the stream says how long the screen has been still (macOS), it counts as settled once it
+ * has been this long since the action: the two looks' worth, without waiting to take them.
+ */
+export const SETTLE_QUIET_MS = 2 * SETTLE_STEP_MS
 
 /**
  * Whether two `probe` thumbnails show a different screen: more than a few pixels changed by more
@@ -351,17 +365,19 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
 
         /**
          * Captures the screen with the overlay out of the picture. The time goes to `capture`, and
-         * its parts to `capture.*`: `hide` is what keeping the overlay out added (macOS), the rest
-         * is what the screen port reports (grabbing the frame, painting covers, encoding).
+         * its parts to `capture.*`: `hide` is what keeping the overlay out added (macOS without its
+         * stream), the rest is what the screen port reports (grabbing the frame, painting covers,
+         * encoding). A port that keeps the overlay out itself (a Mac's) reports its own `hide`.
          */
-        const shoot = (size: { w: number; h: number }, cover: Rect[], crop?: Rect, opts?: { fresh?: boolean; after?: number }) =>
+        const shoot = (size: { w: number; h: number }, cover: Rect[], crop?: Rect, opts?: { fresh?: boolean; after?: number; withoutApp?: boolean }) =>
           Effect.gen(function* () {
             calm()
             const sw = yield* CurrentStopwatch
             const t = performance.now()
             let inner = 0
+            const keepOut = screen.keepsOverlayOut ? <A>(f: () => Promise<A>) => f() : overlay.hiddenWhile.bind(overlay)
             const shot = yield* attempt('Capturing the screen', () =>
-              overlay.hiddenWhile(async () => {
+              keepOut(async () => {
                 const t1 = performance.now()
                 try {
                   return await screen.capture(size, cover, crop, opts)
@@ -373,7 +389,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             if (sw) {
               const total = performance.now() - t
               sw.add('capture', total)
-              sw.add('capture.hide', total - inner)
+              if (!screen.keepsOverlayOut) sw.add('capture.hide', total - inner)
               for (const [part, ms] of Object.entries(shot.ms ?? {})) sw.add(`capture.${part}`, ms)
             }
             return shot
@@ -383,7 +399,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
          * Looks at the screen with `s`'s protected windows painted over. A glance passes a state
          * without the windows it left out of the capture, a fresh frame, and what's in front.
          */
-        const capture = (s: DesktopState, opts?: { fresh?: boolean; after?: number; active?: string }) =>
+        const capture = (s: DesktopState, opts?: { fresh?: boolean; after?: number; withoutApp?: boolean; active?: string }) =>
           Effect.gen(function* () {
             const ctx = yield* guard
             const reasonOf = (w: WindowInfo) => protectedReason(w, ctx)
@@ -393,7 +409,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             // A pixel of margin, so rounding never lets an edge of a protected window show.
             const cover = hidden.flatMap((h) => h.parts.map((p) => shotRect(f, p))).map((r) => ({ x: r.x - 2, y: r.y - 2, w: r.w + 4, h: r.h + 4 }))
             const fresh = opts?.fresh ? { fresh: true, ...(opts.after !== undefined ? { after: opts.after } : {}) } : undefined
-            const shot = yield* shoot({ w: f.shotW, h: f.shotH }, cover, undefined, fresh)
+            const shot = yield* shoot({ w: f.shotW, h: f.shotH }, cover, undefined, opts?.withoutApp ? { ...fresh, withoutApp: true } : fresh)
             if (shot.w !== f.shotW || shot.h !== f.shotH) f = { ...f, shotW: shot.w, shotH: shot.h }
             frame = f
             return { image: shot.dataUrl, frame: f, text: describe(s, f, hidden, reasonOf, opts?.active) } satisfies Look
@@ -435,30 +451,58 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
         const noted = (look: Look, note: string | null | void): Look => (note ? { ...look, text: `${note}\n${look.text}` } : look)
 
         /**
+         * How this system watches the screen for changes: by comparing `probe` thumbnails (Windows'
+         * stream), or by the change reports of a stream that makes them (`changes`, a Mac's
+         * ScreenCaptureKit stream), which also say how long the screen has been still. Null where
+         * it can't at all; a look is null while the stream isn't up.
+         */
+        type Watch = {
+          peek: Effect.Effect<unknown>
+          changed: (a: unknown, b: unknown) => boolean
+          stillMs?: (look: unknown) => number
+        }
+        const watcher = (): Watch | null => {
+          const probe = screen.probe?.bind(screen)
+          if (probe) return { peek: Effect.promise(() => probe().catch(() => null)), changed: (a, b) => screenChanged(a as Uint8Array, b as Uint8Array) }
+          const changes = screen.changes?.bind(screen)
+          if (!changes) return null
+          return {
+            peek: Effect.promise(() => changes().catch(() => null)),
+            changed: (a, b) => (a as ScreenChanges).count !== (b as ScreenChanges).count,
+            stillMs: (look) => (look as ScreenChanges).stillMs
+          }
+        }
+        /** Whether the screen can be watched right now (a Mac's stream may not be up). */
+        const watchingNow = () => !!screen.probe || (!!screen.changes && screen.live?.() === true)
+
+        /**
          * Waits for the screen to react to an action and stop changing: at least `min` ms, then
          * until two looks in a row (SETTLE_STEP_MS apart) match, at most SETTLE_MAX_MS. Says
-         * whether it settled. Where the screen can't be probed (macOS, or the stream isn't up
-         * yet), it waits `fixed` ms instead.
+         * whether it settled. A stream that says how long the screen has been still (macOS) ends
+         * it as soon as that's SETTLE_QUIET_MS since the action. Where the screen can't be watched
+         * (the stream isn't up), it waits `fixed` ms instead.
          */
         const settle = (min: number, fixed: number) =>
           Effect.gen(function* () {
             calm()
             afterBegin = false
-            const probe = screen.probe?.bind(screen)
-            const peek = () => (probe ? Effect.promise(() => probe().catch(() => null)) : Effect.succeed(null))
+            const w = watcher()
             const t = performance.now()
-            yield* sleep(probe ? min : fixed)
-            let prev = yield* peek()
-            if (!prev) {
+            yield* sleep(w ? min : fixed)
+            let prev = w ? yield* w.peek : null
+            if (!w || !prev) {
               yield* sleep(Math.max(0, fixed - (performance.now() - t)))
               return true
             }
             let still = 0
             while (performance.now() - t < SETTLE_MAX_MS) {
-              yield* sleep(SETTLE_STEP_MS)
-              const next = yield* peek()
+              // Still since the action at the earliest: a quiet screen before it proves nothing.
+              const quiet = w.stillMs ? Math.min(w.stillMs(prev), performance.now() - t) : 0
+              if (w.stillMs && quiet >= SETTLE_QUIET_MS) return true
+              yield* sleep(w.stillMs ? Math.max(10, Math.min(SETTLE_STEP_MS, SETTLE_QUIET_MS - quiet)) : SETTLE_STEP_MS)
+              const next = yield* w.peek
               if (!next) return true
-              still = screenChanged(prev, next) ? 0 : still + 1
+              still = w.changed(prev, next) ? 0 : still + 1
               if (still >= 2) return true
               prev = next
             }
@@ -469,22 +513,23 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
          * `computer_wait`: up to `maxMs` for the screen to be ready, probed as `settle` probes it.
          * After WAIT_MIN_MS, it ends once the screen has changed and then held still for
          * WAIT_QUIET_MS, or has not changed at all for WAIT_STILL_MS. Where the screen can't be
-         * probed, it waits the whole time. Says how long it waited and how it ended. `opts` change
-         * those times (see `openApp`), and `changed` counts the screen as changed from the start.
+         * watched, or `whole` says not to, it waits the whole time. Says how long it waited and how
+         * it ended. `opts` change those times (see `openApp`), and `changed` counts the screen as
+         * changed from the start.
          */
-        const waitForScreen = (maxMs: number, opts: { min?: number; quiet?: number; still?: number; changed?: boolean } = {}) =>
+        const waitForScreen = (maxMs: number, opts: { min?: number; quiet?: number; still?: number; changed?: boolean; whole?: boolean } = {}) =>
           Effect.gen(function* () {
             calm()
             afterBegin = false
             const { min = WAIT_MIN_MS, quiet: quietMs = WAIT_QUIET_MS, still: stillMs = WAIT_STILL_MS } = opts
-            const probe = screen.probe?.bind(screen)
-            const peek = () => (probe ? Effect.promise(() => probe().catch(() => null)) : Effect.succeed(null))
+            const w = opts.whole ? null : watcher()
             const t = performance.now()
             const elapsed = () => performance.now() - t
-            if (!probe) {
+            if (!w) {
               yield* sleep(maxMs)
               return { ms: elapsed(), end: 'unknown' as WaitEnd }
             }
+            const peek = () => w.peek
             // The first look, to tell a change from; what changed last, and when.
             let base = yield* peek()
             let prev = base
@@ -500,7 +545,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
                 continue
               }
               // A change shows between two looks, or as a slow drift away from the first.
-              if (screenChanged(prev, next) || (!changed && screenChanged(base, next))) {
+              if (w.changed(prev, next) || (!changed && w.changed(base, next))) {
                 changed = true
                 since = performance.now()
               }
@@ -625,11 +670,11 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
          * After `begin` minimises the chat. Windows: until its windows are off the window list
          * (minimised windows drop off straight away, while the animation still plays), at most
          * BEGIN_MAX_MS. Actions settle the screen after acting, and a plain look right after
-         * settles first (`afterBegin`). A Mac, whose screen can't be watched, waits a fixed time
-         * for the animation, as before.
+         * settles first (`afterBegin`). Where the screen can't be watched (a Mac without its
+         * stream), it waits a fixed time for the animation instead.
          */
         const chatGone = Effect.gen(function* () {
-          if (!screen.probe) return yield* Effect.asVoid(settle(150, 350))
+          if (!watchingNow()) return yield* Effect.asVoid(settle(150, 350))
           const t = performance.now()
           for (;;) {
             const s = yield* readState
@@ -645,11 +690,12 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
          * shows, and a starting app may show a blank or loading window for a while: it waits until
          * the screen has changed and held still, or stayed still for over a second, at most
          * OPEN_SETTLE_MAX_MS, so the screenshot it returns is usable. A window that was already
-         * open only comes forward. A Mac, whose screen can't be watched, waits a fixed time.
+         * open only comes forward. Where the screen can't be watched (a Mac without its stream),
+         * it waits a fixed time.
          */
         const settleOpened = (launched: boolean) =>
           Effect.gen(function* () {
-            if (!launched || !screen.probe) return yield* settle(250, launched ? 1000 : 600)
+            if (!launched || !watchingNow()) return yield* settle(250, launched ? 1000 : 600)
             const { end } = yield* waitForScreen(OPEN_SETTLE_MAX_MS, { min: 300, still: 1200 })
             return end !== 'changing'
           })
@@ -740,13 +786,24 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             if (driver && granted) screen.prepare?.()
           }),
 
+          canWatch: Effect.suspend(() => {
+            if (!driver) return Effect.succeed(false)
+            if (screen.probe) return Effect.succeed(true)
+            // A Mac: its stream only opens once the permissions it needs are granted. Granted in an
+            // earlier session counts, so the first reply after launch can watch too (checking asks nothing).
+            if (!granted && ports.hasPermissions?.()) granted = true
+            const watchable = screen.watchable?.bind(screen)
+            if (!watchable || !granted) return Effect.succeed(false)
+            return Effect.promise(() => watchable().catch(() => false))
+          }),
+
           look,
 
-          wait: (maxMs) =>
+          wait: (maxMs, opts) =>
             Effect.gen(function* () {
               yield* needDriver
               yield* status('Waiting for the screen')
-              const { ms, end } = yield* waitForScreen(maxMs)
+              const { ms, end } = yield* waitForScreen(maxMs, { whole: opts?.watch === false })
               return { look: yield* capture(yield* readState), ms, end } satisfies Waited
             }),
 
@@ -764,7 +821,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
                * window list too, so protected windows under them are worked out (and painted over)
                * as if they weren't there: nothing that was under the chat shows unchecked.
                */
-              const glanceWith = (left: ReadonlySet<number>, after?: number) =>
+              const glanceWith = (left: ReadonlySet<number>, shot: { fresh?: boolean; after?: number; withoutApp?: boolean } = {}) =>
                 Effect.gen(function* () {
                   const seen = left.size ? { ...s, windows: s.windows.filter((w) => !left.has(w.hwnd)) } : s
                   const active = left.has(s.foreground) ? 'this chat, which minimises when you first act' : undefined
@@ -777,8 +834,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
                     text: `${describe(seen, f, hidden, reasonOf, active).split('\n').slice(1).join('\n')}\n${noScreenshot(why)}`
                   })
                   if (covered > GLANCE_MAX_COVERED) return windowsOnly("this chat's window covers most of the screen")
-                  const fresh = left.size > 0 ? { fresh: true, ...(after !== undefined ? { after } : {}) } : {}
-                  const look = yield* Effect.option(capture(seen, { ...fresh, ...(active ? { active } : {}) }))
+                  const look = yield* Effect.option(capture(seen, { ...(left.size > 0 ? shot : {}), ...(active ? { active } : {}) }))
                   if (Option.isNone(look)) return windowsOnly("the screen couldn't be captured just now")
                   glancedFor = id
                   const chat = mine.length
@@ -787,7 +843,15 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
                   return { image: look.value.image, text: chat ? `${look.value.text}\n${chat}` : look.value.text } satisfies Glance
                 })
               const leaveOut = chatWindows.leaveOut?.bind(chatWindows)
-              if (!leaveOut) return yield* glanceWith(new Set())
+              if (!leaveOut) {
+                // A Mac's stream never has this app's windows in it: the screenshot shows what's
+                // under the chat, as on Windows. It's taken from the stream or not at all.
+                if (screen.keepsAppOut?.()) {
+                  const mine = new Set(s.windows.filter((w) => w.pid === ports.selfPid).map((w) => w.hwnd))
+                  return yield* glanceWith(mine, { withoutApp: true })
+                }
+                return yield* glanceWith(new Set())
+              }
               // Where the screen stream is before the chat is left out: the capture takes a frame
               // from after that, which shows what's under the chat, instead of grabbing a new one.
               const mark = screen.mark?.bind(screen)
@@ -797,7 +861,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               // Stop pressed meanwhile must not leave the chat out of the user's own captures.
               return yield* Effect.acquireUseRelease(
                 Effect.uninterruptible(Effect.option(attempt('Leaving the chat out of the capture', leaveOut).pipe(timed('leaveOut')))),
-                (left) => glanceWith(Option.isSome(left) ? new Set(left.value.hwnds) : new Set(), after ?? undefined),
+                (left) => glanceWith(Option.isSome(left) ? new Set(left.value.hwnds) : new Set(), { fresh: true, ...(after !== null ? { after } : {}) }),
                 (left) => Effect.sync(() => Option.isSome(left) && left.value.restore())
               )
             }).pipe(Effect.orElseSucceed(() => null)),

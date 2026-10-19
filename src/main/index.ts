@@ -11,7 +11,7 @@ import { Attachments } from './services/Attachments'
 import { Browser } from './services/Browser'
 import { Broadcaster, Chat } from './services/Chat'
 import { Computer } from './services/Computer'
-import { electronChatWindows, electronOverlay, electronScreen, macPermissions } from './desktop'
+import { electronChatWindows, electronOverlay, electronScreen, macHasPermissions, macPermissions, macScreen } from './desktop'
 import { macDriver } from './macHelper'
 import { windowsDriver } from './winHelper'
 import { Db } from './services/Db'
@@ -62,6 +62,7 @@ const makeRuntime = () => {
   const settings = SettingsStore.layer(cipher).pipe(Layer.provide(paths))
   const base = Layer.mergeAll(db, settings, paths)
   const mac = process.platform === 'darwin'
+  const overlay = electronOverlay(headless)
   const computer = Computer.layer({
     driver:
       process.platform === 'win32'
@@ -73,9 +74,9 @@ const makeRuntime = () => {
             })
           : null,
     os: mac ? 'darwin' : 'win32',
-    ...(mac ? { permissions: macPermissions } : {}),
-    screen: electronScreen,
-    overlay: electronOverlay(headless),
+    ...(mac ? { permissions: macPermissions, hasPermissions: macHasPermissions } : {}),
+    screen: mac ? macScreen(overlay) : electronScreen,
+    overlay,
     chatWindows: electronChatWindows(headless),
     selfPid: process.pid
   })

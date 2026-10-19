@@ -8,12 +8,15 @@ import type { ToolDefinition } from './services/OpenRouter'
 /** Desktop work takes more steps than browsing: every click is its own round trip. */
 export const MAX_COMPUTER_STEPS = 60
 
-/** What the model is told about computer use, for the system it runs on. */
-export const computerInstructions = (os: DesktopOs, opts: { borrowPointer: boolean } = { borrowPointer: true }) => `Computer mode is on: you can see and use the user's computer (the primary display) with the computer_* tools, and the user expects you to. They watch a sketched cursor make each move; it isn't in your screenshots.${os === 'win32' ? " The user's own mouse pointer can be; it isn't yours, so pay it no attention." : ''}
+/**
+ * What the model is told about computer use, for the system it runs on. `watch`: whether this run
+ * can tell when the screen is ready (see Computer.canWatch); Windows always can.
+ */
+export const computerInstructions = (os: DesktopOs, opts: { borrowPointer: boolean; watch?: boolean } = { borrowPointer: true }) => `Computer mode is on: you can see and use the user's computer (the primary display) with the computer_* tools, and the user expects you to. They watch a sketched cursor make each move; it isn't in your screenshots.${os === 'win32' ? " The user's own mouse pointer can be; it isn't yours, so pay it no attention." : ''}
 - Your pointer is your own: clicks and scrolls go straight to the app under the point, and the user's mouse stays theirs (they may be using it while you work). ${opts.borrowPointer ? "Drags are the exception: apps only follow a drag from the real mouse, so computer_drag borrows the user's pointer for under a second and puts it back." : "Drags are delivered the same way, and many apps ignore them; if a drag changes nothing, find another way (menus, shortcuts, typing a value) or ask the user to drag."} Some apps ignore clicks delivered this way, games especially. If a click changes nothing in the next screenshot, don't click again: use the keyboard (Tab, arrow keys, Enter, Escape, the app's shortcuts). Keys and typing go to the app you last clicked in, which comes to the front first.
 - Do the work yourself, start to finish, in this reply. When the user gives a task, carry it out with the cursor. When they ask how to do something on their computer ("how do I change the camera in Brawlhalla?"), go there yourself: open the app, click through the menus, and stop at the setting with it marked, then explain the path. Don't describe steps you could take, and don't stop to ask whether to go on; only ask when the request is unclear or the next step is hard to undo. If they asked for a particular value, set it.
 - The user's message comes with the screen as it is now, so start working from it. If it has no screenshot it says why, and you still don't start with computer_screenshot: your first action's result includes a screenshot, taken after this chat minimises. Start with computer_open_app or computer_focus_window if the app you need is in the window list or installed; only otherwise call computer_screenshot.
-- Every action returns a screenshot and the list of windows, taken once the screen has stopped changing: that is the screen after the action, so don't call computer_screenshot to check it. When something needs time to finish (an app starting, a page or file loading, a render), call computer_wait: ${os === 'darwin' ? "on this Mac it can't tell when the screen is ready and waits the whole time, so give about as long as it should take" : 'give the longest it could take, since it returns as soon as the screen is ready, so a long wait costs nothing'}. Call computer_screenshot only when the screen may have changed on its own since the last one (a video playing). Give coordinates in screenshot pixels, aimed at the centre of what you mean.
+- Every action returns a screenshot and the list of windows, taken once the screen has stopped changing: that is the screen after the action, so don't call computer_screenshot to check it. When something needs time to finish (an app starting, a page or file loading, a render), call computer_wait: ${os === 'darwin' && !opts.watch ? "on this Mac it can't tell when the screen is ready and waits the whole time, so give about as long as it should take" : 'give the longest it could take, since it returns as soon as the screen is ready, so a long wait costs nothing'}. Call computer_screenshot only when the screen may have changed on its own since the last one (a video playing). Give coordinates in screenshot pixels, aimed at the centre of what you mean.
 - Work from the screen first. Most tasks in an app you can see come down to looking and doing: check what's there, find the panel, list, button or item you need, and use it, checking each step's screenshot. For example, to put a transition between two clips in a video editor: see whether the clips are already on the timeline (if not, bring them in from the media library), find the transitions list on screen, and drag the one asked for onto the cut. Use computer_zoom to read small labels and icons rather than guessing.
 - Look things up (browser_search, then browser_read one or two good sources, like the official manual or a wiki) only when the screen isn't enough: you've looked around (menus, tabs, panels, scrolling) and can't find what you need, the task depends on knowledge the screen won't give you (exact values to tune, a technique, an effect you'd have to build), or something you tried didn't work and you don't know why. Never research before you've looked at the screen, and don't research what a saved tip already covers. A search results page alone is not research.
 - Prefer keyboard shortcuts and computer_open_app / computer_focus_window to hunting with the mouse when you know them.
@@ -49,19 +52,19 @@ const MENU_TOOL = tool(
   obj({ path: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 6 } }, ['path'])
 )
 
-/** Ends early where the screen can be watched (Windows' stream); a Mac waits the whole time. */
-const waitTool = (os: DesktopOs) =>
+/** Ends early where the screen can be watched (a stream is up); otherwise it waits the whole time. */
+const waitTool = (os: DesktopOs, watch: boolean) =>
   tool(
     'computer_wait',
-    os === 'darwin'
+    os === 'darwin' && !watch
       ? 'Wait for something on screen to finish (an app starting, a page loading, a render), then see the screen. On this Mac it waits the whole time, so give about as long as it should take.'
       : 'Wait for something on screen to finish (an app starting, a page loading, a render), then see the screen. `seconds` is the most it waits: it returns as soon as the screen has changed and settled (or after 2 seconds of nothing changing), so a generous maximum costs nothing.',
     obj({ seconds: { type: 'number', description: 'The most to wait, up to 30' } }, ['seconds'])
   )
 
-/** The computer tools for the system it runs on. */
-export const computerTools = (os: DesktopOs): ToolDefinition[] =>
-  os === 'darwin' ? [...COMPUTER_TOOLS.map((t) => (t.function.name === 'computer_wait' ? waitTool(os) : t)), MENU_TOOL] : COMPUTER_TOOLS
+/** The computer tools for the system it runs on; `watch` as for computerInstructions. */
+export const computerTools = (os: DesktopOs, opts: { watch?: boolean } = {}): ToolDefinition[] =>
+  os === 'darwin' ? [...COMPUTER_TOOLS.map((t) => (t.function.name === 'computer_wait' ? waitTool(os, opts.watch === true) : t)), MENU_TOOL] : COMPUTER_TOOLS
 
 export const COMPUTER_TOOLS: ToolDefinition[] = [
   tool(
@@ -133,7 +136,7 @@ export const COMPUTER_TOOLS: ToolDefinition[] = [
     )
   ),
   tool('computer_clear_annotations', 'Remove the marks you drew.', obj({})),
-  waitTool('win32'),
+  waitTool('win32', true),
   tool('computer_save_tip', 'Remember something non-obvious about an app for next time (where a setting lives, a shortcut, a gotcha).', obj({ app: { type: 'string', description: 'The app\'s name as it appears in its window title, e.g. "DaVinci Resolve"' }, tip: { type: 'string' } }, ['app', 'tip']))
 ]
 
@@ -188,8 +191,11 @@ const waitedText = (took: string, end: WaitEnd) =>
         ? `Waited ${took}, the most you gave: the screen was still changing when this screenshot was taken (something loading or moving). Wait again if you need it finished.`
         : `Waited ${took}, the whole time: the screen can't be watched for changes here.`
 
-/** Runs one computer tool call. Refusals and take-overs end the run (`halt`); other failures go back to the model. */
-export const runComputerTool = (computer: ComputerApi, name: string, rawArgs: string): Effect.Effect<ToolOutcome> => {
+/**
+ * Runs one computer tool call. Refusals and take-overs end the run (`halt`); other failures go back
+ * to the model. `watch: false` holds computer_wait to the whole time, as the run was told.
+ */
+export const runComputerTool = (computer: ComputerApi, name: string, rawArgs: string, opts: { watch?: boolean } = {}): Effect.Effect<ToolOutcome> => {
   let args: Record<string, any> = {}
   try {
     args = rawArgs.trim() ? JSON.parse(rawArgs) : {}
@@ -265,7 +271,7 @@ export const runComputerTool = (computer: ComputerApi, name: string, rawArgs: st
         return Effect.as(computer.clearMarks, { text: 'Cleared the marks.', step: { tool: name, label: 'Cleared the marks', ok: true } })
       case 'computer_wait': {
         const seconds = Math.min(30, Math.max(0.5, Number(args.seconds) || 1))
-        return Effect.map(computer.wait(seconds * 1000), ({ look, ms, end }) => {
+        return Effect.map(computer.wait(seconds * 1000, opts.watch === false ? { watch: false } : undefined), ({ look, ms, end }) => {
           const took = `${Number((ms / 1000).toFixed(1))}s`
           return { text: `${waitedText(took, end)}\n${describeLook(look)}`, image: look.image, step: { tool: name, label: `Waited ${took}`, ok: true } }
         })

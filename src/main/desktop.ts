@@ -1,8 +1,11 @@
 // The Electron half of computer use: capturing the screen, the see-through overlay that draws
 // the sketch cursor and marks, and moving the chat window out of the way.
+import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { BrowserWindow, desktopCapturer, ipcMain, nativeImage, screen, systemPreferences } from 'electron'
+import { BrowserWindow, app, desktopCapturer, ipcMain, nativeImage, screen, systemPreferences } from 'electron'
 import type { OverlayCommand, OverlayEvent, Rect } from '@shared/computer'
+import { macCaptureScreen } from './macCapture'
 
 export interface DisplayInfo {
   /** The primary display in physical pixels. */
@@ -23,12 +26,14 @@ export interface ScreenPort {
    * `ms` says how long its parts took (grabbing the frame, painting covers, encoding), for timing.
    * `fresh` asks for a frame grabbed after the call starts, never one already in hand (the stream's);
    * with `after` (from `mark`), a frame the stream got after that mark will do instead.
+   * `withoutApp` needs this app's windows out of the picture (see `keepsAppOut`): it fails rather
+   * than capture them.
    */
   capture(
     size: { w: number; h: number },
     cover: Rect[],
     crop?: Rect,
-    opts?: { fresh?: boolean; after?: number }
+    opts?: { fresh?: boolean; after?: number; withoutApp?: boolean }
   ): Promise<{ dataUrl: string; w: number; h: number; ms?: Record<string, number> }>
   /**
    * A small grey thumbnail of the screen as it is now, cheap enough to take every few dozen
@@ -36,6 +41,26 @@ export interface ScreenPort {
    * Null while it can't be had. Without it, actions wait fixed times for the screen to settle.
    */
   probe?(): Promise<Uint8Array | null>
+  /**
+   * Where the screen reports its own changes (macOS, ScreenCaptureKit): how many times it has
+   * changed so far, and how long it has been still. Null while the stream isn't up. A port has
+   * `probe` or this, not both.
+   */
+  changes?(): Promise<ScreenChanges | null>
+  /** Whether the stream is up now (macOS), so `changes` answers and `keepsAppOut` holds. */
+  live?(): boolean
+  /**
+   * Whether the stream can come up: it opens it, and resolves once it is up (true) or can't be
+   * (false: no helper, no permission, it keeps failing), waiting a little at most (macOS).
+   */
+  watchable?(): Promise<boolean>
+  /** This app's windows (the chat, the overlay) are never in the stream's frames (macOS). */
+  keepsAppOut?(): boolean
+  /**
+   * Keeps the overlay out of its captures itself (hiding it only when it must), so the caller
+   * doesn't wrap them in OverlayPort.hiddenWhile (macOS).
+   */
+  keepsOverlayOut?: boolean
   /**
    * A mark for now, to ask `capture` with `after` for a stream frame that came in after it (and
    * after whatever the caller changes next has reached the screen). Null while the stream isn't up.
@@ -47,12 +72,21 @@ export interface ScreenPort {
   release?(): void
 }
 
+/** How the screen has changed, as a stream that reports it says (see ScreenPort.changes). */
+export interface ScreenChanges {
+  /** Changes so far: two answers with the same count mean nothing changed in between. */
+  count: number
+  /** How long since the last change. */
+  stillMs: number
+}
+
 export interface OverlayPort {
   send(event: OverlayEvent): void
   onCommand(handler: (command: OverlayCommand) => void): void
   /**
    * Runs a screen capture with the overlay out of the picture. Windows leaves it out of captures
-   * by itself; recent macOS versions capture it anyway, so there it's hidden for that moment.
+   * by itself; recent macOS versions capture it anyway, so there it's hidden for that moment
+   * (only without the stream, which leaves it out: see ScreenPort.keepsOverlayOut).
    */
   hiddenWhile<A>(capture: () => Promise<A>): Promise<A>
 }
@@ -67,7 +101,7 @@ export interface ChatWindowsPort {
    * after capturing, so the user can still screenshot or share the chat. Resolves once the
    * desktop has had time to drop them, with their window handles; capture a fresh frame then
    * (see ScreenPort.capture). Absent on macOS, whose capture doesn't reliably honour content
-   * protection.
+   * protection; its stream leaves the app out instead (ScreenPort.keepsAppOut).
    */
   leaveOut?(): Promise<{ hwnds: number[]; restore(): void }>
 }
@@ -121,8 +155,8 @@ const captureSources: ScreenPort['capture'] = async (size, cover, crop) => {
 }
 
 /**
- * macOS captures fresh every time: the overlay is in its captures and has to be hidden for each
- * one (see hiddenWhile), and its spinner would keep a stream from ever looking settled.
+ * macOS without the capture helper (see macScreen) captures fresh every time: the overlay is in
+ * its captures and has to be hidden for each one (see hiddenWhile).
  */
 const sourcesScreen: ScreenPort = { display, cursor, capture: captureSources }
 
@@ -236,6 +270,34 @@ const streamedScreen = (): ScreenPort => {
 }
 
 export const electronScreen: ScreenPort = process.platform === 'win32' && process.env.CHAT_V2_CAPTURE !== 'sources' ? streamedScreen() : sourcesScreen
+
+/**
+ * The capture helper: built into native/mac-capture/out by scripts/build-mac-capture.ts in
+ * development, shipped in the app's Resources (electron-builder.yml).
+ */
+const macCaptureHelper = () =>
+  app.isPackaged ? join(process.resourcesPath, 'chat-v2-capture') : join(app.getAppPath(), 'native/mac-capture/out/chat-v2-capture')
+
+/**
+ * macOS: a ScreenCaptureKit stream kept by the capture helper (see macCapture.ts), opened and
+ * closed as the Windows stream is. Without the helper it captures with getSources, hiding the
+ * overlay for each capture. CHAT_V2_CAPTURE=sources turns the stream off, to compare.
+ */
+export const macScreen = (overlay: OverlayPort): ScreenPort => {
+  if (process.env.CHAT_V2_CAPTURE === 'sources') return sourcesScreen
+  const path = macCaptureHelper()
+  return macCaptureScreen({
+    // Spawned by the app, so macOS counts its screen capture as the app's (one permission, one prompt).
+    spawnHelper: existsSync(path) ? () => spawn(path, [], { stdio: 'pipe' }) : null,
+    display,
+    displayId: () => screen.getPrimaryDisplay().id,
+    cursor,
+    fallback: captureSources,
+    hiddenWhile: (capture) => overlay.hiddenWhile(capture),
+    pid: process.pid,
+    warn: (m) => console.warn(m)
+  })
+}
 
 /** Grey with diagonal stripes, so the model can tell a hidden area from an empty one. BGRA. */
 const paintHidden = (bitmap: Buffer, w: number, h: number, r: Rect) => {
@@ -394,6 +456,9 @@ export const electronOverlay = (headless: boolean): OverlayPort => {
     }
   }
 }
+
+/** Whether macOS already lets the app work other apps and record the screen; asks for nothing. */
+export const macHasPermissions = () => systemPreferences.isTrustedAccessibilityClient(false) && systemPreferences.getMediaAccessStatus('screen') === 'granted'
 
 /**
  * macOS asks before an app may watch the screen or send input to other apps. Says what's still

@@ -39,6 +39,11 @@ mac:
   # audio-input entitlement.
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
+  # The screen capture helper (scripts/build-mac-capture.ts), outside the asar so it can run.
+  # Already universal, so the universal build keeps it as it is; signed with the app.
+  extraResources:
+    - from: native/mac-capture/out/chat-v2-capture
+      to: chat-v2-capture
   extendInfo:
     NSMicrophoneUsageDescription: chat-v2 uses the microphone for voice input.
     # Computer use types through System Events when it can't post the characters itself.

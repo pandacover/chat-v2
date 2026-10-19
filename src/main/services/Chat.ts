@@ -156,9 +156,14 @@ export class Chat extends Context.Service<
       })
 
       /** Builds the OpenRouter request from the lineage that ends at `parentId`. */
+      /**
+       * The request for a reply, and `watch`: whether its computer_wait can end once the screen is
+       * ready (Computer.canWatch), settled once here, before the model is told.
+       */
       const buildRequest = Effect.fn('Chat.buildRequest')(function* (assistant: Message, prefill: string | null) {
         const settings = yield* settingsStore.get
         const session = yield* db.require('Session', (d) => d.getSession(assistant.sessionId))
+        const watch = usesComputer(session) ? yield* computer.canWatch : false
         const history = yield* db.use((d) => d.lineage(assistant.parentId!))
         const stored = yield* db.use((d) => d.storedAttachmentsFor(history.map((m) => m.id)))
         const boards = yield* db.use((d) => d.boardsFor(history.map((m) => m.id)))
@@ -183,7 +188,7 @@ export class Chat extends Context.Service<
           settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : '',
           settings.artifactsEnabled ? MOODBOARD_INSTRUCTIONS : '',
           // Computer use brings the browser along, for looking up how unfamiliar apps work.
-          usesComputer(session) ? computerInstructions(process.platform === 'darwin' ? 'darwin' : 'win32', { borrowPointer: settings.computerBorrowPointer }) : '',
+          usesComputer(session) ? computerInstructions(process.platform === 'darwin' ? 'darwin' : 'win32', { borrowPointer: settings.computerBorrowPointer, watch }) : '',
           session.browserEnabled || usesComputer(session) ? BROWSER_INSTRUCTIONS : '',
           profileBlock(facts)
         ]
@@ -205,13 +210,14 @@ export class Chat extends Context.Service<
         // Assistant prefill: the model continues the partial reply instead of starting over.
         // Some providers reject a prefill ending in whitespace.
         if (prefill) messages.push({ role: 'assistant', content: summarizeSteps(prefill).trimEnd() })
-        return {
+        const request = {
           model: assistant.model ?? session.model ?? settings.defaultModel,
           messages,
           temperature: settings.temperature,
           ...(hasPdf ? { plugins: [{ id: 'file-parser', pdf: { engine: settings.pdfEngine } }] } : {}),
-          ...(usesComputer(session) ? { tools: [...computerTools(process.platform === 'darwin' ? 'darwin' : 'win32'), ...BROWSER_TOOLS] } : session.browserEnabled ? { tools: BROWSER_TOOLS } : {})
+          ...(usesComputer(session) ? { tools: [...computerTools(process.platform === 'darwin' ? 'darwin' : 'win32', { watch }), ...BROWSER_TOOLS] } : session.browserEnabled ? { tools: BROWSER_TOOLS } : {})
         } satisfies ChatRequest as ChatRequest
+        return { request, watch }
       })
 
       const finish = (
@@ -302,7 +308,7 @@ export class Chat extends Context.Service<
         }
 
         return Effect.gen(function* () {
-          const request = yield* buildRequest(assistant, prefill)
+          const { request, watch } = yield* buildRequest(assistant, prefill)
           const chatModel = request.model
           replyModel = chatModel
           const settings = yield* settingsStore.get.pipe(Effect.orElseSucceed(() => null))
@@ -423,7 +429,7 @@ export class Chat extends Context.Service<
               if (!desktop) usedBrowser = true
               if (!desktop && computerRun) yield* computer.hint(browserHint(call.function.name, call.function.arguments))
               const outcome = desktop
-                ? yield* runComputerTool(computer, call.function.name, call.function.arguments).pipe(timer.action(step, call.function.name))
+                ? yield* runComputerTool(computer, call.function.name, call.function.arguments, { watch }).pipe(timer.action(step, call.function.name))
                 : yield* runTool(browser, refs, call.function.name, call.function.arguments).pipe(timer.action(step, call.function.name))
               yield* emit(stepLine(outcome.step))
               request.messages.push({ role: 'tool', tool_call_id: call.id, content: outcome.text })

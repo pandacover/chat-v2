@@ -5,3 +5,4 @@ dist
 .DS_Store
 out-test
 dist-test*
+native/mac-capture/out
