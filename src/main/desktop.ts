@@ -70,6 +70,8 @@ export interface ScreenPort {
   prepare?(): void
   /** Done capturing for now. */
   release?(): void
+  /** Quitting: done capturing for good. Ends what it started (a stream, a helper process) and starts nothing again. */
+  close?(): void
 }
 
 /** How the screen has changed, as a stream that reports it says (see ScreenPort.changes). */
@@ -162,6 +164,11 @@ const sourcesScreen: ScreenPort = { display, cursor, capture: captureSources }
 
 /** With nothing captured for this long, the stream closes. */
 const STREAM_IDLE_MS = 30_000
+/**
+ * Opened ahead of a reply (computer mode starting, the user writing), it closes sooner: the
+ * reply's glance renews it, and every reply in a computer chat closes it when it ends.
+ */
+const PREWARM_IDLE_MS = 10_000
 
 /**
  * Windows: a stream of the primary display kept open in a hidden page (renderer/capture.html)
@@ -170,7 +177,8 @@ const STREAM_IDLE_MS = 30_000
  * changing. The overlay is left out of the stream as it is out of every capture
  * (WDA_EXCLUDEFROMCAPTURE). Until the stream is up, or if it fails, captures use getSources.
  * It opens when a chat with computer use is open or being written in (see Computer.prewarm), and
- * closes after STREAM_IDLE_MS without use. CHAT_V2_CAPTURE=sources turns the stream off, to compare.
+ * closes when a reply ends (Computer.replyEnded, Computer.end), or after STREAM_IDLE_MS without use
+ * (PREWARM_IDLE_MS if it was only opened ahead). CHAT_V2_CAPTURE=sources turns the stream off, to compare.
  */
 const streamedScreen = (): ScreenPort => {
   let win: BrowserWindow | null = null
@@ -181,6 +189,8 @@ const streamedScreen = (): ScreenPort => {
   let idle: ReturnType<typeof setTimeout> | null = null
   /** Counts closes, so an open that finishes after a close throws its stream away. */
   let generation = 0
+  /** Quitting (`close` on the port): the stream never opens again. */
+  let ended = false
 
   const displayKey = () => {
     const d = screen.getPrimaryDisplay()
@@ -197,10 +207,14 @@ const streamedScreen = (): ScreenPort => {
   }
   const run = <A>(code: string): Promise<A | null> =>
     win && !win.isDestroyed() ? (win.webContents.executeJavaScript(code) as Promise<A>).catch(() => null) : Promise.resolve(null)
-  /** Whether the stream is up and still shows the primary display; if not, starts opening it. */
-  const live = () => {
+  /**
+   * Whether the stream is up and still shows the primary display; if not, starts opening it. It
+   * closes after `idleMs` without another call.
+   */
+  const live = (idleMs = STREAM_IDLE_MS) => {
+    if (ended) return false
     if (idle) clearTimeout(idle)
-    idle = setTimeout(close, STREAM_IDLE_MS)
+    idle = setTimeout(close, idleMs)
     if (streaming !== null && streaming !== displayKey()) close()
     if (streaming !== null) return true
     // A stream that keeps failing stays off; getSources still works.
@@ -264,8 +278,12 @@ const streamedScreen = (): ScreenPort => {
       const sig = await run<number[]>('capture.probe()')
       return sig ? Uint8Array.from(sig) : null
     },
-    prepare: () => void live(),
-    release: close
+    prepare: () => void live(PREWARM_IDLE_MS),
+    release: close,
+    close: () => {
+      ended = true
+      close()
+    }
   }
 }
 
@@ -318,8 +336,22 @@ const paintHidden = (bitmap: Buffer, w: number, h: number, r: Rect) => {
 }
 
 /**
+ * How often the overlay's cursor learns where the pointer is, by how long the pointer has been
+ * still: about once a frame while it moves, then less and less often. The cursor sits beside the
+ * pointer the whole time computer mode is on, so most polls find it where it was; the first move
+ * after a long rest takes up to the slowest wait to show.
+ */
+const POINTER_POLLS: ReadonlyArray<{ stillFor: number; every: number }> = [
+  { stillFor: 0, every: 16 },
+  { stillFor: 500, every: 100 },
+  { stillFor: 3000, every: 250 }
+]
+const pollEvery = (stillMs: number) => POINTER_POLLS.findLast((p) => stillMs >= p.stillFor)!.every
+
+/**
  * A transparent window over the primary display that never takes the mouse (except over its
- * Stop pill) and is left out of screen captures, so the model never sees its own drawing.
+ * Stop pill) and is left out of screen captures, so the model never sees its own drawing. It is
+ * up while computer mode is on, a reply has control, or marks stay on screen.
  */
 export const electronOverlay = (headless: boolean): OverlayPort => {
   let win: BrowserWindow | null = null
@@ -327,28 +359,37 @@ export const electronOverlay = (headless: boolean): OverlayPort => {
   let queue: OverlayEvent[] = []
   let handler: (command: OverlayCommand) => void = () => {}
   let mode: OverlayEvent = { type: 'mode', follow: false }
-  let poll: ReturnType<typeof setInterval> | null = null
+  let poll: ReturnType<typeof setTimeout> | null = null
   let lastPointer = ''
   let forwarding = false
 
   // The overlay can't see the mouse (it lets every event through), so its cursor learns where
-  // the user's pointer is from here, about once a frame, and only when it has moved.
+  // the user's pointer is from here, only while it follows the pointer (it says so with
+  // overlay:follow), and only when the pointer has moved: about once a frame while it moves,
+  // backing off the longer it stays still (POINTER_POLLS).
   const followPointer = (w: BrowserWindow) => {
-    if (poll) clearInterval(poll)
+    stopPolling()
     lastPointer = ''
-    poll = setInterval(() => {
+    let movedAt = performance.now()
+    const tick = () => {
+      poll = null
       if (w.isDestroyed()) return
       const b = screen.getPrimaryDisplay().bounds
       const p = screen.getCursorScreenPoint()
       const on = p.x >= b.x && p.y >= b.y && p.x < b.x + b.width && p.y < b.y + b.height
       const key = on ? `${p.x},${p.y}` : 'off'
-      if (key === lastPointer) return
-      lastPointer = key
-      w.webContents.send('overlay:event', on ? { type: 'pointer', x: p.x - b.x, y: p.y - b.y } : { type: 'pointer', x: null, y: null })
-    }, 16)
+      const t = performance.now()
+      if (key !== lastPointer) {
+        lastPointer = key
+        movedAt = t
+        w.webContents.send('overlay:event', on ? { type: 'pointer', x: p.x - b.x, y: p.y - b.y } : { type: 'pointer', x: null, y: null })
+      }
+      poll = setTimeout(tick, pollEvery(t - movedAt))
+    }
+    tick()
   }
   const stopPolling = () => {
-    if (poll) clearInterval(poll)
+    if (poll) clearTimeout(poll)
     poll = null
   }
 
@@ -401,13 +442,17 @@ export const electronOverlay = (headless: boolean): OverlayPort => {
       w.webContents.send('overlay:event', { type: 'frame', dx: got.x - d.bounds.x, dy: got.y - d.bounds.y, w: d.bounds.width, h: d.bounds.height } satisfies OverlayEvent)
       w.webContents.send('overlay:event', mode)
       for (const e of queue.splice(0)) w.webContents.send('overlay:event', e)
-      followPointer(w)
     })
     win = w
   }
 
   ipcMain.on('overlay:interactive', (event, on: unknown) => {
     if (win && event.sender === win.webContents) win.setIgnoreMouseEvents(on !== true, forwarding ? { forward: true } : undefined)
+  })
+  ipcMain.on('overlay:follow', (event, on: unknown) => {
+    if (!win || event.sender !== win.webContents) return
+    if (on === true) followPointer(win)
+    else stopPolling()
   })
   ipcMain.on('overlay:command', (event, command: unknown) => {
     if (win && event.sender === win.webContents && (command === 'stop' || command === 'show-chat' || command === 'clear')) handler(command)

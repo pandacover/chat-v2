@@ -67,6 +67,8 @@ export interface FakeDesktop {
   canStream: boolean
   /** Times the stream was closed (a reply ended, computer mode went off). */
   released: number
+  /** Times the screen was closed for good (quitting). */
+  closed: number
 }
 
 /** A probe thumbnail of a screen of one grey level. */
@@ -100,6 +102,7 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'da
     changeLooks: 0,
     canStream: true,
     released: 0,
+    closed: 0,
     ports: null as unknown as ComputerPorts
   }
   const minimised: WindowInfo[] = []
@@ -158,7 +161,8 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'da
             keepsAppOut: () => d.streamUp,
             keepsOverlayOut: true,
             prepare: () => void d.prepared++,
-            release: () => void d.released++
+            release: () => void d.released++,
+            close: () => void d.closed++
           }
         : {}),
       // Without a stream a Mac waits fixed times for the screen.
@@ -170,7 +174,9 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'da
               return d.look()
             },
             mark: async () => d.markTime,
-            prepare: () => void d.prepared++
+            prepare: () => void d.prepared++,
+            release: () => void d.released++,
+            close: () => void d.closed++
           }
         : {})
     },

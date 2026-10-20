@@ -78,7 +78,9 @@ const api = {
   /** Opens the stream of a screen at its physical size; true once the first frame is in. */
   start: async (sourceId: string, w: number, h: number): Promise<boolean> => {
     stop()
-    const video = { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: sourceId, minWidth: w, maxWidth: w, minHeight: h, maxHeight: h, maxFrameRate: 30 } }
+    // 15 frames a second is plenty: the main process samples the stream every 80 ms at most while
+    // it waits for the screen to settle, and each frame costs a full-size copy of the screen.
+    const video = { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: sourceId, minWidth: w, maxWidth: w, minHeight: h, maxHeight: h, maxFrameRate: 15 } }
     stream = await navigator.mediaDevices.getUserMedia({ audio: false, video } as unknown as MediaStreamConstraints)
     const track = stream.getVideoTracks()[0]!
     track.addEventListener('ended', stop)
