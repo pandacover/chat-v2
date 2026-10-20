@@ -254,448 +254,450 @@
 {/snippet}
 
 <section class="absolute inset-0 z-20 flex flex-col bg-side" aria-label="Settings" in:fly={{ y: 8, duration: 220 }} out:fade={{ duration: 120 }}>
-  <header class="flex h-12 shrink-0 items-center gap-2 pr-4 {app.sidebarOpen ? 'pl-3' : 'pl-12'}">
-    <button class="flex items-center gap-1 rounded-md py-1 pr-2.5 pl-1.5 text-[13px] text-fg-2 hover:bg-hover hover:text-fg" onclick={close}>
-      <Icon name="chevronLeft" size={15} /> Back to chat
-    </button>
-    <span class="ml-auto text-[12px] text-muted" aria-live="polite">
-      {#if status === 'saving'}<span in:fade>Saving…</span>{:else if status === 'saved'}<span class="flex items-center gap-1" in:fade><Icon name="check" size={12} /> Saved</span>{/if}
-    </span>
-  </header>
-
   <div
-    bind:this={scroller}
-    {onscroll}
-    class="min-h-0 flex-1 overflow-y-auto border-t border-line bg-bg {app.sidebarOpen ? 'rounded-tl-xl border-l' : ''}"
+    class="flex min-h-0 flex-1 flex-col bg-bg transition-[margin] duration-200 {app.sidebarOpen
+      ? 'mt-3.5 rounded-tl-xl border-t border-l border-line'
+      : ''}"
   >
-    <div class="mx-auto flex max-w-[860px] gap-12 px-8 pt-6 pb-24">
-      <nav class="sticky top-6 hidden h-fit w-40 shrink-0 flex-col gap-0.5 md:flex" aria-label="Settings sections">
-        <h1 class="mb-4 px-2.5 font-serif text-[28px] leading-none">Settings</h1>
-        {#each sections as s (s.id)}
-          <button
-            class="rounded-md px-2.5 py-1.5 text-left text-[13px] transition-colors {active === s.id ? 'bg-hover text-fg' : 'text-fg-2 hover:text-fg'}"
-            onclick={() => jump(s.id)}
-          >
-            {s.label}
-          </button>
-        {/each}
-      </nav>
+    <header class="flex h-12 shrink-0 items-center gap-2 pr-4 {app.sidebarOpen ? 'pl-3' : 'pl-20'}">
+      <button class="flex items-center gap-1 rounded-md py-1 pr-2.5 pl-1.5 text-[13px] text-fg-2 hover:bg-hover hover:text-fg" onclick={close}>
+        <Icon name="chevronLeft" size={15} /> Back to chat
+      </button>
+      <span class="ml-auto text-[12px] text-muted" aria-live="polite">
+        {#if status === 'saving'}<span in:fade>Saving…</span>{:else if status === 'saved'}<span class="flex items-center gap-1" in:fade><Icon name="check" size={12} /> Saved</span>{/if}
+      </span>
+    </header>
 
-      <div class="min-w-0 flex-1 text-[13px]">
-        <section id="settings-keys" class="scroll-mt-6 pb-10">
-          <h2 class="font-serif text-[20px]">API keys</h2>
-          <p class="mt-1 text-muted">Encrypted with your operating system's keychain and stored on this device only.</p>
-          <div class="mt-5 space-y-5">
-            {#each keyRows as k (k.id)}
-              <div>
-                <div class="mb-1.5 flex items-baseline gap-2">
-                  <span class="font-medium text-fg">{k.label}</span>
-                  <span class="text-muted">{k.use}</span>
-                  <a href={k.link} target="_blank" rel="noreferrer" class="ml-auto inline-flex items-center gap-1 text-[12px] text-muted hover:text-fg">
-                    Get a key <Icon name="external" size={11} />
-                  </a>
-                </div>
-                <div class="flex gap-2">
-                  <input
-                    type="password"
-                    bind:value={keys[k.id]}
-                    placeholder={k.has ? 'Saved. Paste a new key to replace it' : k.hint}
-                    class={field}
-                    onkeydown={(e) => e.key === 'Enter' && saveKey(k.id)}
-                  />
-                  {#if keys[k.id].trim()}
-                    <button class="shrink-0 rounded-md bg-fg px-3.5 font-medium text-bg" in:fade={{ duration: 120 }} onclick={() => saveKey(k.id)}>Save</button>
-                  {/if}
-                </div>
-                {#if k.has}
-                  <div class="mt-1.5 flex items-center gap-3 text-[12px]">
-                    <span class="flex items-center gap-1 text-fg-2"><Icon name="check" size={12} /> Key saved</span>
-                    <button class="text-muted hover:text-danger" onclick={() => clearKey(k.id)}>Remove</button>
-                  </div>
-                {/if}
-              </div>
-            {/each}
-          </div>
-        </section>
-
-        <section id="settings-model" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
-          <h2 class="font-serif text-[20px]">Model</h2>
-          <p class="mt-1 text-muted">New chats start with this model. Each chat can switch from the composer.</p>
-          <div class="mt-5 max-w-md">
-            <ModelPicker block value={form.defaultModel} onchange={(id) => (form.defaultModel = id)} />
-          </div>
-          <div class="mt-5 max-w-md">
-            <span class="mb-1.5 block font-medium text-fg">Vision model</span>
-            <ModelPicker
-              block
-              value={form.visionModel}
-              onchange={(id) => (form.visionModel = id)}
-              filter={(m) => m.inputModalities.includes('image')}
-              noneLabel="None: keep the chat's model"
-            />
-            <p class="mt-1.5 text-muted">Answers messages that include images, such as uploads or browser screenshots, when the chat's model can't see images.</p>
-          </div>
-          <div class="mt-5 max-w-md">
-            <span class="mb-1.5 block font-medium text-fg">Title model</span>
-            <ModelPicker block value={form.titleModel} onchange={(id) => (form.titleModel = id)} noneLabel="None: use the first message" />
-            <p class="mt-1.5 text-muted">
-              Names each new chat from its first message. A small model is enough.
-              {form.titleModel ? costLine(form.titleModel, 'title', 'a title') : ''}
-            </p>
-          </div>
-          <div class="mt-5 max-w-md">
-            <span class="mb-1.5 block font-medium text-fg">Sketch model</span>
-            <ModelPicker block source="image" value={form.sketchModel} onchange={(id) => (form.sketchModel = id)} />
-            <p class="mt-1.5 text-muted">Draws the pencil sketches on mood boards, one image per shot. Each sketch is drawn once and kept, so reopening a board costs nothing.</p>
-          </div>
-          <label class="mt-5 block max-w-md">
-            <span class="mb-1.5 flex justify-between"><span class="font-medium text-fg">Temperature</span><span class="text-fg-2 tabular-nums">{form.temperature.toFixed(1)}</span></span>
-            <input type="range" min="0" max="2" step="0.1" bind:value={form.temperature} class="w-full accent-[var(--fg-2)]" />
-            <span class="mt-0.5 flex justify-between text-[11.5px] text-muted"><span>Focused</span><span>Varied</span></span>
-          </label>
-        </section>
-
-        <section id="settings-instructions" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
-          <div class="flex items-baseline">
-            <h2 class="font-serif text-[20px]">System instructions</h2>
-            <button class="ml-auto inline-flex items-center gap-1 text-[12px] text-muted hover:text-fg" use:tip={app.settings!.configPath} onclick={() => window.api.settings.openConfigFile()}>
-              Open config.json <Icon name="external" size={11} />
-            </button>
-          </div>
-          <p class="mt-1 text-muted">Sent with every chat. A chat can replace them with its own from the composer.</p>
-          <textarea
-            bind:value={form.systemPrompt}
-            rows="7"
-            class="mt-4 w-full resize-y rounded-md bg-surface px-3.5 py-3 font-mono text-[12.5px] leading-relaxed shadow-[0_0_0_1px_var(--line)] outline-none focus:shadow-[0_0_0_1px_var(--muted)]"
-          ></textarea>
-          <label class="mt-5 flex cursor-pointer items-start gap-3">
+    <div bind:this={scroller} {onscroll} class="min-h-0 flex-1 overflow-y-auto">
+      <div class="mx-auto flex max-w-[860px] gap-12 px-8 pt-6 pb-24">
+        <nav class="sticky top-6 hidden h-fit w-40 shrink-0 flex-col gap-0.5 md:flex" aria-label="Settings sections">
+          <h1 class="mb-4 px-2.5 font-serif text-[28px] leading-none">Settings</h1>
+          {#each sections as s (s.id)}
             <button
-              type="button"
-              role="switch"
-              aria-checked={form.artifactsEnabled}
-              aria-label="Interactive artifacts"
-              class="relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors duration-200 {form.artifactsEnabled ? 'bg-fg' : 'bg-line'}"
-              onclick={() => (form.artifactsEnabled = !form.artifactsEnabled)}
+              class="rounded-md px-2.5 py-1.5 text-left text-[13px] transition-colors {active === s.id ? 'bg-hover text-fg' : 'text-fg-2 hover:text-fg'}"
+              onclick={() => jump(s.id)}
             >
-              <span class="absolute top-0.5 left-0.5 size-4 rounded-full bg-surface shadow transition-transform duration-200 ease-out {form.artifactsEnabled ? 'translate-x-4' : ''}"></span>
+              {s.label}
             </button>
-            <span>
-              <span class="block font-medium text-fg">Interactive artifacts</span>
-              <span class="block text-muted">The model can build small HTML apps that run in the side panel.</span>
-            </span>
-          </label>
-        </section>
+          {/each}
+        </nav>
 
-        <section id="settings-memory" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
-          <h2 class="font-serif text-[20px]">Memory</h2>
-          <p class="mt-1 max-w-[60ch] text-muted">
-            A model reads each message you send for lasting facts about you, like your name, work or how you like answers, and keeps them on this device. Each new chat starts with them. Passwords, keys and account numbers are never kept.
-          </p>
-          <div class="mt-5 max-w-md">
-            <span class="mb-1.5 block font-medium text-fg">Memory model</span>
-            <ModelPicker block value={form.memoryModel} onchange={(id) => (form.memoryModel = id)} noneLabel="None: memory off" />
-            <p class="mt-1.5 text-muted">
-              {#if form.memoryModel}
-                {costLine(form.memoryModel, 'memory', 'for each message it reads')} Messages that don't talk about you are skipped first, for free.
-              {:else}
-                Nothing is learned, and chats start without the facts below.
-              {/if}
-            </p>
-          </div>
-
-          {#if app.memory?.lastRun}
-            {@const r = app.memory.lastRun}
-            <div class="mt-5 max-w-[60ch] rounded-md bg-surface px-3 py-2.5 text-[12.5px] shadow-[0_0_0_1px_var(--line)]" aria-live="polite">
-              <div class="flex items-baseline gap-2">
-                <span class="font-medium text-fg">Last message</span>
-                <span class="min-w-0 flex-1 truncate text-muted">“{r.message}”</span>
-                <span class="shrink-0 text-[11.5px] text-muted">{when(r.at)}</span>
-              </div>
-              <div class="mt-1 {r.outcome === 'error' || r.outcome === 'unreadable' ? 'text-danger' : 'text-fg-2'}">{OUTCOMES[r.outcome](r)}</div>
-              {#if r.detail}<div class="mt-0.5 font-mono text-[11.5px] break-words text-muted">{r.detail}</div>{/if}
-              {#each r.added as fact, j (j)}<div class="text-fg-2"><span class="text-muted">+</span> {fact}</div>{/each}
-              {#each r.removed as fact, j (j)}<div class="text-muted line-through decoration-muted/60">{fact}</div>{/each}
-              {#if r.dropped.length > 0}
-                <div class="mt-1 text-muted">Not kept, because they name things your message didn't mention: {r.dropped.join(' ')}</div>
-              {/if}
-            </div>
-          {/if}
-
-          <div class="mt-6">
-            <div class="mb-1.5 flex items-baseline gap-2">
-              <span class="font-medium text-fg">What chat-v2 knows about you</span>
-              {#if app.memory && app.memory.facts.length > 0}
-                <span class="text-muted tabular-nums">{app.memory.facts.length}</span>
-                <span class="ml-auto"></span>
-                {#if confirmForget}
-                  <span class="text-fg-2" in:fade={{ duration: 120 }}>Forget all of it?</span>
-                  <button class="text-[12px] text-muted hover:text-fg" onclick={() => (confirmForget = false)}>Keep</button>
-                  <button class="text-[12px] font-medium text-danger" onclick={forget}>Forget</button>
-                {:else}
-                  <button class="text-[12px] text-muted hover:text-danger" onclick={() => (confirmForget = true)}>Forget everything</button>
-                {/if}
-              {/if}
-            </div>
-            <ul class="divide-y divide-line overflow-hidden rounded-md bg-surface shadow-[0_0_0_1px_var(--line)]">
-              {#each app.memory?.facts ?? [] as f (f.id)}
-                <li class="group flex min-h-9 items-center gap-2 px-3 py-1.5">
-                  {#if editing === f.id}
+        <div class="min-w-0 flex-1 text-[13px]">
+          <section id="settings-keys" class="scroll-mt-6 pb-10">
+            <h2 class="font-serif text-[20px]">API keys</h2>
+            <p class="mt-1 text-muted">Encrypted with your operating system's keychain and stored on this device only.</p>
+            <div class="mt-5 space-y-5">
+              {#each keyRows as k (k.id)}
+                <div>
+                  <div class="mb-1.5 flex items-baseline gap-2">
+                    <span class="font-medium text-fg">{k.label}</span>
+                    <span class="text-muted">{k.use}</span>
+                    <a href={k.link} target="_blank" rel="noreferrer" class="ml-auto inline-flex items-center gap-1 text-[12px] text-muted hover:text-fg">
+                      Get a key <Icon name="external" size={11} />
+                    </a>
+                  </div>
+                  <div class="flex gap-2">
                     <input
-                      use:focusSelect
-                      bind:value={editDraft}
-                      class="h-7 min-w-0 flex-1 rounded-sm bg-bg px-2 outline-none"
-                      onkeydown={(e) => {
-                        if (e.key === 'Enter') void saveEdit()
-                        if (e.key === 'Escape') {
-                          e.preventDefault()
-                          editing = null
-                        }
-                      }}
-                      onblur={saveEdit}
+                      type="password"
+                      bind:value={keys[k.id]}
+                      placeholder={k.has ? 'Saved. Paste a new key to replace it' : k.hint}
+                      class={field}
+                      onkeydown={(e) => e.key === 'Enter' && saveKey(k.id)}
                     />
-                  {:else}
-                    <span class="min-w-0 flex-1 text-fg">{f.fact}</span>
-                    <span class="flex shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-                      <button class="icon-btn !p-1" use:tip={'Edit'} onclick={() => ((editing = f.id), (editDraft = f.fact))}><Icon name="edit" size={13} /></button>
-                      <button class="icon-btn !p-1" use:tip={'Forget this'} onclick={() => app.editMemory(() => window.api.memory.remove(f.id))}><Icon name="trash" size={13} /></button>
-                    </span>
-                  {/if}
-                </li>
-              {:else}
-                <li class="px-3 py-2.5 text-muted">{app.memory ? 'Nothing yet. Tell it about yourself in any chat, or add a fact below.' : 'Loading…'}</li>
-              {/each}
-              <li class="flex items-center gap-2 px-3 py-1.5">
-                <Icon name="plus" size={13} class="shrink-0 text-muted" />
-                <input
-                  bind:value={newFact}
-                  placeholder="Add a fact, e.g. Prefers metric units."
-                  class="h-7 min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted"
-                  onkeydown={(e) => e.key === 'Enter' && addFact()}
-                />
-                {#if newFact.trim()}<button class="shrink-0 rounded-md bg-fg px-2.5 py-1 text-[12px] font-medium text-bg" in:fade={{ duration: 120 }} onclick={addFact}>Add</button>{/if}
-              </li>
-            </ul>
-          </div>
-
-          {#if app.memory && app.memory.revisions.length > 0}
-            <button class="mt-4 flex items-center gap-1 text-[12.5px] text-fg-2 hover:text-fg" aria-expanded={showHistory} onclick={() => (showHistory = !showHistory)}>
-              <Icon name="chevronDown" size={13} class="transition-transform duration-150 {showHistory ? '' : '-rotate-90'}" />
-              Version history <span class="text-muted tabular-nums">({app.memory.revisions.length})</span>
-            </button>
-            {#if showHistory}
-              <ol class="mt-2 space-y-3 border-l border-line pl-4" transition:fade={{ duration: 120 }}>
-                {#each app.memory.revisions as r, i (r.rev)}
-                  <li>
-                    <div class="flex items-baseline gap-2">
-                      <span class="font-medium text-fg tabular-nums">v{r.rev}</span>
-                      <span class="text-fg-2">{r.note ?? KINDS[r.kind]}</span>
-                      <span class="text-[12px] text-muted">{when(r.createdAt)}</span>
-                      {#if i > 0}
-                        <button class="ml-auto text-[12px] text-muted hover:text-fg" use:tip={'Bring back the facts as they were after this change'} onclick={() => restore(r.rev)}>Restore</button>
-                      {:else}
-                        <span class="ml-auto text-[12px] text-muted">Current</span>
-                      {/if}
+                    {#if keys[k.id].trim()}
+                      <button class="shrink-0 rounded-md bg-fg px-3.5 font-medium text-bg" in:fade={{ duration: 120 }} onclick={() => saveKey(k.id)}>Save</button>
+                    {/if}
+                  </div>
+                  {#if k.has}
+                    <div class="mt-1.5 flex items-center gap-3 text-[12px]">
+                      <span class="flex items-center gap-1 text-fg-2"><Icon name="check" size={12} /> Key saved</span>
+                      <button class="text-muted hover:text-danger" onclick={() => clearKey(k.id)}>Remove</button>
                     </div>
-                    {#each r.added as fact, j (j)}<div class="text-[12.5px] text-fg-2"><span class="text-muted">+</span> {fact}</div>{/each}
-                    {#each r.removed as fact, j (j)}<div class="text-[12.5px] text-muted line-through decoration-muted/60">{fact}</div>{/each}
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          </section>
+
+          <section id="settings-model" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
+            <h2 class="font-serif text-[20px]">Model</h2>
+            <p class="mt-1 text-muted">New chats start with this model. Each chat can switch from the composer.</p>
+            <div class="mt-5 max-w-md">
+              <ModelPicker block value={form.defaultModel} onchange={(id) => (form.defaultModel = id)} />
+            </div>
+            <div class="mt-5 max-w-md">
+              <span class="mb-1.5 block font-medium text-fg">Vision model</span>
+              <ModelPicker
+                block
+                value={form.visionModel}
+                onchange={(id) => (form.visionModel = id)}
+                filter={(m) => m.inputModalities.includes('image')}
+                noneLabel="None: keep the chat's model"
+              />
+              <p class="mt-1.5 text-muted">Answers messages that include images, such as uploads or browser screenshots, when the chat's model can't see images.</p>
+            </div>
+            <div class="mt-5 max-w-md">
+              <span class="mb-1.5 block font-medium text-fg">Title model</span>
+              <ModelPicker block value={form.titleModel} onchange={(id) => (form.titleModel = id)} noneLabel="None: use the first message" />
+              <p class="mt-1.5 text-muted">
+                Names each new chat from its first message. A small model is enough.
+                {form.titleModel ? costLine(form.titleModel, 'title', 'a title') : ''}
+              </p>
+            </div>
+            <div class="mt-5 max-w-md">
+              <span class="mb-1.5 block font-medium text-fg">Sketch model</span>
+              <ModelPicker block source="image" value={form.sketchModel} onchange={(id) => (form.sketchModel = id)} />
+              <p class="mt-1.5 text-muted">Draws the pencil sketches on mood boards, one image per shot. Each sketch is drawn once and kept, so reopening a board costs nothing.</p>
+            </div>
+            <label class="mt-5 block max-w-md">
+              <span class="mb-1.5 flex justify-between"><span class="font-medium text-fg">Temperature</span><span class="text-fg-2 tabular-nums">{form.temperature.toFixed(1)}</span></span>
+              <input type="range" min="0" max="2" step="0.1" bind:value={form.temperature} class="w-full accent-[var(--fg-2)]" />
+              <span class="mt-0.5 flex justify-between text-[11.5px] text-muted"><span>Focused</span><span>Varied</span></span>
+            </label>
+          </section>
+
+          <section id="settings-instructions" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
+            <div class="flex items-baseline">
+              <h2 class="font-serif text-[20px]">System instructions</h2>
+              <button class="ml-auto inline-flex items-center gap-1 text-[12px] text-muted hover:text-fg" use:tip={app.settings!.configPath} onclick={() => window.api.settings.openConfigFile()}>
+                Open config.json <Icon name="external" size={11} />
+              </button>
+            </div>
+            <p class="mt-1 text-muted">Sent with every chat. A chat can replace them with its own from the composer.</p>
+            <textarea
+              bind:value={form.systemPrompt}
+              rows="7"
+              class="mt-4 w-full resize-y rounded-md bg-surface px-3.5 py-3 font-mono text-[12.5px] leading-relaxed shadow-[0_0_0_1px_var(--line)] outline-none focus:shadow-[0_0_0_1px_var(--muted)]"
+            ></textarea>
+            <label class="mt-5 flex cursor-pointer items-start gap-3">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={form.artifactsEnabled}
+                aria-label="Interactive artifacts"
+                class="relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors duration-200 {form.artifactsEnabled ? 'bg-fg' : 'bg-line'}"
+                onclick={() => (form.artifactsEnabled = !form.artifactsEnabled)}
+              >
+                <span class="absolute top-0.5 left-0.5 size-4 rounded-full bg-surface shadow transition-transform duration-200 ease-out {form.artifactsEnabled ? 'translate-x-4' : ''}"></span>
+              </button>
+              <span>
+                <span class="block font-medium text-fg">Interactive artifacts</span>
+                <span class="block text-muted">The model can build small HTML apps that run in the side panel.</span>
+              </span>
+            </label>
+          </section>
+
+          <section id="settings-memory" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
+            <h2 class="font-serif text-[20px]">Memory</h2>
+            <p class="mt-1 max-w-[60ch] text-muted">
+              A model reads each message you send for lasting facts about you, like your name, work or how you like answers, and keeps them on this device. Each new chat starts with them. Passwords, keys and account numbers are never kept.
+            </p>
+            <div class="mt-5 max-w-md">
+              <span class="mb-1.5 block font-medium text-fg">Memory model</span>
+              <ModelPicker block value={form.memoryModel} onchange={(id) => (form.memoryModel = id)} noneLabel="None: memory off" />
+              <p class="mt-1.5 text-muted">
+                {#if form.memoryModel}
+                  {costLine(form.memoryModel, 'memory', 'for each message it reads')} Messages that don't talk about you are skipped first, for free.
+                {:else}
+                  Nothing is learned, and chats start without the facts below.
+                {/if}
+              </p>
+            </div>
+
+            {#if app.memory?.lastRun}
+              {@const r = app.memory.lastRun}
+              <div class="mt-5 max-w-[60ch] rounded-md bg-surface px-3 py-2.5 text-[12.5px] shadow-[0_0_0_1px_var(--line)]" aria-live="polite">
+                <div class="flex items-baseline gap-2">
+                  <span class="font-medium text-fg">Last message</span>
+                  <span class="min-w-0 flex-1 truncate text-muted">“{r.message}”</span>
+                  <span class="shrink-0 text-[11.5px] text-muted">{when(r.at)}</span>
+                </div>
+                <div class="mt-1 {r.outcome === 'error' || r.outcome === 'unreadable' ? 'text-danger' : 'text-fg-2'}">{OUTCOMES[r.outcome](r)}</div>
+                {#if r.detail}<div class="mt-0.5 font-mono text-[11.5px] break-words text-muted">{r.detail}</div>{/if}
+                {#each r.added as fact, j (j)}<div class="text-fg-2"><span class="text-muted">+</span> {fact}</div>{/each}
+                {#each r.removed as fact, j (j)}<div class="text-muted line-through decoration-muted/60">{fact}</div>{/each}
+                {#if r.dropped.length > 0}
+                  <div class="mt-1 text-muted">Not kept, because they name things your message didn't mention: {r.dropped.join(' ')}</div>
+                {/if}
+              </div>
+            {/if}
+
+            <div class="mt-6">
+              <div class="mb-1.5 flex items-baseline gap-2">
+                <span class="font-medium text-fg">What chat-v2 knows about you</span>
+                {#if app.memory && app.memory.facts.length > 0}
+                  <span class="text-muted tabular-nums">{app.memory.facts.length}</span>
+                  <span class="ml-auto"></span>
+                  {#if confirmForget}
+                    <span class="text-fg-2" in:fade={{ duration: 120 }}>Forget all of it?</span>
+                    <button class="text-[12px] text-muted hover:text-fg" onclick={() => (confirmForget = false)}>Keep</button>
+                    <button class="text-[12px] font-medium text-danger" onclick={forget}>Forget</button>
+                  {:else}
+                    <button class="text-[12px] text-muted hover:text-danger" onclick={() => (confirmForget = true)}>Forget everything</button>
+                  {/if}
+                {/if}
+              </div>
+              <ul class="divide-y divide-line overflow-hidden rounded-md bg-surface shadow-[0_0_0_1px_var(--line)]">
+                {#each app.memory?.facts ?? [] as f (f.id)}
+                  <li class="group flex min-h-9 items-center gap-2 px-3 py-1.5">
+                    {#if editing === f.id}
+                      <input
+                        use:focusSelect
+                        bind:value={editDraft}
+                        class="h-7 min-w-0 flex-1 rounded-sm bg-bg px-2 outline-none"
+                        onkeydown={(e) => {
+                          if (e.key === 'Enter') void saveEdit()
+                          if (e.key === 'Escape') {
+                            e.preventDefault()
+                            editing = null
+                          }
+                        }}
+                        onblur={saveEdit}
+                      />
+                    {:else}
+                      <span class="min-w-0 flex-1 text-fg">{f.fact}</span>
+                      <span class="flex shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                        <button class="icon-btn !p-1" use:tip={'Edit'} onclick={() => ((editing = f.id), (editDraft = f.fact))}><Icon name="edit" size={13} /></button>
+                        <button class="icon-btn !p-1" use:tip={'Forget this'} onclick={() => app.editMemory(() => window.api.memory.remove(f.id))}><Icon name="trash" size={13} /></button>
+                      </span>
+                    {/if}
+                  </li>
+                {:else}
+                  <li class="px-3 py-2.5 text-muted">{app.memory ? 'Nothing yet. Tell it about yourself in any chat, or add a fact below.' : 'Loading…'}</li>
+                {/each}
+                <li class="flex items-center gap-2 px-3 py-1.5">
+                  <Icon name="plus" size={13} class="shrink-0 text-muted" />
+                  <input
+                    bind:value={newFact}
+                    placeholder="Add a fact, e.g. Prefers metric units."
+                    class="h-7 min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted"
+                    onkeydown={(e) => e.key === 'Enter' && addFact()}
+                  />
+                  {#if newFact.trim()}<button class="shrink-0 rounded-md bg-fg px-2.5 py-1 text-[12px] font-medium text-bg" in:fade={{ duration: 120 }} onclick={addFact}>Add</button>{/if}
+                </li>
+              </ul>
+            </div>
+
+            {#if app.memory && app.memory.revisions.length > 0}
+              <button class="mt-4 flex items-center gap-1 text-[12.5px] text-fg-2 hover:text-fg" aria-expanded={showHistory} onclick={() => (showHistory = !showHistory)}>
+                <Icon name="chevronDown" size={13} class="transition-transform duration-150 {showHistory ? '' : '-rotate-90'}" />
+                Version history <span class="text-muted tabular-nums">({app.memory.revisions.length})</span>
+              </button>
+              {#if showHistory}
+                <ol class="mt-2 space-y-3 border-l border-line pl-4" transition:fade={{ duration: 120 }}>
+                  {#each app.memory.revisions as r, i (r.rev)}
+                    <li>
+                      <div class="flex items-baseline gap-2">
+                        <span class="font-medium text-fg tabular-nums">v{r.rev}</span>
+                        <span class="text-fg-2">{r.note ?? KINDS[r.kind]}</span>
+                        <span class="text-[12px] text-muted">{when(r.createdAt)}</span>
+                        {#if i > 0}
+                          <button class="ml-auto text-[12px] text-muted hover:text-fg" use:tip={'Bring back the facts as they were after this change'} onclick={() => restore(r.rev)}>Restore</button>
+                        {:else}
+                          <span class="ml-auto text-[12px] text-muted">Current</span>
+                        {/if}
+                      </div>
+                      {#each r.added as fact, j (j)}<div class="text-[12.5px] text-fg-2"><span class="text-muted">+</span> {fact}</div>{/each}
+                      {#each r.removed as fact, j (j)}<div class="text-[12.5px] text-muted line-through decoration-muted/60">{fact}</div>{/each}
+                    </li>
+                  {/each}
+                </ol>
+              {/if}
+            {/if}
+          </section>
+
+          {#if window.api.computer.supported}
+            <section id="settings-computer" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
+              <h2 class="font-serif text-[20px]">Computer use</h2>
+              <p class="mt-1 max-w-prose text-muted">
+                Turn on <span class="text-fg-2">Computer</span> in a chat's composer and the assistant can see your main screen and work in your apps with its own sketched cursor, while
+                your mouse stays yours. Press <span class="text-fg-2">Stop</span> on the bar at the top of the screen to take over.
+              </p>
+
+              <label class="mt-5 flex cursor-pointer items-start gap-3">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={form.computerBorrowPointer}
+                  aria-label="Borrow the pointer when needed"
+                  class="relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors duration-200 {form.computerBorrowPointer ? 'bg-fg' : 'bg-line'}"
+                  onclick={() => (form.computerBorrowPointer = !form.computerBorrowPointer)}
+                >
+                  <span class="absolute top-0.5 left-0.5 size-4 rounded-full bg-surface shadow transition-transform duration-200 ease-out {form.computerBorrowPointer ? 'translate-x-4' : ''}"></span>
+                </button>
+                <span>
+                  <span class="block font-medium text-fg">Borrow the pointer when needed</span>
+                  <span class="block max-w-prose text-muted">
+                    Apps only follow a drag from the real mouse, so drags take your pointer for under a second and put it back. On a Mac, so do clicks in areas an app
+                    draws itself, like a video timeline. Off, your pointer is never touched, and those drags and clicks mostly won't work.
+                  </span>
+                </span>
+              </label>
+
+              <div class="mt-6 max-w-md">
+                <span class="mb-1.5 block font-medium text-fg">Computer use model</span>
+                <ModelPicker
+                  block
+                  value={form.computerModel}
+                  onchange={(id) => (form.computerModel = id)}
+                  filter={(m) => m.inputModalities.includes('image')}
+                  noneLabel="None: use the chat's model"
+                />
+                <p class="mt-1.5 text-muted">
+                  Works the computer in replies that use it, so a chat can talk with one model and act with a faster one. It needs to see images: if it can't, the vision
+                  model takes over, then the chat's model. A chat on OpenRouter's Auto Router acts with DeepSeek V4.1 Flash, as the router could switch models between steps.
+                </p>
+              </div>
+
+              <div class="mt-6 max-w-md">
+                <span class="mb-1.5 block font-medium text-fg">Thinking between steps</span>
+                {@render segmented(efforts, form.computerReasoningEffort, (v) => (form.computerReasoningEffort = v as Settings['computerReasoningEffort']))}
+                <p class="mt-1.5 text-muted">
+                  {efforts.find((e) => e.id === form.computerReasoningEffort)?.hint} Models that don't think ignore this.
+                </p>
+              </div>
+
+              <h3 class="mt-6 font-medium text-fg">Always off limits</h3>
+              <p class="mt-0.5 max-w-prose text-muted">
+                These are painted grey in what the assistant sees, and it can't click or type into them or open them, whatever it's asked.
+              </p>
+              <div class="mt-2.5 flex max-w-xl flex-wrap gap-1.5">
+                {#each builtIn as label (label)}
+                  <span class="rounded-full bg-hover px-2.5 py-0.5 text-[12.5px] text-fg-2">{label}</span>
+                {/each}
+                <span class="rounded-full bg-hover px-2.5 py-0.5 text-[12.5px] text-fg-2">chat-v2 itself</span>
+              </div>
+
+              <h3 class="mt-6 font-medium text-fg">Also protect</h3>
+              <p class="mt-0.5 max-w-prose text-muted">An app (its name or .exe) or a word in window titles, such as <span class="text-fg-2">Steam</span> or <span class="text-fg-2">bank</span>.</p>
+              <ul class="mt-2.5 max-w-md divide-y divide-line overflow-hidden rounded-lg bg-surface shadow-[0_0_0_1px_var(--line)]">
+                {#each form.computerProtected as word (word)}
+                  <li class="group flex min-h-9 items-center gap-2 px-3 py-1.5">
+                    <span class="min-w-0 flex-1 text-fg">{word}</span>
+                    <button
+                      class="icon-btn !p-1 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
+                      use:tip={'Stop protecting this'}
+                      onclick={() => (form.computerProtected = form.computerProtected.filter((w) => w !== word))}><Icon name="trash" size={13} /></button
+                    >
                   </li>
                 {/each}
-              </ol>
-            {/if}
-          {/if}
-        </section>
+                <li class="flex items-center gap-2 px-3 py-1.5">
+                  <Icon name="plus" size={13} class="shrink-0 text-muted" />
+                  <input
+                    bind:value={newProtected}
+                    placeholder="Add an app or title word"
+                    class="h-7 min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted"
+                    onkeydown={(e) => e.key === 'Enter' && addProtected()}
+                  />
+                  {#if newProtected.trim()}<button class="shrink-0 rounded-md bg-fg px-2.5 py-1 text-[12px] font-medium text-bg" in:fade={{ duration: 120 }} onclick={addProtected}>Add</button>{/if}
+                </li>
+              </ul>
 
-        {#if window.api.computer.supported}
-          <section id="settings-computer" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
-            <h2 class="font-serif text-[20px]">Computer use</h2>
-            <p class="mt-1 max-w-prose text-muted">
-              Turn on <span class="text-fg-2">Computer</span> in a chat's composer and the assistant can see your main screen and work in your apps with its own sketched cursor, while
-              your mouse stays yours. Press <span class="text-fg-2">Stop</span> on the bar at the top of the screen to take over.
-            </p>
+              <h3 class="mt-6 font-medium text-fg">What it learned about apps</h3>
+              <p class="mt-0.5 max-w-prose text-muted">Tips the assistant saved while using an app, often after looking it up. They come back when that app is in front.</p>
+              <ul class="mt-2.5 max-w-xl divide-y divide-line overflow-hidden rounded-lg bg-surface shadow-[0_0_0_1px_var(--line)]">
+                {#each tips ?? [] as t (t.id)}
+                  <li class="group flex items-start gap-2 px-3 py-2">
+                    <span class="mt-px shrink-0 rounded bg-hover px-1.5 text-[12px] text-fg-2">{t.app}</span>
+                    <span class="min-w-0 flex-1 text-fg">{t.tip}</span>
+                    <button class="icon-btn !p-1 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100" use:tip={'Forget this'} onclick={() => removeTip(t.id)}><Icon name="trash" size={13} /></button>
+                  </li>
+                {:else}
+                  <li class="px-3 py-2.5 text-muted">{tips ? 'Nothing yet.' : 'Loading…'}</li>
+                {/each}
+              </ul>
+            </section>
+          {/if}
+
+          <section id="settings-voice" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
+            <h2 class="font-serif text-[20px]">Voice & files</h2>
+            <div class="mt-5 grid max-w-md grid-cols-2 gap-3">
+              <label class="block">
+                <span class="mb-1.5 block font-medium text-fg">Speech model</span>
+                <input bind:value={form.sttModel} class={field} />
+              </label>
+              <label class="block">
+                <span class="mb-1.5 block font-medium text-fg">Language</span>
+                <input bind:value={form.sttLanguage} placeholder="Detect automatically" class={field} />
+              </label>
+            </div>
+            <div class="mt-5 max-w-md">
+              <span class="mb-1.5 block font-medium text-fg">PDF reading</span>
+              {@render segmented(pdfEngines, form.pdfEngine, (v) => (form.pdfEngine = v as Settings['pdfEngine']))}
+              <p class="mt-1.5 text-muted">{pdfEngines.find((e) => e.id === form.pdfEngine)?.hint}</p>
+            </div>
+          </section>
+
+          <section id="settings-appearance" class="scroll-mt-6 shadow-[0_-1px_0_var(--line)] pt-8">
+            <div class="flex items-baseline">
+              <h2 class="font-serif text-[20px]">Appearance</h2>
+              <button class="ml-auto text-[12px] text-muted hover:text-fg" onclick={() => appearance.reset()}>Reset fonts</button>
+            </div>
+            <p class="mt-1 text-muted">Stored on this device.</p>
+
+            <div class="mt-5 max-w-md">
+              <span class="mb-1.5 block font-medium text-fg">Theme</span>
+              {@render segmented(themes, theme.pref, (v) => theme.set(v as ThemePref))}
+            </div>
 
             <label class="mt-5 flex cursor-pointer items-start gap-3">
               <button
                 type="button"
                 role="switch"
-                aria-checked={form.computerBorrowPointer}
-                aria-label="Borrow the pointer when needed"
-                class="relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors duration-200 {form.computerBorrowPointer ? 'bg-fg' : 'bg-line'}"
-                onclick={() => (form.computerBorrowPointer = !form.computerBorrowPointer)}
+                aria-checked={form.alwaysOnTop}
+                aria-label="Keep on top"
+                class="relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors duration-200 {form.alwaysOnTop ? 'bg-fg' : 'bg-line'}"
+                onclick={() => (form.alwaysOnTop = !form.alwaysOnTop)}
               >
-                <span class="absolute top-0.5 left-0.5 size-4 rounded-full bg-surface shadow transition-transform duration-200 ease-out {form.computerBorrowPointer ? 'translate-x-4' : ''}"></span>
+                <span class="absolute top-0.5 left-0.5 size-4 rounded-full bg-surface shadow transition-transform duration-200 ease-out {form.alwaysOnTop ? 'translate-x-4' : ''}"></span>
               </button>
               <span>
-                <span class="block font-medium text-fg">Borrow the pointer when needed</span>
-                <span class="block max-w-prose text-muted">
-                  Apps only follow a drag from the real mouse, so drags take your pointer for under a second and put it back. On a Mac, so do clicks in areas an app
-                  draws itself, like a video timeline. Off, your pointer is never touched, and those drags and clicks mostly won't work.
-                </span>
+                <span class="block font-medium text-fg">Keep on top</span>
+                <span class="block text-muted">The window stays above other apps on this desktop. The pin in the chat header does the same.</span>
               </span>
             </label>
 
-            <div class="mt-6 max-w-md">
-              <span class="mb-1.5 block font-medium text-fg">Computer use model</span>
-              <ModelPicker
-                block
-                value={form.computerModel}
-                onchange={(id) => (form.computerModel = id)}
-                filter={(m) => m.inputModalities.includes('image')}
-                noneLabel="None: use the chat's model"
-              />
-              <p class="mt-1.5 text-muted">
-                Works the computer in replies that use it, so a chat can talk with one model and act with a faster one. It needs to see images: if it can't, the vision
-                model takes over, then the chat's model. A chat on OpenRouter's Auto Router acts with DeepSeek V4.1 Flash, as the router could switch models between steps.
-              </p>
+            <div class="mt-6">
+              <span class="mb-1.5 block font-medium text-fg">Reading font <span class="font-normal text-muted">for replies</span></span>
+              {@render fontPicker(READING_FONTS, appearance.prefs.reading, (id) => appearance.set('reading', id), 'Ag')}
             </div>
-
-            <div class="mt-6 max-w-md">
-              <span class="mb-1.5 block font-medium text-fg">Thinking between steps</span>
-              {@render segmented(efforts, form.computerReasoningEffort, (v) => (form.computerReasoningEffort = v as Settings['computerReasoningEffort']))}
-              <p class="mt-1.5 text-muted">
-                {efforts.find((e) => e.id === form.computerReasoningEffort)?.hint} Models that don't think ignore this.
-              </p>
+            <div class="mt-5 max-w-md">
+              <span class="mb-1.5 block font-medium text-fg">Reading size</span>
+              {@render segmented([...READING_SIZES], appearance.prefs.size, (v) => appearance.set('size', v as ReadingSize))}
             </div>
-
-            <h3 class="mt-6 font-medium text-fg">Always off limits</h3>
-            <p class="mt-0.5 max-w-prose text-muted">
-              These are painted grey in what the assistant sees, and it can't click or type into them or open them, whatever it's asked.
+            <p class="prose-chat mt-4 max-w-[60ch] rounded-md bg-surface px-4 py-3 shadow-[0_0_0_1px_var(--line)]">
+              Replies are set like this. A sentence with <em>emphasis</em>, some <strong>weight</strong>, and <code>inline code</code>.
             </p>
-            <div class="mt-2.5 flex max-w-xl flex-wrap gap-1.5">
-              {#each builtIn as label (label)}
-                <span class="rounded-full bg-hover px-2.5 py-0.5 text-[12.5px] text-fg-2">{label}</span>
-              {/each}
-              <span class="rounded-full bg-hover px-2.5 py-0.5 text-[12.5px] text-fg-2">chat-v2 itself</span>
+
+            <div class="mt-6">
+              <span class="mb-1.5 block font-medium text-fg">Interface font</span>
+              {@render fontPicker(UI_FONTS, appearance.prefs.ui, (id) => appearance.set('ui', id), 'Ag')}
             </div>
-
-            <h3 class="mt-6 font-medium text-fg">Also protect</h3>
-            <p class="mt-0.5 max-w-prose text-muted">An app (its name or .exe) or a word in window titles, such as <span class="text-fg-2">Steam</span> or <span class="text-fg-2">bank</span>.</p>
-            <ul class="mt-2.5 max-w-md divide-y divide-line overflow-hidden rounded-lg bg-surface shadow-[0_0_0_1px_var(--line)]">
-              {#each form.computerProtected as word (word)}
-                <li class="group flex min-h-9 items-center gap-2 px-3 py-1.5">
-                  <span class="min-w-0 flex-1 text-fg">{word}</span>
-                  <button
-                    class="icon-btn !p-1 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
-                    use:tip={'Stop protecting this'}
-                    onclick={() => (form.computerProtected = form.computerProtected.filter((w) => w !== word))}><Icon name="trash" size={13} /></button
-                  >
-                </li>
-              {/each}
-              <li class="flex items-center gap-2 px-3 py-1.5">
-                <Icon name="plus" size={13} class="shrink-0 text-muted" />
-                <input
-                  bind:value={newProtected}
-                  placeholder="Add an app or title word"
-                  class="h-7 min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted"
-                  onkeydown={(e) => e.key === 'Enter' && addProtected()}
-                />
-                {#if newProtected.trim()}<button class="shrink-0 rounded-md bg-fg px-2.5 py-1 text-[12px] font-medium text-bg" in:fade={{ duration: 120 }} onclick={addProtected}>Add</button>{/if}
-              </li>
-            </ul>
-
-            <h3 class="mt-6 font-medium text-fg">What it learned about apps</h3>
-            <p class="mt-0.5 max-w-prose text-muted">Tips the assistant saved while using an app, often after looking it up. They come back when that app is in front.</p>
-            <ul class="mt-2.5 max-w-xl divide-y divide-line overflow-hidden rounded-lg bg-surface shadow-[0_0_0_1px_var(--line)]">
-              {#each tips ?? [] as t (t.id)}
-                <li class="group flex items-start gap-2 px-3 py-2">
-                  <span class="mt-px shrink-0 rounded bg-hover px-1.5 text-[12px] text-fg-2">{t.app}</span>
-                  <span class="min-w-0 flex-1 text-fg">{t.tip}</span>
-                  <button class="icon-btn !p-1 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100" use:tip={'Forget this'} onclick={() => removeTip(t.id)}><Icon name="trash" size={13} /></button>
-                </li>
-              {:else}
-                <li class="px-3 py-2.5 text-muted">{tips ? 'Nothing yet.' : 'Loading…'}</li>
-              {/each}
-            </ul>
+            <div class="mt-6">
+              <span class="mb-1.5 block font-medium text-fg">Code font</span>
+              {@render fontPicker(CODE_FONTS, appearance.prefs.code, (id) => appearance.set('code', id), '{ }')}
+            </div>
           </section>
-        {/if}
 
-        <section id="settings-voice" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
-          <h2 class="font-serif text-[20px]">Voice & files</h2>
-          <div class="mt-5 grid max-w-md grid-cols-2 gap-3">
-            <label class="block">
-              <span class="mb-1.5 block font-medium text-fg">Speech model</span>
-              <input bind:value={form.sttModel} class={field} />
-            </label>
-            <label class="block">
-              <span class="mb-1.5 block font-medium text-fg">Language</span>
-              <input bind:value={form.sttLanguage} placeholder="Detect automatically" class={field} />
-            </label>
-          </div>
-          <div class="mt-5 max-w-md">
-            <span class="mb-1.5 block font-medium text-fg">PDF reading</span>
-            {@render segmented(pdfEngines, form.pdfEngine, (v) => (form.pdfEngine = v as Settings['pdfEngine']))}
-            <p class="mt-1.5 text-muted">{pdfEngines.find((e) => e.id === form.pdfEngine)?.hint}</p>
-          </div>
-        </section>
-
-        <section id="settings-appearance" class="scroll-mt-6 shadow-[0_-1px_0_var(--line)] pt-8">
-          <div class="flex items-baseline">
-            <h2 class="font-serif text-[20px]">Appearance</h2>
-            <button class="ml-auto text-[12px] text-muted hover:text-fg" onclick={() => appearance.reset()}>Reset fonts</button>
-          </div>
-          <p class="mt-1 text-muted">Stored on this device.</p>
-
-          <div class="mt-5 max-w-md">
-            <span class="mb-1.5 block font-medium text-fg">Theme</span>
-            {@render segmented(themes, theme.pref, (v) => theme.set(v as ThemePref))}
-          </div>
-
-          <label class="mt-5 flex cursor-pointer items-start gap-3">
-            <button
-              type="button"
-              role="switch"
-              aria-checked={form.alwaysOnTop}
-              aria-label="Keep on top"
-              class="relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors duration-200 {form.alwaysOnTop ? 'bg-fg' : 'bg-line'}"
-              onclick={() => (form.alwaysOnTop = !form.alwaysOnTop)}
-            >
-              <span class="absolute top-0.5 left-0.5 size-4 rounded-full bg-surface shadow transition-transform duration-200 ease-out {form.alwaysOnTop ? 'translate-x-4' : ''}"></span>
-            </button>
-            <span>
-              <span class="block font-medium text-fg">Keep on top</span>
-              <span class="block text-muted">The window stays above other apps on this desktop. The pin in the chat header does the same.</span>
-            </span>
-          </label>
-
-          <div class="mt-6">
-            <span class="mb-1.5 block font-medium text-fg">Reading font <span class="font-normal text-muted">for replies</span></span>
-            {@render fontPicker(READING_FONTS, appearance.prefs.reading, (id) => appearance.set('reading', id), 'Ag')}
-          </div>
-          <div class="mt-5 max-w-md">
-            <span class="mb-1.5 block font-medium text-fg">Reading size</span>
-            {@render segmented([...READING_SIZES], appearance.prefs.size, (v) => appearance.set('size', v as ReadingSize))}
-          </div>
-          <p class="prose-chat mt-4 max-w-[60ch] rounded-md bg-surface px-4 py-3 shadow-[0_0_0_1px_var(--line)]">
-            Replies are set like this. A sentence with <em>emphasis</em>, some <strong>weight</strong>, and <code>inline code</code>.
-          </p>
-
-          <div class="mt-6">
-            <span class="mb-1.5 block font-medium text-fg">Interface font</span>
-            {@render fontPicker(UI_FONTS, appearance.prefs.ui, (id) => appearance.set('ui', id), 'Ag')}
-          </div>
-          <div class="mt-6">
-            <span class="mb-1.5 block font-medium text-fg">Code font</span>
-            {@render fontPicker(CODE_FONTS, appearance.prefs.code, (id) => appearance.set('code', id), '{ }')}
-          </div>
-        </section>
-
-        <section id="settings-about" class="scroll-mt-6 pt-8 pb-10 shadow-[0_-1px_0_var(--line)] mt-10">
-          <h2 class="font-serif text-[20px]">About</h2>
-          <div class="mt-4 flex items-center gap-4">
-            <span class="grid size-14 place-items-center rounded-xl bg-[#0b0b0c] text-white"><Logo size={44} /></span>
-            <div class="min-w-0 flex-1">
-              <div class="font-medium text-fg">chat-v2 {app.update?.current ?? ''}</div>
-              <div class="text-muted">
-                {#if !app.update || app.update.status === 'unsupported'}
-                  Development build. Updates apply to installed versions.
-                {:else if app.update.next}
-                  Version {app.update.next} is available.
-                {:else}
-                  Updates are checked every 30 minutes, and shown by the button at the bottom of the sidebar.
-                {/if}
+          <section id="settings-about" class="scroll-mt-6 pt-8 pb-10 shadow-[0_-1px_0_var(--line)] mt-10">
+            <h2 class="font-serif text-[20px]">About</h2>
+            <div class="mt-4 flex items-center gap-4">
+              <span class="grid size-14 place-items-center rounded-xl bg-[#0b0b0c] text-white"><Logo size={44} /></span>
+              <div class="min-w-0 flex-1">
+                <div class="font-medium text-fg">chat-v2 {app.update?.current ?? ''}</div>
+                <div class="text-muted">
+                  {#if !app.update || app.update.status === 'unsupported'}
+                    Development build. Updates apply to installed versions.
+                  {:else if app.update.next}
+                    Version {app.update.next} is available.
+                  {:else}
+                    Updates are checked every 30 minutes, and shown by the button at the bottom of the sidebar.
+                  {/if}
+                </div>
               </div>
             </div>
-          </div>
-        </section>
+          </section>
+        </div>
       </div>
     </div>
   </div>

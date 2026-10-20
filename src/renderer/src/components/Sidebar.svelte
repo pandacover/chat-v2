@@ -243,12 +243,12 @@
 </aside>
 
 {#if !app.sidebarOpen}
-  <button
-    class="icon-btn fixed top-2.5 left-2.5 z-30"
-    use:tip={{ text: 'Show sidebar', kbd: shortcut('B') }}
-    in:fly={{ x: -6, duration: 180 }}
-    onclick={() => (app.sidebarOpen = true)}
-  >
-    <Icon name="sidebar" size={17} />
-  </button>
+  <div class="fixed top-2 left-2 z-30 flex items-center gap-0.5 rounded-lg bg-side p-1" in:fly={{ x: -6, duration: 180 }}>
+    <button class="icon-btn" use:tip={{ text: 'Show sidebar', kbd: shortcut('B') }} onclick={() => (app.sidebarOpen = true)}>
+      <Icon name="sidebar" size={17} />
+    </button>
+    <button class="icon-btn" use:tip={{ text: 'New chat', kbd: shortcut('N') }} onclick={() => app.newSession()}>
+      <Icon name="compose" size={17} />
+    </button>
+  </div>
 {/if}

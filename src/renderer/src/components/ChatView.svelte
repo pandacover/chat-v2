@@ -105,31 +105,45 @@
 </script>
 
 <div class="relative flex h-full min-w-0 flex-1 flex-col">
-  <!-- Sidebar-coloured strip; the chat below is inset into it with a line that carries on from the sidebar's edge. -->
-  <header class="relative z-10 flex h-12 shrink-0 items-center gap-2 pr-3 transition-[padding] duration-200 {app.sidebarOpen ? 'pl-5' : 'pl-14'}">
-    <span class="flex-1"></span>
-    {#if app.settings}
-      {@const onTop = app.settings.settings.alwaysOnTop}
-      <button
-        class="icon-btn {onTop ? '!text-fg' : ''}"
-        aria-pressed={onTop}
-        use:tip={onTop ? 'Unpin window' : 'Keep on top of other apps'}
-        onclick={() => app.setPinned(!onTop)}
-      >
-        <Icon name="pin" size={16} class="transition-transform duration-200 {onTop ? '' : 'rotate-45'}" />
-      </button>
+  <!--
+    With the sidebar open the chat is inset below a thin sidebar-coloured strip, its edge carrying on from the sidebar's,
+    and these controls sit in a notch curved out of its top-right corner. With the sidebar closed they float over the chat.
+  -->
+  <header class="absolute top-0 right-0 z-10">
+    {#if app.sidebarOpen}
+      <svg class="pointer-events-none absolute top-0 right-0" width="104" height="49" aria-hidden="true">
+        <path d="M0 0V14.5C16 14.5 16 47.5 32 47.5H104V0Z" fill="var(--side)" />
+        <path d="M0 14.5C16 14.5 16 47.5 32 47.5H104" fill="none" stroke="var(--line)" />
+      </svg>
     {/if}
-    <button
-      class="icon-btn relative {app.browserOpen ? '!text-fg' : ''}"
-      use:tip={app.browserOpen ? 'Hide browser' : 'Open browser'}
-      onclick={() => (app.browserOpen && app.activeTab === 'browser' ? app.closeBrowser() : app.openBrowser())}
-    >
-      <Icon name="globe" size={16} />
-      {#if app.control.active}<span class="absolute top-1 right-1 size-1.5 rounded-full bg-accent"></span>{/if}
-    </button>
+    <div class="relative mt-2 mr-2 flex items-center gap-0.5 rounded-lg p-1 {app.sidebarOpen ? '' : 'bg-side'}">
+      {#if app.settings}
+        {@const onTop = app.settings.settings.alwaysOnTop}
+        <button
+          class="icon-btn {onTop ? '!text-fg' : ''}"
+          aria-pressed={onTop}
+          use:tip={onTop ? 'Unpin window' : 'Keep on top of other apps'}
+          onclick={() => app.setPinned(!onTop)}
+        >
+          <Icon name="pin" size={16} class="transition-transform duration-200 {onTop ? '' : 'rotate-45'}" />
+        </button>
+      {/if}
+      <button
+        class="icon-btn relative {app.browserOpen ? '!text-fg' : ''}"
+        use:tip={app.browserOpen ? 'Hide browser' : 'Open browser'}
+        onclick={() => (app.browserOpen && app.activeTab === 'browser' ? app.closeBrowser() : app.openBrowser())}
+      >
+        <Icon name="globe" size={16} />
+        {#if app.control.active}<span class="absolute top-1 right-1 size-1.5 rounded-full bg-accent"></span>{/if}
+      </button>
+    </div>
   </header>
 
-  <div class="flex min-h-0 flex-1 flex-col border-t border-line bg-bg {app.sidebarOpen ? 'rounded-tl-xl border-l' : ''}">
+  <div
+    class="flex min-h-0 flex-1 flex-col bg-bg transition-[margin] duration-200 {app.sidebarOpen
+      ? 'mt-3.5 rounded-tl-xl border-t border-l border-line'
+      : ''}"
+  >
     {#if empty}<div class="flex-1"></div>{/if}
 
     <div class="relative {empty ? 'shrink-0' : 'min-h-0 flex-1'}">
@@ -145,7 +159,7 @@
             {/if}
           </div>
         {:else if view}
-          <div class="mx-auto flex max-w-[720px] flex-col gap-7 px-6 pt-4 pb-10">
+          <div class="mx-auto flex max-w-[720px] flex-col gap-7 px-6 pt-10 pb-10">
             {#each view.path as node, i (node.message.id)}
               <MessageItem {node} last={i === view.path.length - 1} />
             {/each}
