@@ -3,6 +3,7 @@
   import { flip } from 'svelte/animate'
   import type { Session } from '@shared/types'
   import { ease, fade, fly } from '@/lib/motion'
+  import { shortcut } from '@/lib/keys'
   import { app } from '@/lib/store.svelte'
   import { theme, type ThemePref } from '@/lib/theme.svelte'
   import Icon, { type IconName } from './Icon.svelte'
@@ -93,10 +94,10 @@
       <Logo size={22} class="-ml-1 text-fg" />
       <span class="font-serif text-[17px] tracking-tight italic">chat</span>
       <span class="ml-auto"></span>
-      <button class="icon-btn" use:tip={{ text: 'Hide sidebar', kbd: 'Ctrl B' }} onclick={() => (app.sidebarOpen = false)}>
+      <button class="icon-btn" use:tip={{ text: 'Hide sidebar', kbd: shortcut('B') }} onclick={() => (app.sidebarOpen = false)}>
         <Icon name="sidebar" size={17} />
       </button>
-      <button class="icon-btn" use:tip={{ text: 'New chat', kbd: 'Ctrl N' }} onclick={() => app.newSession()}>
+      <button class="icon-btn" use:tip={{ text: 'New chat', kbd: shortcut('N') }} onclick={() => app.newSession()}>
         <Icon name="compose" size={17} />
       </button>
     </div>
@@ -172,7 +173,6 @@
       {/each}
     </nav>
 
-    <UpdateButton />
     <div class="flex items-center gap-1 px-2 py-2">
       <button
         class="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] text-fg-2 transition-colors hover:bg-hover hover:text-fg"
@@ -180,7 +180,8 @@
       >
         <Icon name="settings" size={15} /> Settings
       </button>
-      <div class="ml-auto flex rounded-md bg-hover/60 p-0.5" role="radiogroup" aria-label="Theme">
+      <div class="ml-auto"><UpdateButton /></div>
+      <div class="flex rounded-md bg-hover/60 p-0.5" role="radiogroup" aria-label="Theme">
         {#each themes as t (t.id)}
           <button
             role="radio"
@@ -200,7 +201,7 @@
 {#if !app.sidebarOpen}
   <button
     class="icon-btn fixed top-2.5 left-2.5 z-30"
-    use:tip={{ text: 'Show sidebar', kbd: 'Ctrl B' }}
+    use:tip={{ text: 'Show sidebar', kbd: shortcut('B') }}
     in:fly={{ x: -6, duration: 180 }}
     onclick={() => (app.sidebarOpen = true)}
   >

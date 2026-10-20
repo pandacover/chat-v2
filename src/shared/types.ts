@@ -242,16 +242,21 @@ export interface NewAttachmentInput {
 
 /** App update status. `manual` is true on macOS, where the new DMG is opened instead of installed in place. */
 export interface UpdateState {
-  status: 'unsupported' | 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'error'
+  /**
+   * idle: nothing newer as of the last check. checking: a check the user asked for. available:
+   * `next` can be downloaded. downloading: `percent` done. downloaded: installs on restart (or the
+   * next quit). installing: quitting to install.
+   */
+  status: 'unsupported' | 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing'
   current: string
   next: string | null
+  /** What changed in `next`: its release notes as plain text (the commit message). */
+  notes: string | null
   percent: number | null
+  /** Why the last check or download failed; cleared by the next one. */
   error: string | null
-  manual: boolean
-  /** macOS: the new version's DMG is already in Downloads, so installing just opens it. */
-  downloaded: boolean
-  /** macOS: which build this Mac gets ('Apple silicon' or 'Intel'). */
-  build: string | null
+  /** When a check last got an answer (ms since the epoch). */
+  checkedAt: number | null
 }
 
 /** Everything the renderer can call on `window.api`. */
@@ -335,6 +340,7 @@ export interface Api {
   updates: {
     get(): Promise<UpdateState>
     check(): Promise<UpdateState>
+    download(): Promise<UpdateState>
     install(): Promise<UpdateState>
     onEvent(listener: (state: UpdateState) => void): () => void
   }

@@ -1,172 +1,75 @@
-// App updates from this repository's GitHub releases (see electron-builder.yml).
-// Windows installs in place on restart. macOS builds are only ad-hoc signed, which rules
-// out in-place updates there, so the new DMG is downloaded and opened instead: only the one
-// built for this Mac's processor, and only once (a finished download is reused).
-import { createHash } from 'node:crypto'
-import { createReadStream, createWriteStream } from 'node:fs'
-import { rename, rm, stat } from 'node:fs/promises'
-import { join } from 'node:path'
-import { Readable } from 'node:stream'
-import { pipeline } from 'node:stream/promises'
-import { BrowserWindow, app, net, shell } from 'electron'
-import electronUpdater, { type UpdateInfo } from 'electron-updater'
+// App updates from this repository's GitHub releases (see electron-builder.yml), driven by the
+// state machine in updateMachine.ts and shown as one icon button in the sidebar (UpdateButton).
+// Checks run in the background; downloading and restarting into an update are the user's call.
+// A downloaded update also installs on the next normal quit.
+// Windows installs in place with NSIS. macOS builds are signed with one long-lived self-signed
+// certificate (scripts/make-mac-cert.sh), so each version satisfies the previous one's designated
+// requirement: that lets Squirrel.Mac replace the app in place, and keeps macOS's privacy
+// permissions across updates.
+import { BrowserWindow, app, dialog } from 'electron'
+import electronUpdater from 'electron-updater'
 import type { UpdateState } from '@shared/types'
 import { errorMessage } from './errors'
+import { updateMachine } from './updateMachine'
 
 const { autoUpdater } = electronUpdater
 
-const RELEASES = 'https://github.com/pandacover/chat-v2/releases'
 const CHECK_EVERY = 30 * 60 * 1000
-const manual = process.platform === 'darwin'
+const mac = process.platform === 'darwin'
 
-/** electron-updater errors carry whole HTTP dumps; keep one readable line. */
-const describe = (e: unknown) => {
-  const text = errorMessage(e)
-  if (/releases\.atom|\b404\b/.test(text)) return 'No published releases found yet.'
-  if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|net::/.test(text)) return "Couldn't reach GitHub to check for updates."
-  return text.split('\n')[0]!.slice(0, 200)
-}
+/** For the update proof (scripts/mac-update-proof.ts): download and install as soon as it can. */
+const unattended = process.env.CHAT_V2_UPDATE_AUTO_INSTALL === '1'
 
-/**
- * Releases ship one DMG per processor. This Mac's comes from the hardware, not the running
- * build: an Intel build under Rosetta on Apple silicon reports x64, and moves to the native one.
- */
-const macArch = (): 'arm64' | 'x64' => (process.arch === 'arm64' || app.runningUnderARM64Translation ? 'arm64' : 'x64')
-
-const BUILD_NAMES = { arm64: 'Apple silicon', x64: 'Intel' } as const
-
-let state: UpdateState = {
-  status: app.isPackaged ? 'idle' : 'unsupported',
+const updates = updateMachine(autoUpdater, {
   current: app.getVersion(),
-  next: null,
-  percent: null,
-  error: null,
-  manual,
-  downloaded: false,
-  build: manual ? BUILD_NAMES[macArch()] : null
-}
-
-const set = (patch: Partial<UpdateState>) => {
-  state = { ...state, ...patch }
-  for (const win of BrowserWindow.getAllWindows()) if (!win.isDestroyed()) win.webContents.send('updates:event', state)
-}
-
-export const updateState = () => state
-
-export const checkForUpdates = async () => {
-  if (!app.isPackaged) return state
-  try {
-    await autoUpdater.checkForUpdates()
-  } catch (e) {
-    set({ status: 'error', error: describe(e) })
+  supported: app.isPackaged,
+  noInstall: process.env.CHAT_V2_UPDATE_NO_INSTALL === '1',
+  emit: (state: UpdateState) => {
+    for (const win of BrowserWindow.getAllWindows()) if (!win.isDestroyed()) win.webContents.send('updates:event', state)
+    if (unattended && state.status === 'available') void updates.download()
+    if (unattended && state.status === 'downloaded') updates.install()
   }
-  return state
-}
+})
 
-/** The release metadata from the last check, for the DMG's size and checksum. */
-let latest: UpdateInfo | null = null
-
-const dmgName = (version: string) => `chat-v2-${version}-${macArch()}.dmg`
-const dmgPath = (version: string) => join(app.getPath('downloads'), dmgName(version))
-
-/** The release's record of this Mac's DMG, when latest-mac.yml lists it. */
-const dmgInfo = (version: string) =>
-  latest?.version === version ? latest.files.find((f) => f.url.endsWith(dmgName(version))) : undefined
-
-const sha512 = (file: string) =>
-  new Promise<string>((resolve, reject) => {
-    const hash = createHash('sha512')
-    createReadStream(file)
-      .on('data', (chunk) => hash.update(chunk))
-      .on('end', () => resolve(hash.digest('base64')))
-      .on('error', reject)
-  })
-
-/** Whether the file matches the release's checksum (or size); true when the release lists neither. */
-const intact = async (file: string, version: string) => {
-  const info = dmgInfo(version)
-  if (info?.sha512) return (await sha512(file)) === info.sha512
-  if (info?.size) return (await stat(file)).size === info.size
-  return true
-}
+export const updateState = () => updates.state()
+/** The user asked: shows the checking state. */
+export const checkForUpdates = () => updates.check(true)
+export const downloadUpdate = () => updates.download()
+export const installUpdate = async () => updates.install()
 
 /**
- * Whether this version's DMG is already in Downloads. Downloads are written to a `.part`
- * file and renamed only once complete, so a file under the final name is a whole one.
+ * macOS: Squirrel.Mac can only replace an app it can write to, so one run from the DMG or from
+ * Downloads (where macOS runs it from a read-only copy) offers to move itself into Applications.
+ * Asked once per launch, on a packaged build only.
  */
-const alreadyDownloaded = async (version: string) => {
-  const file = dmgPath(version)
-  const info = await stat(file).catch(() => null)
-  return !!info?.isFile() && info.size > 0 && (await intact(file, version).catch(() => false))
-}
-
-/** macOS: fetch this Mac's DMG into Downloads (unless it is there already) and open it. */
-const downloadDmg = async (version: string) => {
-  const file = dmgPath(version)
-  if (!(await alreadyDownloaded(version))) {
-    const part = `${file}.part`
-    set({ status: 'downloading', percent: 0, error: null })
-    const res = await net.fetch(`${RELEASES}/download/v${version}/${dmgName(version)}`)
-    if (!res.ok || !res.body) throw new Error(`Download failed (${res.status})`)
-    const total = Number(res.headers.get('content-length')) || 0
-    let received = 0
-    const body = Readable.fromWeb(res.body as import('node:stream/web').ReadableStream<Uint8Array>)
-    body.on('data', (chunk: Buffer) => {
-      received += chunk.length
-      const percent = Math.round((received / total) * 100)
-      if (total && percent !== state.percent) set({ percent })
-    })
-    await pipeline(body, createWriteStream(part))
-    if (!(await intact(part, version))) {
-      await rm(part, { force: true })
-      throw new Error('The download was damaged. Try again.')
-    }
-    await rename(part, file)
-  }
-  set({ status: 'ready', percent: 100, downloaded: true })
-  await shell.openPath(file)
-}
-
-export const installUpdate = async () => {
+export const offerMoveToApplications = async () => {
+  if (!mac || !app.isPackaged || app.isInApplicationsFolder() || process.env.CHAT_V2_HEADLESS === '1') return
+  const { response } = await dialog.showMessageBox({
+    type: 'question',
+    message: 'Move chat-v2 to Applications?',
+    detail: 'chat-v2 can only update itself from the Applications folder.',
+    buttons: ['Move to Applications', 'Not Now'],
+    defaultId: 0,
+    cancelId: 1
+  })
+  if (response !== 0) return
   try {
-    if (!state.next || state.status === 'downloading') return state
-    if (manual) {
-      await downloadDmg(state.next)
-      return state
-    }
-    if (state.status !== 'ready') {
-      set({ status: 'downloading', percent: 0, error: null })
-      await autoUpdater.downloadUpdate()
-    }
-    // Silent one-click install, then relaunch. (Tests stop short of installing.)
-    if (process.env.CHAT_V2_UPDATE_NO_INSTALL === '1') return state
-    setImmediate(() => autoUpdater.quitAndInstall(true, true))
+    // Moves the app, quits and relaunches the moved copy.
+    app.moveToApplicationsFolder()
   } catch (e) {
-    set({ status: 'error', error: describe(e) })
+    await dialog.showMessageBox({ type: 'warning', message: "Couldn't move chat-v2", detail: errorMessage(e) })
   }
-  return state
 }
 
 export const initUpdater = () => {
   if (!app.isPackaged) return
+  // Downloads start from the update button; a finished one installs on restart or the next quit.
   autoUpdater.autoDownload = false
-  autoUpdater.autoInstallOnAppQuit = !manual
-  autoUpdater.on('checking-for-update', () => {
-    if (state.status !== 'downloading' && state.status !== 'ready') set({ status: 'checking', error: null })
-  })
-  autoUpdater.on('update-available', (info) => {
-    latest = info
-    set({ status: 'available', next: info.version, error: null, downloaded: false })
-    // A DMG fetched before a restart is reused rather than downloaded again.
-    if (manual)
-      void alreadyDownloaded(info.version).then((done) => {
-        if (done && state.next === info.version && state.status === 'available') set({ downloaded: true })
-      })
-  })
-  autoUpdater.on('update-not-available', () => set({ status: 'idle', next: null }))
-  autoUpdater.on('download-progress', (p) => set({ status: 'downloading', percent: Math.round(p.percent) }))
-  autoUpdater.on('update-downloaded', (info) => set({ status: 'ready', next: info.version, percent: 100 }))
-  autoUpdater.on('error', (e) => set({ status: 'error', error: describe(e) }))
-  setTimeout(() => void checkForUpdates(), 8000)
-  setInterval(() => void checkForUpdates(), CHECK_EVERY)
+  autoUpdater.autoInstallOnAppQuit = true
+  if (process.env.CHAT_V2_UPDATE_FEED) {
+    autoUpdater.setFeedURL({ provider: 'generic', url: process.env.CHAT_V2_UPDATE_FEED })
+    autoUpdater.logger = console
+  }
+  setTimeout(() => void updates.check(false), unattended ? 1000 : 8000)
+  setInterval(() => void updates.check(false), CHECK_EVERY)
 }

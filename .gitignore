@@ -6,3 +6,5 @@ dist
 out-test
 dist-test*
 native/mac-capture/out
+*.p12
+chat-v2-signing.password

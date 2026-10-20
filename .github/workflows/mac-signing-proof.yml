@@ -1,0 +1,83 @@
+# Proves on a real Mac what the self-signed macOS updates rest on (src/main/updater.ts):
+# two versions signed with the release certificate share one designated requirement (so macOS
+# keeps their privacy permissions, and Squirrel.Mac accepts the newer one), an ad-hoc build does
+# not, and Squirrel.Mac really updates the older one to the newer one in place.
+# Run it after changing how releases are signed: by hand once this file is on main (Actions →
+# Mac signing proof → Run workflow), or by pushing a branch named mac-signing-proof/<anything>.
+# Needs the MAC_CERT_P12 and MAC_CERT_PASSWORD secrets; publishes nothing.
+name: Mac signing proof
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['mac-signing-proof/**']
+
+jobs:
+  proof:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - name: Xcode version
+        id: xcode
+        run: echo "version=$(xcodebuild -version | shasum | cut -c1-12)" >>"$GITHUB_OUTPUT"
+      - name: Cache the capture helper
+        id: helper
+        uses: actions/cache@v4
+        with:
+          path: native/mac-capture/out
+          key: mac-capture-${{ steps.xcode.outputs.version }}-${{ hashFiles('native/mac-capture/main.swift', 'scripts/build-mac-capture.ts') }}
+      - if: steps.helper.outputs.cache-hit != 'true'
+        run: bun run build:mac-capture
+      # Before the certificate is on the runner: electron-builder looks `identity: "-"` up as a name,
+      # and "chat-v2 Code Signing" contains a "-", so once it's installed it signs with it instead.
+      - name: Build 0.0.3 ad-hoc
+        run: |
+          npm pkg set version=0.0.3
+          bunx electron-builder --mac dir --arm64 --publish never -c.directories.output=dist-adhoc
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+      - name: Set up the signing certificate
+        run: bash scripts/ci-mac-signing.sh
+        env:
+          MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+      # This runner's processor only (Apple silicon); the zip is what Squirrel.Mac installs.
+      - name: Build 0.0.1 and 0.0.2 with the certificate
+        run: |
+          for v in 0.0.1 0.0.2; do
+            npm pkg set version=$v
+            bunx electron-builder --mac zip --arm64 --publish never -c.directories.output=dist-$v -c.mac.identity="chat-v2 Code Signing"
+          done
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+      - name: Check the signatures
+        run: |
+          bash scripts/ci-mac-verify.sh dist-0.0.1/mac-arm64/chat-v2.app self-signed
+          bash scripts/ci-mac-verify.sh dist-0.0.2/mac-arm64/chat-v2.app self-signed
+          bash scripts/ci-mac-verify.sh dist-adhoc/mac-arm64/chat-v2.app adhoc
+      - name: 0.0.2 satisfies 0.0.1's designated requirement; the ad-hoc build doesn't
+        run: |
+          v1=dist-0.0.1/mac-arm64/chat-v2.app
+          v2=dist-0.0.2/mac-arm64/chat-v2.app
+          adhoc=dist-adhoc/mac-arm64/chat-v2.app
+          dr=$(codesign -d -r- "$v1" 2>&1 | sed -n 's/^designated => //p')
+          echo "0.0.1's designated requirement: $dr"
+          # Different builds, different code hashes: the requirement doesn't pin the build.
+          cd1=$(codesign -dv --verbose=4 "$v1" 2>&1 | grep '^CDHash=')
+          cd2=$(codesign -dv --verbose=4 "$v2" 2>&1 | grep '^CDHash=')
+          echo "0.0.1 $cd1, 0.0.2 $cd2"
+          [ "$cd1" != "$cd2" ]
+          # "=" makes -R take the requirement's text rather than a file.
+          codesign --verify --deep --strict --verbose=2 -R "=$dr" "$v2"
+          if codesign --verify --deep --strict -R "=$dr" "$adhoc" 2>/dev/null; then
+            echo "::error::The ad-hoc build satisfies the release requirement: the check proves nothing."
+            exit 1
+          fi
+          echo "0.0.2 satisfies it; the ad-hoc build doesn't."
+      - name: Squirrel.Mac updates 0.0.1 to 0.0.2 in place
+        timeout-minutes: 6
+        run: bun scripts/mac-update-proof.ts dist-0.0.1/mac-arm64/chat-v2.app dist-0.0.2/chat-v2-0.0.2-arm64.zip 0.0.2
