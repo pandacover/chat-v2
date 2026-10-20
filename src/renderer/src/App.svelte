@@ -76,7 +76,7 @@
 {#if ready}
   <div class="flex h-full {resizing ? 'cursor-col-resize select-none' : ''}" in:fade={{ duration: 200 }}>
     <Sidebar />
-    <main class="relative flex min-w-0 flex-1 bg-bg {app.sidebarOpen ? 'shadow-[-1px_0_0_var(--line)]' : ''}">
+    <main class="relative flex min-w-0 flex-1 bg-side">
       <div class="flex min-w-0 flex-1" inert={app.page !== 'chat'}>
         <ChatView />
         {#if app.panelOpen}

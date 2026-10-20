@@ -13,7 +13,6 @@
   let dock: HTMLDivElement | undefined = $state()
   let composer: ReturnType<typeof Composer> | undefined = $state()
   let pinned = $state(true)
-  let scrolled = $state(false)
   let promptOpen = $state(false)
   let promptDraft = $state('')
 
@@ -31,7 +30,6 @@
   const onscroll = () => {
     if (!scroller) return
     pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80
-    scrolled = scroller.scrollTop > 4
   }
 
   const toBottom = (behavior: ScrollBehavior = 'auto') => scroller?.scrollTo({ top: scroller.scrollHeight, behavior })
@@ -107,19 +105,9 @@
 </script>
 
 <div class="relative flex h-full min-w-0 flex-1 flex-col">
-  <header
-    class="relative z-10 flex h-12 shrink-0 items-center gap-2 pr-3 transition-[box-shadow,padding] duration-200 {app.sidebarOpen
-      ? 'pl-5'
-      : 'pl-14'} {scrolled && !empty ? 'shadow-[0_1px_0_var(--line)]' : ''}"
-  >
-    {#if view && !empty}
-      <!-- Keyed so the generated title fades in over the placeholder. -->
-      {#key view.session.title}
-        <h1 class="min-w-0 flex-1 truncate text-[13.5px] text-fg-2" in:fade>{view.session.title}</h1>
-      {/key}
-    {:else}
-      <span class="flex-1"></span>
-    {/if}
+  <!-- Sidebar-coloured strip; the chat below is inset into it with a line that carries on from the sidebar's edge. -->
+  <header class="relative z-10 flex h-12 shrink-0 items-center gap-2 pr-3 transition-[padding] duration-200 {app.sidebarOpen ? 'pl-5' : 'pl-14'}">
+    <span class="flex-1"></span>
     {#if app.settings}
       {@const onTop = app.settings.settings.alwaysOnTop}
       <button
@@ -141,57 +129,59 @@
     </button>
   </header>
 
-  {#if empty}<div class="flex-1"></div>{/if}
+  <div class="flex min-h-0 flex-1 flex-col border-t border-line bg-bg {app.sidebarOpen ? 'rounded-tl-xl border-l' : ''}">
+    {#if empty}<div class="flex-1"></div>{/if}
 
-  <div class="relative {empty ? 'shrink-0' : 'min-h-0 flex-1'}">
-    <div bind:this={scroller} {onscroll} class="h-full overflow-y-auto {empty ? 'overflow-hidden' : ''}">
-      {#if empty}
-        <div class="mx-auto max-w-[720px] px-6 pb-6 text-center" in:fade={{ duration: 260 }}>
-          <Logo size={64} class="mx-auto mb-5 text-fg" />
-          <h2 class="font-serif text-[34px] leading-tight font-[420] tracking-[-0.015em]">{greeting}.</h2>
-          {#if app.settings && !app.settings.hasOpenRouterKey}
-            <button class="mt-3 text-[14px] text-fg-2 underline decoration-muted underline-offset-4 hover:decoration-fg" onclick={() => (app.settingsOpen = true)}>
-              Add an OpenRouter key to begin
-            </button>
-          {/if}
-        </div>
-      {:else if view}
-        <div class="mx-auto flex max-w-[720px] flex-col gap-7 px-6 pt-4 pb-10">
-          {#each view.path as node, i (node.message.id)}
-            <MessageItem {node} last={i === view.path.length - 1} />
-          {/each}
-        </div>
+    <div class="relative {empty ? 'shrink-0' : 'min-h-0 flex-1'}">
+      <div bind:this={scroller} {onscroll} class="h-full overflow-y-auto {empty ? 'overflow-hidden' : ''}">
+        {#if empty}
+          <div class="mx-auto max-w-[720px] px-6 pb-6 text-center" in:fade={{ duration: 260 }}>
+            <Logo size={64} class="mx-auto mb-5 text-fg" />
+            <h2 class="font-serif text-[34px] leading-tight font-[420] tracking-[-0.015em]">{greeting}.</h2>
+            {#if app.settings && !app.settings.hasOpenRouterKey}
+              <button class="mt-3 text-[14px] text-fg-2 underline decoration-muted underline-offset-4 hover:decoration-fg" onclick={() => (app.settingsOpen = true)}>
+                Add an OpenRouter key to begin
+              </button>
+            {/if}
+          </div>
+        {:else if view}
+          <div class="mx-auto flex max-w-[720px] flex-col gap-7 px-6 pt-4 pb-10">
+            {#each view.path as node, i (node.message.id)}
+              <MessageItem {node} last={i === view.path.length - 1} />
+            {/each}
+          </div>
+        {/if}
+      </div>
+
+      {#if !pinned && !empty}
+        <button
+          class="absolute bottom-3 left-1/2 grid size-8 -translate-x-1/2 place-items-center rounded-full bg-surface text-fg-2 shadow-float hover:text-fg"
+          use:tip={'Jump to latest'}
+          transition:fly={{ y: 6, duration: 160 }}
+          onclick={() => toBottom('smooth')}
+        >
+          <Icon name="arrowDown" size={15} />
+        </button>
       {/if}
     </div>
 
-    {#if !pinned && !empty}
-      <button
-        class="absolute bottom-3 left-1/2 grid size-8 -translate-x-1/2 place-items-center rounded-full bg-surface text-fg-2 shadow-float hover:text-fg"
-        use:tip={'Jump to latest'}
-        transition:fly={{ y: 6, duration: 160 }}
-        onclick={() => toBottom('smooth')}
-      >
-        <Icon name="arrowDown" size={15} />
-      </button>
-    {/if}
-  </div>
+    <div bind:this={dock} class="mx-auto w-full max-w-[720px] shrink-0 px-6 {empty ? 'pb-2' : 'pb-5'}">
+      <Composer
+        bind:this={composer}
+        placeholder={empty ? 'Ask anything, or drop a file' : 'Reply'}
+        {model}
+        onmodel={(id) => app.updateSession({ model: id })}
+        customInstructions={hasOverride}
+        oninstructions={openPrompt}
+        browserEnabled={app.chat.browserEnabled}
+        onbrowser={toggleBrowser}
+        computerEnabled={app.chat.computerEnabled}
+        oncomputer={toggleComputer}
+      />
+    </div>
 
-  <div bind:this={dock} class="mx-auto w-full max-w-[720px] shrink-0 px-6 {empty ? 'pb-2' : 'pb-5'}">
-    <Composer
-      bind:this={composer}
-      placeholder={empty ? 'Ask anything, or drop a file' : 'Reply'}
-      {model}
-      onmodel={(id) => app.updateSession({ model: id })}
-      customInstructions={hasOverride}
-      oninstructions={openPrompt}
-      browserEnabled={app.chat.browserEnabled}
-      onbrowser={toggleBrowser}
-      computerEnabled={app.chat.computerEnabled}
-      oncomputer={toggleComputer}
-    />
+    {#if empty}<div class="flex-[1.3]"></div>{/if}
   </div>
-
-  {#if empty}<div class="flex-[1.3]"></div>{/if}
 </div>
 
 <SelectionReply {scroller} onreply={(block) => composer?.append(block)} />

@@ -161,7 +161,7 @@
             <div
               class="group relative flex h-9 items-center rounded-md text-[13px] transition-colors {active
                 ? 'bg-surface text-fg'
-                : 'text-fg-2 hover:bg-hover hover:text-fg'}"
+                : 'text-fg-2 focus-within:bg-hover hover:bg-hover hover:text-fg'}"
             >
               {#if s && renaming === s.id}
                 <input
@@ -185,7 +185,7 @@
                 </div>
               {:else}
                 <button
-                  class="flex h-full min-w-0 flex-1 items-center gap-1.5 pl-2.5 text-left"
+                  class="flex h-full min-w-0 flex-1 items-center gap-1.5 px-2.5 text-left"
                   onclick={() => (s ? app.open(s.id) : app.newSession())}
                   ondblclick={() => s && startRename(s)}
                 >
@@ -193,16 +193,20 @@
                   {#if s?.forkedFromSessionId}<span class="text-muted" use:tip={'Forked chat'}><Icon name="branch" size={12} /></span>{/if}
                   <span class="truncate {s ? '' : 'italic'}">{e.title}</span>
                 </button>
-                <div class="flex shrink-0 items-center pr-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
-                  {#if s}
-                    <button class="icon-btn !p-1" use:tip={s.pinnedAt != null ? 'Unpin chat' : 'Pin chat'} onclick={() => app.pin(s.id, s.pinnedAt == null)}>
-                      <Icon name="pin" size={13} class={s.pinnedAt != null ? '' : 'rotate-45'} />
-                    </button>
-                    <button class="icon-btn !p-1" use:tip={'Rename'} onclick={() => startRename(s)}><Icon name="edit" size={13} /></button>
-                    <button class="icon-btn !p-1" use:tip={'Delete'} onclick={() => (confirming = s.id)}><Icon name="trash" size={13} /></button>
-                  {:else}
-                    <button class="icon-btn !p-1" use:tip={'Discard draft'} onclick={() => app.discardDraft('')}><Icon name="trash" size={13} /></button>
-                  {/if}
+                <!-- Over the title rather than beside it, so the title runs to the tile's edge; it fades out under the actions. -->
+                <div class="absolute inset-y-0 right-0 flex opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
+                  <span class="pointer-events-none w-6 bg-linear-to-l to-transparent {active ? 'from-surface' : 'from-hover'}"></span>
+                  <div class="flex items-center rounded-r-md pr-1 {active ? 'bg-surface' : 'bg-hover'}">
+                    {#if s}
+                      <button class="icon-btn !p-1" use:tip={s.pinnedAt != null ? 'Unpin chat' : 'Pin chat'} onclick={() => app.pin(s.id, s.pinnedAt == null)}>
+                        <Icon name="pin" size={13} class={s.pinnedAt != null ? '' : 'rotate-45'} />
+                      </button>
+                      <button class="icon-btn !p-1" use:tip={'Rename'} onclick={() => startRename(s)}><Icon name="edit" size={13} /></button>
+                      <button class="icon-btn !p-1" use:tip={'Delete'} onclick={() => (confirming = s.id)}><Icon name="trash" size={13} /></button>
+                    {:else}
+                      <button class="icon-btn !p-1" use:tip={'Discard draft'} onclick={() => app.discardDraft('')}><Icon name="trash" size={13} /></button>
+                    {/if}
+                  </div>
                 </div>
               {/if}
             </div>

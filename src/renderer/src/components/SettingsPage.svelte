@@ -253,7 +253,7 @@
   </div>
 {/snippet}
 
-<section class="absolute inset-0 z-20 flex flex-col bg-bg" aria-label="Settings" in:fly={{ y: 8, duration: 220 }} out:fade={{ duration: 120 }}>
+<section class="absolute inset-0 z-20 flex flex-col bg-side" aria-label="Settings" in:fly={{ y: 8, duration: 220 }} out:fade={{ duration: 120 }}>
   <header class="flex h-12 shrink-0 items-center gap-2 pr-4 {app.sidebarOpen ? 'pl-3' : 'pl-12'}">
     <button class="flex items-center gap-1 rounded-md py-1 pr-2.5 pl-1.5 text-[13px] text-fg-2 hover:bg-hover hover:text-fg" onclick={close}>
       <Icon name="chevronLeft" size={15} /> Back to chat
@@ -263,7 +263,11 @@
     </span>
   </header>
 
-  <div bind:this={scroller} {onscroll} class="min-h-0 flex-1 overflow-y-auto">
+  <div
+    bind:this={scroller}
+    {onscroll}
+    class="min-h-0 flex-1 overflow-y-auto border-t border-line bg-bg {app.sidebarOpen ? 'rounded-tl-xl border-l' : ''}"
+  >
     <div class="mx-auto flex max-w-[860px] gap-12 px-8 pt-6 pb-24">
       <nav class="sticky top-6 hidden h-fit w-40 shrink-0 flex-col gap-0.5 md:flex" aria-label="Settings sections">
         <h1 class="mb-4 px-2.5 font-serif text-[28px] leading-none">Settings</h1>
