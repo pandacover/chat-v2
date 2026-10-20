@@ -216,12 +216,14 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     let config = SCStreamConfiguration()
     config.width = max(1, width)
     config.height = max(1, height)
-    // At most 30 frames a second, and only when something changed.
-    config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+    // At most 15 frames a second, and only when something changed: a change still shows within
+    // 1/15 s, at half the work of 30.
+    config.minimumFrameInterval = CMTime(value: 1, timescale: 15)
     config.showsCursor = false
     config.pixelFormat = kCVPixelFormatType_32BGRA
     config.colorSpaceName = CGColorSpace.sRGB
-    config.queueDepth = 5
+    // Few frames in flight: only the newest is ever used.
+    config.queueDepth = 3
     config.capturesAudio = false
 
     let s = SCStream(filter: filter, configuration: config, delegate: self)

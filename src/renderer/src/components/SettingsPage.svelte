@@ -169,16 +169,6 @@
     el.select()
   }
 
-  let checking = $state(false)
-  const checkUpdates = async () => {
-    checking = true
-    const s = await app.attempt(() => window.api.updates.check())
-    checking = false
-    if (!s) return
-    app.update = s
-    if (s.status === 'idle') app.toast(`You're on the latest version (${s.current}).`, 'info')
-  }
-
   const jump = (id: string) => {
     active = id
     document.getElementById(`settings-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -696,17 +686,10 @@
                 {:else if app.update.next}
                   Version {app.update.next} is available.
                 {:else}
-                  Updates are checked every 30 minutes.
+                  Updates are checked every 30 minutes, and shown by the button at the bottom of the sidebar.
                 {/if}
               </div>
             </div>
-            <button
-              class="rounded-md bg-surface px-3 py-1.5 text-fg-2 shadow-[0_0_0_1px_var(--line)] hover:text-fg disabled:opacity-50"
-              disabled={checking || !app.update || app.update.status === 'unsupported'}
-              onclick={checkUpdates}
-            >
-              {checking ? 'Checking…' : 'Check for updates'}
-            </button>
           </div>
         </section>
       </div>

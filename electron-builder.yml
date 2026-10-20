@@ -31,10 +31,16 @@ nsis:
 mac:
   icon: build/icon.png
   category: public.app-category.productivity
-  # Ad-hoc signed: there is no Developer ID certificate yet (that would add notarising and
-  # in-place updates). Don't drop to unsigned: macOS then can't tie privacy choices to the
+  # Releases are signed with one long-lived self-signed certificate (scripts/make-mac-cert.sh):
+  # release.yml puts it in a keychain (scripts/ci-mac-signing.sh) and passes
+  # -c.mac.identity="chat-v2 Code Signing".
+  # Its designated requirement (identifier + certificate hash) is the same for every version,
+  # so macOS keeps the app's privacy permissions across updates and Squirrel.Mac installs them in
+  # place. Not notarised (that needs a paid Developer ID). Builds without the certificate (pull
+  # requests, local) are ad-hoc signed. Never unsigned: macOS then can't tie privacy choices to the
   # app, and the microphone prompt comes back after every Allow or Don't Allow.
   identity: "-"
+  notarize: false
   # Signing turns on the hardened runtime, which blocks the microphone without the
   # audio-input entitlement.
   entitlements: build/entitlements.mac.plist
@@ -48,13 +54,15 @@ mac:
     NSMicrophoneUsageDescription: chat-v2 uses the microphone for voice input.
     # Computer use types through System Events when it can't post the characters itself.
     NSAppleEventsUsageDescription: chat-v2 uses System Events to type into apps during computer use.
-  # One build per architecture: a universal app carries both and is twice the size.
+  # One build per architecture: a universal app carries both and is twice the size. Apps from
+  # before the split download "-universal.dmg": release.yml uploads the Intel DMG under that name
+  # too (it runs on both through Rosetta, and the next update moves Apple silicon to arm64).
   target:
-    # The universal DMG is only for apps from before the split, whose updater downloads
-    # "-universal.dmg". Drop it once those have updated.
+    # The DMGs are for first installs, and for ad-hoc signed apps, which still update by opening
+    # the DMG for their processor (chat-v2-<version>-<arch>.dmg): keep these names.
     - target: dmg
-      arch: [arm64, x64, universal]
-    # The zip carries the update metadata (latest-mac.yml).
+      arch: [arm64, x64]
+    # Squirrel.Mac installs updates from the zips, which also carry latest-mac.yml.
     - target: zip
       arch: [arm64, x64]
   artifactName: ${productName}-${version}-${arch}.${ext}

@@ -152,6 +152,34 @@ describe('mac capture port', () => {
     expect(requests().slice(2)).toEqual([`start 69733378 ${SELF_PID} 2880 1800`, 'stop'])
   })
 
+  test('a stream opened ahead of a reply closes after its own idle time; a capture renews it with the usual one', async () => {
+    const { screen, requests } = port([], { idleMs: 400, prewarmIdleMs: 100 })
+    screen.prepare!()
+    await sleep(250)
+    expect(requests()).toEqual([`start 69733378 ${SELF_PID} 2880 1800`, 'stop'])
+    screen.prepare!()
+    await sleep(50)
+    await screen.capture({ w: 1280, h: 800 }, [])
+    await sleep(200)
+    expect(screen.live!()).toBe(true)
+    await sleep(350)
+    expect(screen.live!()).toBe(false)
+  })
+
+  test('closing (quitting) ends the helper process, and nothing starts it again', async () => {
+    const { screen, t } = port()
+    expect(await screen.watchable!()).toBe(true)
+    const child = children.at(-1)!
+    const exited = new Promise((r) => child.once('exit', r))
+    screen.close()
+    expect(screen.live!()).toBe(false)
+    await exited
+    expect(await screen.watchable!()).toBe(false)
+    screen.prepare!()
+    await sleep(50)
+    expect(t.spawns).toBe(1)
+  })
+
   test("where only the app's windows could be left out, the overlay is still hidden and the glance can't rely on the stream", async () => {
     const { screen, t } = port(['--no-app'])
     expect(await screen.watchable!()).toBe(true)

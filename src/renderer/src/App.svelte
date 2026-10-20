@@ -6,6 +6,7 @@
   import Icon from './components/Icon.svelte'
   import SettingsPage from './components/SettingsPage.svelte'
   import Sidebar from './components/Sidebar.svelte'
+  import { modKey } from './lib/keys'
   import { ease, fade, fly } from './lib/motion'
   import { app } from './lib/store.svelte'
 
@@ -36,8 +37,9 @@
     if (window.api.computer.supported) window.api.computer.setMode(ready && app.chat.computerEnabled)
   })
 
+  // Cmd on a Mac, Ctrl elsewhere.
   const onkeydown = (e: KeyboardEvent) => {
-    if (!e.ctrlKey) return
+    if (!modKey(e)) return
     const key = e.key.toLowerCase()
     if (key === 'n') {
       e.preventDefault()

@@ -73,6 +73,7 @@ const api: Api = {
   updates: {
     get: () => call('updates:get'),
     check: () => call('updates:check'),
+    download: () => call('updates:download'),
     install: () => call('updates:install'),
     onEvent: (listener) => {
       const handler = (_event: unknown, state: UpdateState) => listener(state)
