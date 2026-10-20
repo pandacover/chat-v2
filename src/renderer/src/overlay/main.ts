@@ -14,6 +14,7 @@ import { type Inked, POINTER, type Pt, ink, polyLength } from './ink'
 interface Bridge {
   onEvent(listener: (event: OverlayEvent) => void): void
   setInteractive(on: boolean): void
+  follow(on: boolean): void
   command(command: OverlayCommand): void
 }
 const bridge = (window as unknown as { overlay: Bridge }).overlay
@@ -246,10 +247,15 @@ const setStatus = (next: Exclude<State, 'off'>, label: string) => {
     dragFrom = null
   }
   setPill()
-  wake()
 }
 
+/** What a frame is drawn from, of what the events below may well leave as it was. */
+const drawnFrom = () => `${state}|${follow}|${driven}|${workLabel}|${hint}|${thinking}|${pointer ? `${pointer.x},${pointer.y}` : '-'}`
+
 bridge.onEvent((e) => {
+  // The same status or hint again, or the mode as it was, draws nothing new: no frame for it.
+  const maybeSame = e.type === 'status' || e.type === 'hint' || e.type === 'mode' || e.type === 'pointer'
+  const before = maybeSame ? drawnFrom() : ''
   // A busy status or hint brings up the spinner; whatever comes next takes it down.
   if (e.type === 'status' || e.type === 'hint') thinking = e.busy ? e.label : null
   else if (e.type === 'cursor' || e.type === 'marks') thinking = null
@@ -266,8 +272,24 @@ bridge.onEvent((e) => {
   else if (e.type === 'hint') hint = e.label
   else if (e.type === 'pointer') pointer = e.x === null ? null : { x: e.x, y: e.y }
   else if (e.type === 'status' && e.state !== 'off') setStatus(e.state, e.label)
-  wake()
+  askForPointer()
+  if (!maybeSame || drawnFrom() !== before) wake()
 })
+
+/** Whether the main process is sending the user's pointer (see askForPointer). */
+let pointerAsked = false
+/**
+ * The pointer is polled in the main process, so it is asked for only while the cursor may follow
+ * it: while the assistant isn't driving the cursor, in computer mode or while it works.
+ */
+const askForPointer = () => {
+  const want = !driven && (follow || state === 'working')
+  if (want === pointerAsked) return
+  pointerAsked = want
+  // Whatever it was is out of date by the time it's asked for again.
+  if (!want) pointer = null
+  bridge.follow(want)
+}
 
 // The bar takes clicks only while the pointer is over it; everywhere else, clicks fall through.
 pill.addEventListener('pointerenter', () => bridge.setInteractive(true))
@@ -501,16 +523,39 @@ const drawPointer = (x: number, y: number) => {
 
 // --- Frames --------------------------------------------------------------------------------
 
+/**
+ * A turning spinner is the one thing that animates for whole model calls, so on its own it gets
+ * about 15 frames a second, and each of those repaints only the box it turns in.
+ */
+const SPIN_FRAME_MS = 66
+/** Half the side of the box a spinner frame repaints: the arc's radius plus its stroke and some room. */
+const SPIN_BOX = 9
+
 let frame = 0
+/** The box the next frame repaints, or null for the whole screen (see wake and spinLater). */
+let clipNext: Rect | null = null
+let spinTimer: ReturnType<typeof setTimeout> | 0 = 0
 const render = () => {
   frame = 0
+  const clip = clipNext
+  clipNext = null
   const t = now()
   const dt = Math.min(64, t - last)
   last = t
   let busy = false
+  /** Where the spinner turns, when it is up. */
+  let spin: Rect | null = null
   // Display coordinates: the window may sit offset from the display's corner.
   ctx.setTransform(dpr, 0, 0, dpr, -view.dx * dpr, -view.dy * dpr)
-  ctx.clearRect(view.dx, view.dy, innerWidth, innerHeight)
+  // A spinner frame draws everything as usual, but only inside the spinner's box: nothing else
+  // has moved since the last frame, or that frame would have been a whole one.
+  ctx.save()
+  if (clip) {
+    ctx.beginPath()
+    ctx.rect(clip.x, clip.y, clip.w, clip.h)
+    ctx.clip()
+    ctx.clearRect(clip.x, clip.y, clip.w, clip.h)
+  } else ctx.clearRect(view.dx, view.dy, innerWidth, innerHeight)
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
 
@@ -680,17 +725,42 @@ const render = () => {
     if (text) {
       const base = layoutTag(text)
       const layout = deciding ? { ...base, w: base.w + SPIN_W } : base
-      drawTag(placeTag(cursor, layout, taken), layout, cursor.alpha, deciding ? t : undefined)
-      // The spinner turns.
-      if (deciding && !reduced) busy = true
+      const rect = placeTag(cursor, layout, taken)
+      drawTag(rect, layout, cursor.alpha, deciding ? t : undefined)
+      // The spinner turns (drawSpinner's centre, as drawTag places it).
+      if (deciding && !reduced) {
+        const cx = rect.x + TAG.padX + 5.5
+        const cy = rect.y + rect.h / 2
+        // On whole device pixels, so clearing and redrawing it leaves no half-cleared edge.
+        const x0 = view.dx + Math.floor((cx - SPIN_BOX - view.dx) * dpr) / dpr
+        const y0 = view.dy + Math.floor((cy - SPIN_BOX - view.dy) * dpr) / dpr
+        const x1 = view.dx + Math.ceil((cx + SPIN_BOX - view.dx) * dpr) / dpr
+        const y1 = view.dy + Math.ceil((cy + SPIN_BOX - view.dy) * dpr) / dpr
+        spin = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+      }
     }
   }
+  ctx.restore()
 
   if (busy) wake()
+  else if (spin) spinLater(spin)
 }
 
+/** Draws the whole screen on the next frame. */
 function wake() {
+  clipNext = null
   if (!frame) frame = requestAnimationFrame(render)
+}
+
+/** Turns the spinner in `box` a step, a moment from now, unless a whole frame comes first. */
+function spinLater(box: Rect) {
+  if (spinTimer) return
+  spinTimer = setTimeout(() => {
+    spinTimer = 0
+    if (frame) return
+    clipNext = box
+    frame = requestAnimationFrame(render)
+  }, SPIN_FRAME_MS)
 }
 
 resize()

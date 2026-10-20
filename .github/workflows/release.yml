@@ -1,6 +1,7 @@
 # Builds installers on every push to main and publishes them as releases of this
 # repository, where installed apps pick them up (src/main/updater.ts).
-# Uses the workflow's own GITHUB_TOKEN; no extra secrets are needed.
+# Secrets: MAC_CERT_P12 and MAC_CERT_PASSWORD, the self-signed certificate every macOS release is
+# signed with (scripts/make-mac-cert.sh). Windows stays unsigned; uploads use GITHUB_TOKEN.
 name: Release
 
 on:
@@ -20,6 +21,7 @@ env:
   VERSION: 0.1.${{ github.run_number }}
 
 jobs:
+  # Runs beside the builds; publishing waits for both.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -32,7 +34,6 @@ jobs:
   # Create the draft up front: if each platform job created its own, they would race
   # and publish two releases with the same tag.
   prepare:
-    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Create the draft release
@@ -56,39 +57,68 @@ jobs:
       - name: Set version
         run: npm pkg set version=${{ env.VERSION }}
       - run: bun run build
-      # The macOS screen capture helper (Swift); it says it's skipped on Windows.
-      - run: bun run build:mac-capture
-      - name: Build and upload installers (draft release)
+      # The macOS screen capture helper (Swift), rebuilt only when its source or Xcode changes.
+      - name: Xcode version
+        id: xcode
+        if: runner.os == 'macOS'
+        run: echo "version=$(xcodebuild -version | shasum | cut -c1-12)" >>"$GITHUB_OUTPUT"
+      - name: Cache the capture helper
+        id: helper
+        if: runner.os == 'macOS'
+        uses: actions/cache@v4
+        with:
+          path: native/mac-capture/out
+          key: mac-capture-${{ steps.xcode.outputs.version }}-${{ hashFiles('native/mac-capture/main.swift', 'scripts/build-mac-capture.ts') }}
+      - if: runner.os == 'macOS' && steps.helper.outputs.cache-hit != 'true'
+        run: bun run build:mac-capture
+      - name: Build and upload the Windows installer (draft release)
+        if: runner.os == 'Windows'
         run: bunx electron-builder --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # No certificates to find: Windows is unsigned, macOS ad-hoc signed (electron-builder.yml).
+          # No certificate: Windows is unsigned.
           CSC_IDENTITY_AUTO_DISCOVERY: false
-      # electron-builder can skip signing without failing, which shipped a Mac app that kept
-      # asking for the microphone. A bare linker signature still passes --verify; the
-      # identifier is what tells them apart. Failing here leaves the release a draft.
-      # The capture helper is checked on its own: --deep seals a bare executable in Resources as
-      # a resource without checking its signature. It must be signed, carry both architectures
-      # (the universal app keeps it as it is) and start (--selftest captures and asks nothing).
-      - name: Check the macOS signature
+      - name: Set up the signing certificate
+        if: runner.os == 'macOS'
+        run: bash scripts/ci-mac-signing.sh
+        env:
+          MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+      - name: Build, sign and upload the macOS installers and updates (draft release)
+        if: runner.os == 'macOS'
+        run: bunx electron-builder --publish always -c.mac.identity="chat-v2 Code Signing"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Only the identity named above, never another one found on the runner.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+      # Signed with the release certificate, with the designated requirement every version shares,
+      # and the capture helper signed and working (scripts/ci-mac-verify.sh). Failing here leaves
+      # the release a draft, which the cleanup job deletes. The zips are checked too: they are what
+      # Squirrel.Mac installs.
+      - name: Check the macOS signatures
         if: runner.os == 'macOS'
         run: |
-          for app in dist/mac/chat-v2.app dist/mac-arm64/chat-v2.app dist/mac-universal/chat-v2.app; do
-            codesign --verify --deep --strict --verbose=2 "$app"
-            info=$(codesign -dv --verbose=2 "$app" 2>&1)
-            echo "$info"
-            grep -qx 'Identifier=com.pandacover.chatv2' <<<"$info"
-            codesign -d --entitlements - "$app" 2>&1 | grep -q com.apple.security.device.audio-input
-            plutil -p "$app/Contents/Info.plist" | grep -q NSMicrophoneUsageDescription
-            helper="$app/Contents/Resources/chat-v2-capture"
-            codesign --verify --strict --verbose=2 "$helper"
-            codesign -dv --verbose=2 "$helper" 2>&1 | grep -q 'Signature=adhoc'
-            lipo "$helper" -verify_arch arm64 x86_64
-            "$helper" --selftest
+          for app in dist/mac/chat-v2.app dist/mac-arm64/chat-v2.app; do
+            bash scripts/ci-mac-verify.sh "$app" self-signed
           done
+          for arch in arm64 x64; do
+            unzipped="$RUNNER_TEMP/zip-$arch"
+            ditto -x -k "dist/chat-v2-${VERSION}-${arch}.zip" "$unzipped"
+            bash scripts/ci-mac-verify.sh "$unzipped/chat-v2.app" self-signed
+          done
+      # Apps from before the per-processor builds download "-universal.dmg". The Intel DMG runs on
+      # both (through Rosetta on Apple silicon), and their next update moves them to arm64. Drop
+      # this once no such installs are left.
+      - name: Upload the Intel DMG for apps that ask for the universal one
+        if: runner.os == 'macOS'
+        run: |
+          cp "dist/chat-v2-${VERSION}-x64.dmg" "dist/chat-v2-${VERSION}-universal.dmg"
+          gh release upload "v${VERSION}" "dist/chat-v2-${VERSION}-universal.dmg" --repo "${GITHUB_REPOSITORY}" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish:
-    needs: build
+    needs: [test, build]
     runs-on: ubuntu-latest
     steps:
       - name: Publish the draft once every platform has uploaded
@@ -100,3 +130,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message || 'manual run' }}
+
+  # A run that fails or is cancelled deletes its draft, so half-uploaded drafts don't pile up.
+  # Only a draft: a published release is never touched.
+  cleanup:
+    needs: [prepare, test, build, publish]
+    if: ${{ always() && (failure() || cancelled()) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete the draft release
+        run: |
+          draft=$(gh release view "v${VERSION}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq .isDraft 2>/dev/null || echo none)
+          if [ "$draft" = "true" ]; then
+            gh release delete "v${VERSION}" --repo "${GITHUB_REPOSITORY}" --yes
+            echo "Deleted the draft v${VERSION}."
+          else
+            echo "No draft v${VERSION} to delete ($draft)."
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -732,6 +732,36 @@ describe('glance', () => {
     expect(t.desktop.covers.length).toBe(covers)
   })
 
+  test('quitting closes the screen for good, mid-run or not, on Windows and on a Mac', async () => {
+    for (const desktop of [fakeDesktop(), fakeDesktop([win({})], 'darwin', { stream: true })]) {
+      const t = service(desktop)
+      await t.run(Computer.use((c) => c.begin('r')))
+      await t.runtime.dispose()
+      expect(desktop.closed).toBe(1)
+      expect(desktop.overlay.at(-1)).toEqual({ type: 'status', state: 'off', label: '' })
+    }
+  })
+
+  test('a reply that only glanced closes the stream when it ends, unless a reply has control or glanced since', async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.glance('a')))
+    await t.run(Computer.use((c) => c.replyEnded('a')))
+    expect(t.desktop.released).toBe(1)
+    // A newer reply's glance keeps the stream for that reply.
+    await t.run(Computer.use((c) => c.glance('a')))
+    await t.run(Computer.use((c) => c.glance('b')))
+    await t.run(Computer.use((c) => c.replyEnded('a')))
+    expect(t.desktop.released).toBe(1)
+    await t.run(Computer.use((c) => c.replyEnded('b')))
+    expect(t.desktop.released).toBe(2)
+    // A reply with control keeps it until it ends.
+    await t.run(Computer.use((c) => c.begin('c')))
+    await t.run(Computer.use((c) => c.replyEnded('d')))
+    expect(t.desktop.released).toBe(2)
+    await t.run(Computer.use((c) => c.end('c')))
+    expect(t.desktop.released).toBe(3)
+  })
+
   test('on a Mac, nothing is looked at before the permissions have been checked once', async () => {
     const desktop = fakeDesktop([win({})], 'darwin')
     let asked = 0

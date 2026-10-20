@@ -11,7 +11,7 @@ import { Broadcaster, Chat, DROPPED_SCREENSHOT } from '../src/main/services/Chat
 import { Computer, GLIDE_MS } from '../src/main/services/Computer'
 import { Db } from '../src/main/services/Db'
 import { OpenRouter } from '../src/main/services/OpenRouter'
-import { SettingsStore } from '../src/main/services/SettingsStore'
+import { AUTO_ROUTER, CONFIG_VERSION, DEFAULT_MODEL, SettingsStore } from '../src/main/services/SettingsStore'
 import { mergeReasoning, parseSseLine } from '../src/main/sse'
 import { withCacheBreakpoints } from '../src/main/services/OpenRouter'
 import { type ActionRecord, type CallRecord, type ReplyRecord, type TimingRecord, timingTable } from '../src/main/timing'
@@ -88,16 +88,17 @@ const stubOpenRouter = (replies: Array<Reply | Response | 'hang'>, sent: any[] =
   return sent
 }
 
-const setup = (desktop = fakeDesktop(), model = 'openai/gpt-test') => {
+const setup = (desktop = fakeDesktop(), model = 'openai/gpt-test', browserApi?: BrowserApi) => {
   const dir = mkdtempSync(join(tmpdir(), 'chat-v2-timing-'))
   dirs.push(dir)
-  writeFileSync(join(dir, 'config.json'), JSON.stringify({ titleModel: '', memoryModel: '', defaultModel: model }))
+  // Current, so the model is taken as chosen (an older file would have the auto-router migrated away).
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ configVersion: CONFIG_VERSION, titleModel: '', memoryModel: '', defaultModel: model }))
   const events: StreamEvent[] = []
   const paths = AppPaths.layer(dir)
   const base = Layer.mergeAll(Db.layer(join(dir, 'chat.db')), SettingsStore.layer({ encrypt: (s) => s, decrypt: (s) => s }).pipe(Layer.provide(paths)), paths)
   const providers = Layer.mergeAll(OpenRouter.layer, Attachments.layer, Computer.layer(desktop.ports)).pipe(Layer.provideMerge(base))
   // No script here uses the browser; handing it back is all a reply may ask of it.
-  const browser = Layer.succeed(Browser, { release: Effect.void } as unknown as BrowserApi)
+  const browser = Layer.succeed(Browser, browserApi ?? ({ release: Effect.void } as unknown as BrowserApi))
   const runtime = ManagedRuntime.make(
     Layer.mergeAll(
       Chat.layer.pipe(Layer.provide(providers), Layer.provide(Layer.succeed(Broadcaster, Broadcaster.of({ send: (e) => void events.push(e) }))), Layer.provide(browser)),
@@ -116,12 +117,13 @@ const setup = (desktop = fakeDesktop(), model = 'openai/gpt-test') => {
     }
     throw new Error('no reply summary in timing.jsonl')
   }
-  const send = async (text: string, computerEnabled = false) => {
+  const send = async (text: string, computerEnabled = false, browserEnabled = false) => {
     const s = await run(
       Effect.gen(function* () {
         const db = yield* Db
         const s = yield* db.use((d) => d.createSession({ title: 'New chat', model: null, systemPrompt: null, forkedFromSessionId: null }))
         if (computerEnabled) yield* db.use((d) => d.updateSession(s.id, { computerEnabled: true }))
+        if (browserEnabled) yield* db.use((d) => d.updateSession(s.id, { browserEnabled: true }))
         return s
       })
     )
@@ -333,16 +335,125 @@ describe('requests', () => {
       expect(body.reasoning).toEqual({ effort: 'low' })
     }
     // The newest screenshot is replaced by a note next step, so the breakpoint goes before it: on
-    // the user's message first, then on the glance's note, which stays as it is from then on.
+    // the user's message first, then on the click's result, which stays as it is from then on,
+    // and on the glance's note before it, should the result's breakpoint not be taken.
     expect(breakpoints(sent[0])).toEqual([0, 1])
     expect(sent[0].messages[1].content).toEqual([{ type: 'text', text: 'Open the File menu', cache_control: { type: 'ephemeral' } }])
     expect(sent[0].messages.at(-1).content[0].text).toStartWith('The screen as this task starts')
-    expect(breakpoints(sent[1])).toEqual([0, 2])
+    expect(breakpoints(sent[1])).toEqual([0, 2, 4])
     expect(sent[1].messages[2].content).toEqual([{ type: 'text', text: DROPPED_SCREENSHOT, cache_control: { type: 'ephemeral' } }])
+    expect(sent[1].messages[4]).toMatchObject({ role: 'tool', tool_call_id: 'b', content: [{ type: 'text', cache_control: { type: 'ephemeral' } }] })
     expect(sent[1].messages.at(-1).content[0]).toEqual({ type: 'text', text: 'Screenshot after that step:' })
     const step = sent[1].messages.find((m: any) => m.tool_calls)
     expect(step.reasoning_details).toEqual([{ type: 'reasoning.text', index: 0, format: 'anthropic-claude-v1', text: 'The File menu is top left.', signature: 'sig' }])
     await t.runtime.dispose()
+  })
+
+  /** A message as the cache sees it: the same text whether or not it is split into parts or marked. */
+  const plain = (m: any) => {
+    if (!Array.isArray(m.content)) return m
+    if (m.content.every((p: any) => p.type === 'text')) return { ...m, content: m.content.map((p: any) => p.text).join('') }
+    return { ...m, content: m.content.map(({ cache_control: _, ...p }: any) => p) }
+  }
+  /** Whether each request starts with everything the one before it marked for the cache, unchanged. */
+  const expectPrefixesKept = (sent: any[]) => {
+    for (let i = 1; i < sent.length; i++) {
+      const mark = breakpoints(sent[i - 1]).at(-1)!
+      expect(sent[i].messages.slice(0, mark + 1).map(plain)).toEqual(sent[i - 1].messages.slice(0, mark + 1).map(plain))
+    }
+  }
+
+  const fakeBrowser = () =>
+    ({
+      search: () => Effect.succeed([{ title: 'Camera settings', url: 'https://wiki.test/camera', snippet: 'Change the camera in Settings.' }]),
+      read: () => Effect.succeed({ url: 'https://wiki.test/camera', title: 'Camera - Game Wiki', text: `# Camera\n${'Open Settings > Controls. '.repeat(200)}` }),
+      status: () => Effect.void,
+      release: Effect.void
+    }) as unknown as BrowserApi
+
+  test('in a research run the breakpoint moves to the newest tool result, so pages already read are cached', async () => {
+    const sent = stubOpenRouter([
+      [...opening(), toolCall('s', 'browser_search', { query: 'camera settings' }), usage(900, 10)],
+      [...opening(), toolCall('r', 'browser_read', { url: 'https://wiki.test/camera' }), usage(1200, 10)],
+      [...opening(), text('Open Settings > Controls.'), usage(3000, 8)]
+    ])
+    const t = setup(fakeDesktop(), 'anthropic/claude-test', fakeBrowser())
+    await t.send('How do I change the camera?', false, true)
+    await t.records()
+    expect(sent).toHaveLength(3)
+    // Assistant turns with only tool calls carry no text, so the result after each is marked.
+    expect(sent[1].messages[2]).toMatchObject({ role: 'assistant', content: null })
+    // The newest result, and the user's message as a fallback: three breakpoints, under Anthropic's four.
+    expect(sent.map(breakpoints)).toEqual([
+      [0, 1],
+      [0, 1, 3],
+      [0, 1, 5]
+    ])
+    expect(sent[1].messages[3]).toMatchObject({ role: 'tool', tool_call_id: 's' })
+    expect(sent[2].messages[5]).toMatchObject({ role: 'tool', tool_call_id: 'r', content: [{ type: 'text', text: expect.stringContaining('# Camera'), cache_control: { type: 'ephemeral' } }] })
+    // Earlier results go back as they were, unmarked, so breakpoints never pile up.
+    expect(sent[2].messages[3].content).toEqual(expect.any(String))
+    expectPrefixesKept(sent)
+    await t.runtime.dispose()
+  })
+
+  test('in a computer run each step caches up to its newest result, before the screenshot', async () => {
+    const sent = stubOpenRouter([
+      [...opening(), toolCall('b', 'computer_click', { x: 10, y: 10, target: 'File' }), usage(900, 20)],
+      [...opening(), toolCall('c', 'computer_click', { x: 20, y: 40, target: 'Save' }), usage(1900, 20)],
+      [...opening(), text('Saved.'), usage(2900, 5)]
+    ])
+    const t = setup(fakeDesktop(), 'anthropic/claude-test')
+    await t.send('Save the file', true)
+    await t.records()
+    expect(sent).toHaveLength(3)
+    // [system, user, glance, click, result, screenshot, click, result, screenshot]
+    expect(sent.map(breakpoints)).toEqual([
+      [0, 1],
+      [0, 2, 4],
+      [0, 5, 7]
+    ])
+    expect(sent[2].messages[7]).toMatchObject({ role: 'tool', tool_call_id: 'c' })
+    // Both screenshots before the newest became notes, so nothing marked ever changes afterwards.
+    expect(sent[2].messages[2].content).toBe(DROPPED_SCREENSHOT)
+    expect(plain(sent[2].messages[5]).content).toBe(DROPPED_SCREENSHOT)
+    expect(sent[2].messages[8].content[1].type).toBe('image_url')
+    expectPrefixesKept(sent)
+    await t.runtime.dispose()
+  })
+
+  test('a reply in a computer chat that never takes control still closes the screen stream when it ends', async () => {
+    stubOpenRouter([[...opening(), text('Nothing to do on screen.'), usage(900, 6)]])
+    const t = setup(fakeDesktop(), 'anthropic/claude-test')
+    await t.send('What is 2 + 2?', true)
+    await t.records()
+    expect(t.desktop.prepared).toBeGreaterThan(0)
+    expect(t.desktop.released).toBe(1)
+    await t.runtime.dispose()
+  })
+
+  test('replies with tools run on the default model instead of the auto-router; plain chat keeps it', async () => {
+    const sent = stubOpenRouter([
+      [...opening(), toolCall('s', 'browser_search', { query: 'camera settings' }), usage(900, 10)],
+      [...opening(), text('Open Settings.'), usage(1200, 4)]
+    ])
+    const t = setup(fakeDesktop(), AUTO_ROUTER, fakeBrowser())
+    await t.send('How do I change the camera?', false, true)
+    await t.records()
+    expect(sent.map((b) => b.model)).toEqual([DEFAULT_MODEL, DEFAULT_MODEL])
+    // DeepSeek caches the unchanged start of each request itself: nothing is marked for it.
+    expect(JSON.stringify(sent)).not.toContain('cache_control')
+    // The reply is saved as the model that answered it.
+    expect(t.events.find((e) => e.type === 'done')).toMatchObject({ model: DEFAULT_MODEL })
+    await t.runtime.dispose()
+
+    const chat = stubOpenRouter([[...opening(), text('Hello.'), usage(100, 2)]])
+    const u = setup(fakeDesktop(), AUTO_ROUTER)
+    await u.send('Hi')
+    await u.records()
+    expect(chat[0].model).toBe(AUTO_ROUTER)
+    expect(JSON.stringify(chat[0])).not.toContain('cache_control')
+    await u.runtime.dispose()
   })
 
   test('other models get no breakpoints: their providers cache the unchanged start on their own', async () => {

@@ -6,7 +6,7 @@ import { Effect, Layer, ManagedRuntime, Stream } from 'effect'
 import type { ModelInfo, StreamEvent } from '../src/shared/types'
 import { AppPaths } from '../src/main/services/AppPaths'
 import { Attachments } from '../src/main/services/Attachments'
-import { Broadcaster, Chat, DROPPED_SCREENSHOT } from '../src/main/services/Chat'
+import { Broadcaster, CONTINUE_NOTE, Chat, DROPPED_SCREENSHOT } from '../src/main/services/Chat'
 import { Db } from '../src/main/services/Db'
 import { type ChatDelta, type ChatRequest, OpenRouter } from '../src/main/services/OpenRouter'
 import { Browser, type BrowserApi, type PageSnapshot } from '../src/main/services/Browser'
@@ -405,8 +405,11 @@ describe('chat', () => {
     await t2.waitForDone(1)
     const after = await t2.run(Chat.use((c) => c.view(s.id)))
     expect(after.path[1]!.message).toMatchObject({ status: 'complete', content: 'partial\nrest of it' })
-    // The partial reply is sent back as an assistant prefill.
-    expect(t2.requests[0]!.messages.at(-1)).toEqual({ role: 'assistant', content: 'partial' })
+    // The partial reply goes back as the assistant's turn, and a note asks for the rest.
+    expect(t2.requests[0]!.messages.slice(-2)).toEqual([
+      { role: 'assistant', content: 'partial' },
+      { role: 'user', content: CONTINUE_NOTE }
+    ])
     await t2.runtime.dispose()
   })
 
@@ -426,11 +429,41 @@ describe('chat', () => {
     await t.waitForDone(2)
     const after = await t.run(Chat.use((c) => c.view(s.id)))
     expect(after.path[1]!.message).toMatchObject({ status: 'complete', content: 'done line\n<artifact title="Counter">\nnext', lineCount: 3 })
-    // The prefill still carries everything received so far, partial line included.
-    expect(t.requests[1]!.messages.at(-1)).toEqual({ role: 'assistant', content: 'done line\n<artifact title="C' })
+    // The partial reply still carries everything received so far, partial line included.
+    expect(t.requests[1]!.messages.at(-2)).toEqual({ role: 'assistant', content: 'done line\n<artifact title="C' })
     const reEmitted = t.events.filter((e) => e.type === 'line' && e.index === 1).map((e) => (e as { text: string }).text)
     expect(reEmitted).toEqual(['<artifact title="C', '<artifact title="Counter">'])
     await t.runtime.dispose()
+  })
+
+  test('every model continues the same way: never a request ending on the assistant, always the note after it', async () => {
+    for (const model of ['anthropic/claude-sonnet-5.5', 'anthropic/claude-haiku-4.5', 'deepseek/deepseek-v4.1-flash']) {
+      let call = 0
+      const t = setup(
+        () => (++call === 1 ? Stream.concat(Stream.make('done line\nhalf a sen'), Stream.never) : Stream.make('tence.')),
+        undefined,
+        [],
+        [],
+        { titleModel: '', memoryModel: '', defaultModel: model }
+      )
+      const s = await t.run(newSession)
+      const view = await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'go', attachmentIds: [] })))
+      const id = view.path[1]!.message.id
+      while (!t.events.some((e) => e.type === 'line')) await new Promise((r) => setTimeout(r, 5))
+      await t.run(Chat.use((c) => c.stop(id)))
+      await t.waitForDone(1)
+
+      await t.run(Chat.use((c) => c.continue({ sessionId: s.id, assistantId: id })))
+      await t.waitForDone(2)
+      expect(t.requests[1]!.model).toBe(model)
+      expect(t.requests[1]!.messages.slice(-2)).toEqual([
+        { role: 'assistant', content: 'done line\nhalf a sen' },
+        { role: 'user', content: CONTINUE_NOTE }
+      ])
+      const after = await t.run(Chat.use((c) => c.view(s.id)))
+      expect(after.path[1]!.message).toMatchObject({ status: 'complete', content: 'done line\nhalf a sentence.' })
+      await t.runtime.dispose()
+    }
   })
 
   test('browser agent: tool calls run, steps persist, results go back to the model', async () => {

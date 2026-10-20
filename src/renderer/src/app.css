@@ -434,11 +434,11 @@ code.hljs {
   left: 0;
   z-index: 100;
   pointer-events: none;
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  /* Long tips wrap inside the pill instead of running past it (the text is the page colour,
-     so overflow vanished against the background and read as clipped). */
+  /* Plain block layout, not flex: the text wraps as ordinary inline text inside the padding, with
+     no flex item whose minimum size could hold it wider than the pill (the text is the page
+     colour, so overflow vanished against the background and read as clipped). */
+  display: block;
+  box-sizing: border-box;
   width: max-content;
   max-width: min(300px, calc(100vw - 12px));
   padding: 4px 8px;
@@ -463,8 +463,10 @@ code.hljs {
   opacity: 1;
   translate: 0 0;
 }
+/* The shortcut follows the text, and moves to a line of its own whole rather than splitting. */
 .app-tooltip kbd {
-  flex-shrink: 0;
+  display: inline-block;
+  margin-left: 6px;
   white-space: nowrap;
   font-family: var(--font-ui);
   font-size: 11px;

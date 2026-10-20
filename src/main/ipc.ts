@@ -4,7 +4,7 @@ import { BrowserWindow, app, dialog, ipcMain, shell, systemPreferences } from 'e
 import { Cause, Effect, type ManagedRuntime } from 'effect'
 import type { AudioAnalysis, IpcResult, MemoryView, NewAttachmentInput, SessionPatch, SettingsPatch } from '@shared/types'
 import { errorMessage } from './errors'
-import { checkForUpdates, installUpdate, updateState } from './updater'
+import { checkForUpdates, downloadUpdate, installUpdate, updateState } from './updater'
 import { publishArtifact } from './protocols'
 import { Attachments } from './services/Attachments'
 import { Browser } from './services/Browser'
@@ -212,6 +212,7 @@ const handlers: Record<string, Handler> = {
 
   'updates:get': () => Effect.sync(updateState),
   'updates:check': () => Effect.promise(checkForUpdates),
+  'updates:download': () => Effect.promise(downloadUpdate),
   'updates:install': () => Effect.promise(installUpdate),
 
   'browser:attach': (id) => Browser.use((b) => b.attach(Number(id))),

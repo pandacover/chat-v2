@@ -34,7 +34,8 @@ export type ChatMessage =
       reasoning_details?: ReasoningDetail[]
       reasoning?: string
     }
-  | { role: 'tool'; tool_call_id: string; content: string }
+  // Text parts only when the result carries a cache breakpoint (see withCacheBreakpoints).
+  | { role: 'tool'; tool_call_id: string; content: string | Array<Extract<ContentPart, { type: 'text' }>> }
 
 export interface ToolDefinition {
   type: 'function'
@@ -102,9 +103,13 @@ export const isAnthropic = (model: string) => /^~?anthropic\//.test(model)
 
 const EPHEMERAL: CacheControl = { type: 'ephemeral' }
 
-/** The message with a cache breakpoint on its last text, or on a text part added for one. */
+/**
+ * The message with a cache breakpoint on its last text, or on a text part added for one. Tool
+ * results take one too. An assistant turn with only tool calls has no text to mark (Anthropic
+ * rejects an empty text block), but its results always follow it and are marked instead.
+ */
 const marked = (m: ChatMessage): ChatMessage => {
-  if (m.role === 'tool' || m.content === null) return m
+  if (m.content === null) return m
   if (typeof m.content === 'string') return m.content === '' ? m : ({ ...m, content: [{ type: 'text', text: m.content, cache_control: EPHEMERAL }] } as ChatMessage)
   const at = m.content.findLastIndex((p) => p.type === 'text')
   if (at < 0) return m
@@ -115,22 +120,28 @@ const marked = (m: ChatMessage): ChatMessage => {
  * Anthropic caches a request's prefix only up to a `cache_control` breakpoint (OpenAI and Gemini
  * cache on their own). Two are marked: the system prompt, which also covers the tools (Anthropic
  * orders them first), and the newest message that can carry one and has no image, so the next step
- * reads every earlier step from the cache. A message with a screenshot is passed over: the next
- * step replaces it with a note (see DROPPED_SCREENSHOT in Chat.ts), so a breakpoint there would
- * never be read. The request's own messages are left as they are, so breakpoints never pile up
- * past Anthropic's limit of four.
+ * reads every earlier step from the cache. In a run with tools that is usually the newest tool
+ * result, so the pages and windows read so far are cached as well; the newest message before it
+ * that isn't a tool result is marked too, a third breakpoint, so the cache still grows step by step
+ * should a provider not take one on a tool result. A message with a screenshot is passed over: the
+ * next step replaces it with a note (see DROPPED_SCREENSHOT in Chat.ts), so a breakpoint there would
+ * never be read. The request's own messages are left as they are, so breakpoints never pile up past
+ * Anthropic's limit of four.
  */
 export const withCacheBreakpoints = (model: string, messages: ChatMessage[]): ChatMessage[] => {
   if (!isAnthropic(model)) return messages
   const out = [...messages]
   if (out[0]?.role === 'system') out[0] = marked(out[0])
+  let toolMarked = false
   for (let i = out.length - 1; i > 0; i--) {
     const content = out[i]!.content
     if (Array.isArray(content) && content.some((p) => p.type === 'image_url')) continue
+    if (toolMarked && out[i]!.role === 'tool') continue
     const m = marked(out[i]!)
     if (m === out[i]) continue
     out[i] = m
-    break
+    if (m.role !== 'tool') break
+    toolMarked = true
   }
   return out
 }

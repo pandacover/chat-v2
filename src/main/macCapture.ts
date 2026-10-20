@@ -26,10 +26,21 @@ export interface MacCaptureDeps {
   /** Says why the stream isn't being used, once per reason. */
   warn?: (message: string) => void
   idleMs?: number
+  /** How long a stream opened ahead of a reply (`prepare`) stays open unused. */
+  prewarmIdleMs?: number
 }
 
-/** With nothing captured for this long, the stream closes (as on Windows). */
-export const MAC_STREAM_IDLE_MS = 30_000
+/**
+ * With nothing captured for this long, the stream closes. Shorter than on Windows: while it runs,
+ * macOS keeps its recording indicator up and the helper keeps receiving frames.
+ */
+export const MAC_STREAM_IDLE_MS = 10_000
+/**
+ * Opened ahead of a reply (computer mode starting, the user writing: `prepare`), as on Windows
+ * (PREWARM_IDLE_MS in desktop.ts): the reply's glance renews it, and every reply in a computer
+ * chat closes it when it ends.
+ */
+export const MAC_PREWARM_IDLE_MS = 10_000
 /** How long `watchable` waits for the stream to come up, when it wasn't already. */
 export const WATCHABLE_WAIT_MS = 3000
 /** A stream that failed this many times stays off; getSources still works. */
@@ -128,11 +139,14 @@ export const macCaptureScreen = (deps: MacCaptureDeps): ScreenPort => {
     return p
   }
 
-  /** Whether the stream is up and still shows the primary display; if not, starts opening it. */
-  const use = () => {
+  /**
+   * Whether the stream is up and still shows the primary display; if not, starts opening it. It
+   * closes after `idleMs` without another call.
+   */
+  const use = (idleMs = deps.idleMs ?? MAC_STREAM_IDLE_MS) => {
     if (streaming !== null && streaming !== displayKey()) close()
     if (idle) clearTimeout(idle)
-    idle = setTimeout(close, deps.idleMs ?? MAC_STREAM_IDLE_MS)
+    idle = setTimeout(close, idleMs)
     if (streaming !== null) return true
     void open()
     return false
@@ -148,7 +162,7 @@ export const macCaptureScreen = (deps: MacCaptureDeps): ScreenPort => {
     keepsAppOut: () => live() && appOut,
 
     capture: async (size, cover, crop, opts) => {
-      // The stream's newest frame is the screen: every change reaches it within a frame (1/30 s),
+      // The stream's newest frame is the screen: every change reaches it within a frame (1/15 s),
       // and this app is never in it, so `fresh` needs nothing more.
       if (use() && helper) {
         const t = performance.now()
@@ -203,7 +217,13 @@ export const macCaptureScreen = (deps: MacCaptureDeps): ScreenPort => {
       }
     },
 
-    prepare: () => void use(),
-    release: close
+    prepare: () => void use(deps.prewarmIdleMs ?? MAC_PREWARM_IDLE_MS),
+    release: close,
+    /** Quitting: stops the stream and ends the helper process; nothing starts it again. */
+    close: () => {
+      close()
+      unusable = 'the app is quitting'
+      helper?.close()
+    }
   }
 }

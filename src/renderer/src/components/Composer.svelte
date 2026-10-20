@@ -2,6 +2,7 @@
   import { tip } from '@/lib/tooltip'
   import { untrack } from 'svelte'
   import type { Attachment } from '@shared/types'
+  import { modKey, shortcut } from '@/lib/keys'
   import { fade, pop } from '@/lib/motion'
   import { startRecording, type Recording } from '@/lib/recorder'
   import { app } from '@/lib/store.svelte'
@@ -239,7 +240,8 @@
   }
 
   const onWindowKey = (e: KeyboardEvent) => {
-    if (e.ctrlKey && e.key.toLowerCase() === 'm') {
+    // Cmd+M on a Mac, Ctrl+M elsewhere.
+    if (modKey(e) && e.key.toLowerCase() === 'm') {
       e.preventDefault()
       // Holding the keys down must not flip the mic on and off.
       if (e.repeat) return
@@ -340,7 +342,7 @@
     <button class="icon-btn" use:tip={'Attach files'} onclick={() => fileInput?.click()}><Icon name="paperclip" size={17} /></button>
     <button
       class="icon-btn select-none {recording ? '!bg-accent !text-on-accent' : ''}"
-      use:tip={{ text: 'Voice: hold to talk, or click to start and stop', kbd: 'Ctrl M' }}
+      use:tip={{ text: 'Voice: hold to talk, or click to start and stop', kbd: shortcut('M') }}
       disabled={transcribing}
       onpointerdown={micDown}
       onpointerup={micUp}
@@ -370,8 +372,8 @@
         aria-checked={computerEnabled}
         aria-label="Computer"
         use:tip={computerEnabled
-          ? 'The assistant can see your screen and work in your apps in this chat, with its own cursor. Your mouse stays yours.'
-          : 'Let the assistant see your screen and use the mouse and keyboard in this chat'}
+          ? 'Sees your screen and works in your apps with its own cursor. Your mouse stays yours.'
+          : 'Let the assistant use your screen in this chat'}
         onclick={oncomputer}
       >
         <Icon name="monitor" size={14} /><span class="hidden @sm:inline">Computer</span>

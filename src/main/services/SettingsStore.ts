@@ -4,9 +4,23 @@ import type { Settings, SettingsPatch, SettingsView } from '@shared/types'
 import { ConfigError, MissingApiKey, errorMessage } from '../errors'
 import { AppPaths } from './AppPaths'
 
+/**
+ * OpenRouter's auto-router, the default before DEFAULT_MODEL. It can route each request of one
+ * reply to a different model, so nothing is cached between steps.
+ */
+export const AUTO_ROUTER = 'openrouter/auto'
+
+/**
+ * A fixed, inexpensive model that sees screenshots and takes tools. DeepSeek caches the unchanged
+ * start of each request on its own, so every step reads the steps before it from the cache.
+ */
+export const DEFAULT_MODEL = 'deepseek/deepseek-v4.1-flash'
+
+/** The model a reply that uses tools runs on: the chat's, unless that is the auto-router. */
+export const toolModel = (model: string) => (model === AUTO_ROUTER ? DEFAULT_MODEL : model)
+
 export const DEFAULT_SETTINGS: Settings = {
-  // OpenRouter's auto-router always exists; pick a specific model in Settings.
-  defaultModel: 'openrouter/auto',
+  defaultModel: DEFAULT_MODEL,
   systemPrompt: 'You are a helpful, concise assistant. Format answers with Markdown.',
   temperature: 0.7,
   sttModel: 'scribe_v2',
@@ -78,6 +92,23 @@ const writeAtomic = (file: string, data: string) => {
   renameSync(`${file}.tmp`, file)
 }
 
+/**
+ * The version of config.json itself, kept in the file next to the settings. A file older than
+ * this is brought up to date once, at startup (MIGRATIONS), and every write stamps this version,
+ * so a migration never runs twice.
+ */
+export const CONFIG_VERSION = 2
+
+/** What reaching each version changes in the file as it was. Files from before versions are 1. */
+const MIGRATIONS: Record<number, (raw: Record<string, unknown>) => void> = {
+  // The default moved off the auto-router. Choosing it again later is kept: the file is version 2 by then.
+  2: (raw) => {
+    if (raw.defaultModel === AUTO_ROUTER) raw.defaultModel = DEFAULT_MODEL
+  }
+}
+
+const configText = (settings: object) => JSON.stringify({ configVersion: CONFIG_VERSION, ...settings }, null, 2) + '\n'
+
 export class SettingsStore extends Context.Service<
   SettingsStore,
   {
@@ -99,10 +130,21 @@ export class SettingsStore extends Context.Service<
             catch: (cause) => new ConfigError({ message: `${what}: ${errorMessage(cause)}`, cause })
           })
 
+        // Once, at startup: an older config.json is brought up to date, keeping everything else in
+        // it as it was. A file that can't be read is left alone (reading it says why).
+        yield* attempt('Could not update config.json', () => {
+          if (!existsSync(paths.configFile)) return
+          const { configVersion, ...raw } = JSON.parse(readFileSync(paths.configFile, 'utf8')) as Record<string, unknown>
+          const from = typeof configVersion === 'number' ? configVersion : 1
+          if (from >= CONFIG_VERSION) return
+          for (let v = from + 1; v <= CONFIG_VERSION; v++) MIGRATIONS[v]?.(raw)
+          writeAtomic(paths.configFile, configText(raw))
+        }).pipe(Effect.catch((e) => Effect.logWarning(e.message)))
+
         // config.json is meant to be hand-editable, so it is re-read on every access.
         const readConfig = attempt('Could not read config.json', () => {
           if (!existsSync(paths.configFile)) {
-            writeAtomic(paths.configFile, JSON.stringify(DEFAULT_SETTINGS, null, 2) + '\n')
+            writeAtomic(paths.configFile, configText(DEFAULT_SETTINGS))
             return DEFAULT_SETTINGS
           }
           return normalizeSettings(JSON.parse(readFileSync(paths.configFile, 'utf8')))
@@ -138,7 +180,7 @@ export class SettingsStore extends Context.Service<
             const current = yield* readConfig
             const next = normalizeSettings({ ...current, ...patch.settings })
             yield* attempt('Could not write config.json', () =>
-              writeAtomic(paths.configFile, JSON.stringify(next, null, 2) + '\n')
+              writeAtomic(paths.configFile, configText(next))
             )
           }
           if (patch.openRouterKey !== undefined || patch.elevenLabsKey !== undefined) {

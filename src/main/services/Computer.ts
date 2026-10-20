@@ -106,12 +106,19 @@ export interface ComputerApi {
   readonly begin: (owner: string) => Effect.Effect<void, ComputerError>
   /** Hands control back. Marks stay on screen until the user clears them. Safe to call twice. */
   readonly end: (owner: string) => Effect.Effect<void>
+  /**
+   * A reply in a computer chat is over, however it went: the screen stream it may have opened (its
+   * glance, the prewarm while the user wrote) closes now rather than when idle, unless a reply has
+   * control or another reply has glanced since. The next glance or prewarm opens it again.
+   */
+  readonly replyEnded: (reply: string) => Effect.Effect<void>
   readonly owner: () => string | null
   /** Called with the owning reply when the user presses Stop on the overlay. */
   readonly onStop: (handler: (owner: string) => void) => void
   /**
    * Computer mode, on while a chat with computer use switched on is open: the sketch cursor stays
-   * on screen and follows the user's pointer between tasks.
+   * on screen and follows the user's pointer between tasks, and the input helper and the screen
+   * stream get ready ahead of a reply.
    */
   readonly setMode: (on: boolean) => Effect.Effect<void>
   /** What the assistant is doing between actions (reading a page), shown under the cursor. */
@@ -747,6 +754,13 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               if (resting !== 'done') chatWindows.show()
             }),
 
+          replyEnded: (id) =>
+            Effect.sync(() => {
+              if (owner !== null || (glancedFor !== null && glancedFor !== id)) return
+              glancedFor = null
+              screen.release?.()
+            }),
+
           owner: () => owner,
           onStop: (handler) => (stopHandler = handler),
 
@@ -1117,11 +1131,13 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
           }
         })
 
-        // Quitting mid-run: nothing stays drawn on screen and the chat isn't left minimised.
+        // Quitting, mid-run or not: nothing stays drawn on screen, the chat isn't left minimised,
+        // and the screen stream (and the helper keeping it, on a Mac) ends for good.
         yield* Effect.addFinalizer(() =>
           Effect.sync(() => {
             driver?.close()
-            screen.release?.()
+            if (screen.close) screen.close()
+            else screen.release?.()
             overlay.send({ type: 'status', state: 'off', label: '' })
             chatWindows.show()
           })

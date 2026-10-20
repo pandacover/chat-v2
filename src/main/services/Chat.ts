@@ -18,7 +18,7 @@ import { Db } from './Db'
 import { type ChatMessage, type ChatRequest, type ContentPart, OpenRouter } from './OpenRouter'
 import { Browser } from './Browser'
 import { Computer } from './Computer'
-import { SettingsStore } from './SettingsStore'
+import { SettingsStore, toolModel } from './SettingsStore'
 
 /** Pushes stream events to every open window. */
 export class Broadcaster extends Context.Service<Broadcaster, { readonly send: (event: StreamEvent) => void }>()(
@@ -34,6 +34,10 @@ export const NEW_SESSION_TITLE = 'New chat'
  * provider can serve it from its cache.
  */
 export const DROPPED_SCREENSHOT = '[An earlier screenshot, removed to save space.]'
+
+/** Continuing a reply: the partial reply goes back as the assistant's turn, and this asks for the rest. */
+export const CONTINUE_NOTE =
+  "Your reply above was cut off. Continue it from exactly where it stopped: don't repeat anything you already wrote, don't start over, and don't say that you are continuing."
 
 export const titleFrom = (text: string): string => {
   const line = text.replace(/\s+/g, ' ').trim()
@@ -160,7 +164,7 @@ export class Chat extends Context.Service<
        * The request for a reply, and `watch`: whether its computer_wait can end once the screen is
        * ready (Computer.canWatch), settled once here, before the model is told.
        */
-      const buildRequest = Effect.fn('Chat.buildRequest')(function* (assistant: Message, prefill: string | null) {
+      const buildRequest = Effect.fn('Chat.buildRequest')(function* (assistant: Message, partial: string | null) {
         const settings = yield* settingsStore.get
         const session = yield* db.require('Session', (d) => d.getSession(assistant.sessionId))
         const watch = usesComputer(session) ? yield* computer.canWatch : false
@@ -207,9 +211,10 @@ export class Chat extends Context.Service<
             messages.push({ role: 'assistant', content: summarizeSteps(withEdits(m)) })
           }
         }
-        // Assistant prefill: the model continues the partial reply instead of starting over.
-        // Some providers reject a prefill ending in whitespace.
-        if (prefill) messages.push({ role: 'assistant', content: summarizeSteps(prefill).trimEnd() })
+        // Continuing: the partial reply goes back as the assistant's turn, and a note asks for the
+        // rest. (Not a prefill, a request ending on the assistant's turn: newer Claude models reject
+        // those, and the rest vary.)
+        if (partial) messages.push({ role: 'assistant', content: summarizeSteps(partial).trimEnd() }, { role: 'user', content: CONTINUE_NOTE })
         const request = {
           model: assistant.model ?? session.model ?? settings.defaultModel,
           messages,
@@ -271,11 +276,11 @@ export class Chat extends Context.Service<
        * it seeds the buffer so the continuation completes that line instead of
        * starting a new one.
        */
-      const generate = (assistant: Message, prefill: string | null, carry: string | null) => {
+      const generate = (assistant: Message, partial: string | null, carry: string | null) => {
         const buffer = makeLineBuffer()
         if (carry !== null) buffer.push(carry)
         // Continuing after a complete line: a leading newline would add a blank line.
-        let skipLeadingBlank = prefill !== null && carry === null
+        let skipLeadingBlank = partial !== null && carry === null
         const emit = (text: string) => {
           if (skipLeadingBlank) {
             skipLeadingBlank = false
@@ -289,6 +294,8 @@ export class Chat extends Context.Service<
         const endLine = Effect.suspend(() => Effect.forEach(buffer.flush(), emit, { discard: true }))
         let usedBrowser = false
         let usedComputer = false
+        /** A reply with computer tools, which glances at the screen whether or not it acts. */
+        let lookedAtScreen = false
         // A continued reply keeps counting from what it already used.
         let usage: Usage | null = assistant.usage ? { ...assistant.usage } : null
         let answeredBy: string | null = null
@@ -308,25 +315,28 @@ export class Chat extends Context.Service<
         }
 
         return Effect.gen(function* () {
-          const { request, watch } = yield* buildRequest(assistant, prefill)
+          const { request, watch } = yield* buildRequest(assistant, partial)
           const chatModel = request.model
           replyModel = chatModel
           const settings = yield* settingsStore.get.pipe(Effect.orElseSucceed(() => null))
           const refs = new Map<string, string>()
           const computerRun = request.tools?.some((t) => t.function.name.startsWith('computer_')) ?? false
+          lookedAtScreen = computerRun
           const maxSteps = computerRun ? MAX_COMPUTER_STEPS : MAX_AGENT_STEPS
           // A computer step is a small decision on a fresh screenshot, so the model thinks as much
           // as Settings say (low by default). Models that can't take an effort ignore it.
           if (computerRun) request.reasoning = { effort: settings?.computerReasoningEffort ?? 'low' }
           // Computer runs can have their own model, so a chat can talk with one and act with a faster one.
-          const ownModel = (computerRun && settings?.computerModel) || chatModel
+          // Runs with tools never go to the auto-router: it could pick another model at every step.
+          const actingModel = request.tools ? toolModel(chatModel) : chatModel
+          const ownModel = (computerRun && settings?.computerModel) || actingModel
           // The newest screenshot message this run added; the one before it is dropped when it comes.
           let lastShot: ChatMessage | null = null
           // The screen comes with the first request, so the model can act on its first step rather
           // than spend a round trip asking for a screenshot. This only looks: the chat window stays
           // up (left out of the capture on Windows, painted grey on a Mac) until the first computer
           // action takes over.
-          if (computerRun && prefill === null) {
+          if (computerRun && partial === null) {
             const glance = yield* computer.glance(assistant.id).pipe(timer.action(0, 'computer.glance'))
             if (glance) {
               const seen: ChatMessage = {
@@ -347,7 +357,7 @@ export class Chat extends Context.Service<
             let thought = ''
             const reasoning: ReasoningDetail[] = []
             let received = false
-            request.model = yield* modelFor(ownModel, chatModel, settings?.visionModel ?? '', request.messages)
+            request.model = yield* modelFor(ownModel, actingModel, settings?.visionModel ?? '', request.messages)
             // Once another model has answered, the reply is saved (and timed) as the last one's.
             if (request.model !== chatModel || answeredBy !== null) answeredBy = request.model
             // While the model decides, the sketch cursor waits where it is with a spinner; the next
@@ -457,6 +467,8 @@ export class Chat extends Context.Service<
           Effect.ensuring(Effect.suspend(() => (usedBrowser ? browser.release : Effect.void))),
           Effect.ensuring(Effect.suspend(() => (usedComputer ? computer.end(assistant.id) : Effect.void))),
           Effect.ensuring(Effect.suspend(() => computer.hint(''))),
+          // Text-only replies in a computer chat glanced at the screen too: don't leave its stream running.
+          Effect.ensuring(Effect.suspend(() => (lookedAtScreen ? computer.replyEnded(assistant.id) : Effect.void))),
           Effect.onExit((exit) =>
             Effect.gen(function* () {
               // The unfinished line is kept (and marked partial) so nothing received is lost.
@@ -476,8 +488,8 @@ export class Chat extends Context.Service<
         )
       }
 
-      const start = (assistant: Message, prefill: string | null = null, carry: string | null = null) =>
-        FiberMap.run(generations, assistant.id, generate(assistant, prefill, carry), { onlyIfMissing: true }).pipe(
+      const start = (assistant: Message, partial: string | null = null, carry: string | null = null) =>
+        FiberMap.run(generations, assistant.id, generate(assistant, partial, carry), { onlyIfMissing: true }).pipe(
           Effect.asVoid
         )
 
