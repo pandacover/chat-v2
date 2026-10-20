@@ -67,6 +67,9 @@ jobs:
         run: bunx electron-builder --mac dir --arm64 --x64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
+          # electron-builder skips signing on pull-request builds by default; this one is ad-hoc
+          # and needs no secrets, so sign it like any other build.
+          CSC_FOR_PULL_REQUEST: true
       - name: Check the packaged apps
         run: |
           for app in dist/mac/chat-v2.app dist/mac-arm64/chat-v2.app; do
