@@ -1,10 +1,13 @@
 import { join } from 'node:path'
-import { BrowserWindow, app, nativeTheme, safeStorage, screen, session, shell, webContents } from 'electron'
+import { spawn } from 'node:child_process'
+import { BrowserWindow, app, autoUpdater as nativeUpdater, nativeTheme, safeStorage, screen, session, shell, webContents } from 'electron'
 import { Effect, Layer, ManagedRuntime } from 'effect'
 import type { BrowserEvent, StreamEvent } from '@shared/types'
 import { type MainServices, pinWindow, registerIpc } from './ipc'
+import { killAllChildren, runningChildren, stopAllChildren, trackChild } from './helperProcess'
+import { setAppMenu } from './menu'
 import { handleProtocols, registerSchemes } from './protocols'
-import { initUpdater } from './updater'
+import { initUpdater, offerMoveToApplications } from './updater'
 import { AppPaths } from './services/AppPaths'
 import { Sketches } from './services/Sketches'
 import { Attachments } from './services/Attachments'
@@ -39,6 +42,31 @@ const cipher: SecretCipher = {
  */
 let quitting = false
 const isQuitting = () => quitting
+
+/**
+ * How long quitting waits for the services to close (replies marked interrupted, the database
+ * closed) before it goes ahead anyway. Anything left is recovered on the next launch.
+ */
+const DISPOSE_TIMEOUT_MS = 3000
+/** After that, how long app.quit() gets before app.exit() ends the process regardless. */
+const EXIT_DEADLINE_MS = 2000
+
+let quitStarted = 0
+/** Each step of quitting, timed from its start, to find whatever holds it up. */
+const quitLog = (step: string) => console.log(`[quit] ${step} +${Math.round(performance.now() - quitStarted)} ms`)
+
+/**
+ * The first request to quit (Cmd+Q, the Dock, an update): from here the app looks gone at once,
+ * and the helper processes are asked to exit, before the services close.
+ */
+const beginQuit = (why: string) => {
+  if (quitting) return
+  quitting = true
+  quitStarted = performance.now()
+  quitLog(`${why}, ${runningChildren()} child processes`)
+  for (const win of BrowserWindow.getAllWindows()) if (!win.isDestroyed()) win.hide()
+  stopAllChildren()
+}
 
 const sendAll = (channel: string, payload: unknown) => {
   if (quitting) return
@@ -188,8 +216,11 @@ app.whenReady().then(async () => {
 
   registerIpc(rt, isQuitting)
   handleProtocols(rt, isQuitting)
+  setAppMenu()
   await createWindow()
   initUpdater()
+  void offerMoveToApplications()
+  if (process.env.CHAT_V2_QUIT_TEST) quitTest()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) void createWindow()
@@ -201,12 +232,44 @@ app.on('window-all-closed', () => {
 })
 
 // Disposing the runtime interrupts in-flight generations, which marks them `interrupted`
-// so they can be continued on next launch.
+// so they can be continued on next launch. The first quit waits for that, but only so long: a
+// dispose that never finished used to swallow Cmd+Q, and only a second Quit (the Dock's) got out.
 let disposed = false
 app.on('before-quit', (event) => {
-  quitting = true
+  beginQuit('before-quit')
   if (disposed || !runtime) return
   event.preventDefault()
   disposed = true
-  void runtime.dispose().finally(() => app.quit())
+  const disposing = process.env.CHAT_V2_QUIT_TEST === 'hang' ? new Promise<void>(() => {}) : runtime.dispose()
+  const timeout = new Promise<string>((resolve) => setTimeout(() => resolve('timed out'), DISPOSE_TIMEOUT_MS))
+  void Promise.race([disposing.then(() => 'done', (e: unknown) => `failed: ${String(e)}`), timeout]).then((how) => {
+    quitLog(`dispose ${how}`)
+    app.quit()
+    // Something still holding the quit up (a window that won't close) doesn't keep the app alive.
+    setTimeout(() => {
+      quitLog('app.quit() did not finish: exiting')
+      app.exit(0)
+    }, EXIT_DEADLINE_MS)
+  })
 })
+
+app.on('will-quit', () => quitLog('will-quit'))
+app.on('quit', () => quitLog('quit'))
+// Whatever helper is still running when the process ends is killed with it.
+process.on('exit', () => killAllChildren())
+
+// Installing an update closes the windows before before-quit, so quitting starts here for it.
+if (process.platform === 'darwin') nativeUpdater.on('before-quit-for-update', () => beginQuit('before-quit-for-update'))
+
+/**
+ * CHAT_V2_QUIT_TEST (scripts/quit-smoke.ts): starts a stand-in helper process that never exits on
+ * its own, prints its pid, and quits. `hang` also makes closing the services never finish.
+ */
+const quitTest = () => {
+  const child = trackChild(spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, stdio: 'pipe' }))
+  console.log(`[quit-test] child ${child.pid}`)
+  setTimeout(() => {
+    console.log('[quit-test] quitting')
+    app.quit()
+  }, 1000)
+}
