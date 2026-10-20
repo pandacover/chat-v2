@@ -37,7 +37,8 @@ mac:
   # Its designated requirement (identifier + certificate hash) is the same for every version,
   # so macOS keeps the app's privacy permissions across updates and Squirrel.Mac installs them in
   # place. Not notarised (that needs a paid Developer ID). Builds without the certificate (pull
-  # requests, local) are ad-hoc signed. Never unsigned: macOS then can't tie privacy choices to the
+  # requests, local) are ad-hoc signed; but electron-builder looks "-" up as a name first, so on a
+  # Mac with the release certificate installed (its name has a "-") it signs with that. Never unsigned: macOS then can't tie privacy choices to the
   # app, and the microphone prompt comes back after every Allow or Don't Allow.
   identity: "-"
   notarize: false

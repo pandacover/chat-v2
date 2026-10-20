@@ -32,20 +32,26 @@ jobs:
           key: mac-capture-${{ steps.xcode.outputs.version }}-${{ hashFiles('native/mac-capture/main.swift', 'scripts/build-mac-capture.ts') }}
       - if: steps.helper.outputs.cache-hit != 'true'
         run: bun run build:mac-capture
+      # Before the certificate is on the runner: electron-builder looks `identity: "-"` up as a name,
+      # and "chat-v2 Code Signing" contains a "-", so once it's installed it signs with it instead.
+      - name: Build 0.0.3 ad-hoc
+        run: |
+          npm pkg set version=0.0.3
+          bunx electron-builder --mac dir --arm64 --publish never -c.directories.output=dist-adhoc
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
       - name: Set up the signing certificate
         run: bash scripts/ci-mac-signing.sh
         env:
           MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
           MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
       # This runner's processor only (Apple silicon); the zip is what Squirrel.Mac installs.
-      - name: Build 0.0.1 and 0.0.2 with the certificate, and 0.0.3 ad-hoc
+      - name: Build 0.0.1 and 0.0.2 with the certificate
         run: |
           for v in 0.0.1 0.0.2; do
             npm pkg set version=$v
             bunx electron-builder --mac zip --arm64 --publish never -c.directories.output=dist-$v -c.mac.identity="chat-v2 Code Signing"
           done
-          npm pkg set version=0.0.3
-          bunx electron-builder --mac dir --arm64 --publish never -c.directories.output=dist-adhoc
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
       - name: Check the signatures
