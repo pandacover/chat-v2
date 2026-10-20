@@ -12,6 +12,8 @@ let el: HTMLDivElement | null = null
 let showTimer: ReturnType<typeof setTimeout> | undefined
 let warmUntil = 0
 let owner: HTMLElement | null = null
+/** The side the open tooltip asked for, kept to place it again when its size changes. */
+let openPlacement: 'top' | 'bottom' = 'top'
 
 const ensure = () => {
   if (el) return el
@@ -20,6 +22,9 @@ const ensure = () => {
   el.id = 'app-tooltip'
   el.className = 'app-tooltip'
   document.body.appendChild(el)
+  // Placed by its size when it opens; a face that loads after that (fonts download on first use)
+  // can rewrap the text, so it is placed again rather than left over its anchor or off screen.
+  new ResizeObserver(() => owner && place(owner, openPlacement)).observe(el)
   return el
 }
 
@@ -61,7 +66,8 @@ const show = (anchor: HTMLElement, input: TipInput) => {
   owner = anchor
   anchor.setAttribute('aria-describedby', 'app-tooltip')
   tip.dataset.open = 'false'
-  place(anchor, data.placement ?? 'top')
+  openPlacement = data.placement ?? 'top'
+  place(anchor, openPlacement)
   // Commit the closed state, then open in the same frame (no wait for requestAnimationFrame).
   void tip.offsetWidth
   tip.dataset.open = 'true'
