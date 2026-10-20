@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tip } from '@/lib/tooltip'
   import { flip } from 'svelte/animate'
+  import { SvelteSet } from 'svelte/reactivity'
   import type { Session } from '@shared/types'
   import { ease, fade, fly } from '@/lib/motion'
   import { shortcut } from '@/lib/keys'
@@ -60,6 +61,28 @@
     return buckets.filter(([, items]) => items.length > 0)
   })
 
+  // Collapsed groups, by label, kept across launches. A search shows every group open.
+  const COLLAPSED_KEY = 'chat-v2:collapsed-groups'
+  const collapsed = new SvelteSet<string>(JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '[]') as string[])
+  const toggleGroup = (label: string) => {
+    if (collapsed.has(label)) collapsed.delete(label)
+    else collapsed.add(label)
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsed]))
+  }
+
+  // Headers and chats in one keyed list, so a header moves with the same flip as the chats around it.
+  type Row = { key: string; label: string; open: boolean; entry?: undefined } | { key: string; entry: Entry }
+  const rows = $derived.by(() => {
+    const searching = query.trim() !== ''
+    const out: Row[] = []
+    for (const [label, items] of groups) {
+      const open = searching || !collapsed.has(label)
+      out.push({ key: `group:${label}`, label, open })
+      if (open) for (const e of items) out.push({ key: `chat:${e.key}`, entry: e })
+    }
+    return out
+  })
+
   const startRename = (s: Session) => {
     confirming = null
     renaming = s.id
@@ -110,63 +133,80 @@
       {/if}
     </label>
 
-    <nav class="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-      {#each groups as [label, items] (label)}
-        <div class="px-2.5 pt-5 pb-1.5 text-[11.5px] text-muted">{label}</div>
-        <div class="flex flex-col gap-1">
-        {#each items as e (e.key)}
-          {@const s = e.session}
-          {@const active = (app.view?.session.id ?? '') === e.key}
-          <div
-            animate:flip={{ duration: 200, easing: ease }}
-            class="group relative flex h-9 items-center rounded-md text-[13px] transition-colors {active
-              ? 'bg-surface text-fg shadow-[0_1px_0_var(--line)]'
-              : 'text-fg-2 hover:bg-hover hover:text-fg'}"
-          >
-            {#if s && renaming === s.id}
-              <input
-                use:focusSelect
-                bind:value={draft}
-                class="mx-1 h-6 min-w-0 flex-1 rounded-sm bg-bg px-1.5 text-fg outline-none"
-                onkeydown={(e) => {
-                  if (e.key === 'Enter') commitRename()
-                  if (e.key === 'Escape') {
-                    e.preventDefault()
-                    renaming = null
-                  }
-                }}
-                onblur={commitRename}
-              />
-            {:else if s && confirming === s.id}
-              <div class="flex w-full items-center gap-1 pr-1 pl-2.5" in:fade={{ duration: 120 }}>
-                <span class="min-w-0 flex-1 truncate text-fg">Delete this chat?</span>
-                <button class="rounded-sm px-1.5 py-0.5 text-[12px] text-muted hover:text-fg" onclick={() => (confirming = null)}>Keep</button>
-                <button class="rounded-sm px-1.5 py-0.5 text-[12px] font-medium text-danger hover:bg-hover" onclick={() => app.remove(s.id)}>Delete</button>
-              </div>
-            {:else}
-              <button
-                class="flex h-full min-w-0 flex-1 items-center gap-1.5 pl-2.5 text-left"
-                onclick={() => (s ? app.open(s.id) : app.newSession())}
-                ondblclick={() => s && startRename(s)}
-              >
-                {#if e.draft}<span class="shrink-0 text-accent" use:tip={'Unsent draft'}><Icon name="pen" size={12} /></span>{/if}
-                {#if s?.forkedFromSessionId}<span class="text-muted" use:tip={'Forked chat'}><Icon name="branch" size={12} /></span>{/if}
-                <span class="truncate {s ? '' : 'italic'}">{e.title}</span>
-              </button>
-              <div class="flex shrink-0 items-center pr-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
-                {#if s}
-                  <button class="icon-btn !p-1" use:tip={s.pinnedAt != null ? 'Unpin chat' : 'Pin chat'} onclick={() => app.pin(s.id, s.pinnedAt == null)}>
-                    <Icon name="pin" size={13} class={s.pinnedAt != null ? '' : 'rotate-45'} />
-                  </button>
-                  <button class="icon-btn !p-1" use:tip={'Rename'} onclick={() => startRename(s)}><Icon name="edit" size={13} /></button>
-                  <button class="icon-btn !p-1" use:tip={'Delete'} onclick={() => (confirming = s.id)}><Icon name="trash" size={13} /></button>
-                {:else}
-                  <button class="icon-btn !p-1" use:tip={'Discard draft'} onclick={() => app.discardDraft('')}><Icon name="trash" size={13} /></button>
-                {/if}
-              </div>
-            {/if}
-          </div>
-        {/each}
+    <nav class="relative min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+      {#each rows as row (row.key)}
+        <div class={row.entry ? 'mt-1' : 'pt-[18px]'} animate:flip={{ duration: 200, easing: ease }} transition:fade={{ duration: 120 }}>
+          {#if !row.entry}
+            <button
+              class="group/label flex items-center gap-1 rounded-sm px-2.5 py-0.5 text-[11.5px] text-muted transition-colors enabled:hover:text-fg"
+              aria-expanded={row.open}
+              disabled={query.trim() !== ''}
+              onclick={() => toggleGroup(row.label)}
+            >
+              {row.label}
+              {#if !query.trim()}
+                <Icon
+                  name="chevronDown"
+                  size={12}
+                  class="transition-[transform,opacity] duration-150 {row.open
+                    ? 'opacity-0 group-hover/label:opacity-100 group-focus-visible/label:opacity-100'
+                    : '-rotate-90'}"
+                />
+              {/if}
+            </button>
+          {:else}
+            {@const e = row.entry}
+            {@const s = e.session}
+            {@const active = (app.view?.session.id ?? '') === e.key}
+            <div
+              class="group relative flex h-9 items-center rounded-md text-[13px] transition-colors {active
+                ? 'bg-surface text-fg'
+                : 'text-fg-2 hover:bg-hover hover:text-fg'}"
+            >
+              {#if s && renaming === s.id}
+                <input
+                  use:focusSelect
+                  bind:value={draft}
+                  class="mx-1 h-6 min-w-0 flex-1 rounded-sm bg-bg px-1.5 text-fg outline-none"
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter') commitRename()
+                    if (e.key === 'Escape') {
+                      e.preventDefault()
+                      renaming = null
+                    }
+                  }}
+                  onblur={commitRename}
+                />
+              {:else if s && confirming === s.id}
+                <div class="flex w-full items-center gap-1 pr-1 pl-2.5" in:fade={{ duration: 120 }}>
+                  <span class="min-w-0 flex-1 truncate text-fg">Delete this chat?</span>
+                  <button class="rounded-sm px-1.5 py-0.5 text-[12px] text-muted hover:text-fg" onclick={() => (confirming = null)}>Keep</button>
+                  <button class="rounded-sm px-1.5 py-0.5 text-[12px] font-medium text-danger hover:bg-hover" onclick={() => app.remove(s.id)}>Delete</button>
+                </div>
+              {:else}
+                <button
+                  class="flex h-full min-w-0 flex-1 items-center gap-1.5 pl-2.5 text-left"
+                  onclick={() => (s ? app.open(s.id) : app.newSession())}
+                  ondblclick={() => s && startRename(s)}
+                >
+                  {#if e.draft}<span class="shrink-0 text-accent" use:tip={'Unsent draft'}><Icon name="pen" size={12} /></span>{/if}
+                  {#if s?.forkedFromSessionId}<span class="text-muted" use:tip={'Forked chat'}><Icon name="branch" size={12} /></span>{/if}
+                  <span class="truncate {s ? '' : 'italic'}">{e.title}</span>
+                </button>
+                <div class="flex shrink-0 items-center pr-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
+                  {#if s}
+                    <button class="icon-btn !p-1" use:tip={s.pinnedAt != null ? 'Unpin chat' : 'Pin chat'} onclick={() => app.pin(s.id, s.pinnedAt == null)}>
+                      <Icon name="pin" size={13} class={s.pinnedAt != null ? '' : 'rotate-45'} />
+                    </button>
+                    <button class="icon-btn !p-1" use:tip={'Rename'} onclick={() => startRename(s)}><Icon name="edit" size={13} /></button>
+                    <button class="icon-btn !p-1" use:tip={'Delete'} onclick={() => (confirming = s.id)}><Icon name="trash" size={13} /></button>
+                  {:else}
+                    <button class="icon-btn !p-1" use:tip={'Discard draft'} onclick={() => app.discardDraft('')}><Icon name="trash" size={13} /></button>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {/if}
         </div>
       {:else}
         <p class="px-3 pt-8 text-center text-[13px] text-muted" in:fade>{query ? 'Nothing matches.' : 'Your chats will show up here.'}</p>
@@ -175,10 +215,10 @@
 
     <div class="flex items-center gap-1 px-2 py-2">
       <button
-        class="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] text-fg-2 transition-colors hover:bg-hover hover:text-fg"
+        class="flex h-7 items-center gap-1.5 rounded-md px-2 text-[13px] text-fg-2 transition-colors hover:bg-hover hover:text-fg"
         onclick={() => (app.settingsOpen = true)}
       >
-        <Icon name="settings" size={15} /> Settings
+        <Icon name="settings" size={13} /> Settings
       </button>
       <div class="ml-auto"><UpdateButton /></div>
       <div class="flex rounded-md bg-hover/60 p-0.5" role="radiogroup" aria-label="Theme">

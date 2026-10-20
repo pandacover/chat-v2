@@ -352,7 +352,7 @@
     </button>
 
     <button
-      class="ml-0.5 flex h-7 items-center gap-1.5 rounded-full px-2.5 text-[12.5px] transition-colors {browserEnabled
+      class="flex h-7 items-center gap-1.5 rounded-full px-[7px] text-[12.5px] transition-colors {browserEnabled
         ? 'bg-fg text-bg'
         : 'text-fg-2 hover:bg-hover hover:text-fg'}"
       role="switch"
@@ -365,7 +365,7 @@
     </button>
     {#if window.api.computer.supported}
       <button
-        class="flex h-7 items-center gap-1.5 rounded-full px-2.5 text-[12.5px] transition-colors {computerEnabled
+        class="flex h-7 items-center gap-1.5 rounded-full px-[7px] text-[12.5px] transition-colors {computerEnabled
           ? 'bg-fg text-bg'
           : 'text-fg-2 hover:bg-hover hover:text-fg'}"
         role="switch"
