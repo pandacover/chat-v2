@@ -37,11 +37,24 @@ describe('memory gate', () => {
     expect(memorySource(`My name is Ada. ${'x'.repeat(5000)}`)!.length).toBe(2000)
   })
 
+  test('requests and how-to questions are not about the user', () => {
+    expect(memorySource('Can you help me fix this bug?')).toBeNull()
+    expect(memorySource('Show us an example')).toBeNull()
+    expect(memorySource('How do I center a div?')).toBeNull()
+    expect(memorySource('Should we use Postgres or SQLite here?')).toBeNull()
+    // Said in passing on the way to a question, it still counts.
+    expect(memorySource("I'm building a Svelte app; how do I add routing?")).not.toBeNull()
+    expect(memorySource('Our team uses Postgres. Can I index a JSON column?')).not.toBeNull()
+  })
+
   test('a bare answer to a question the assistant asked is read too', () => {
     expect(memorySource('Berlin')).toBeNull()
     expect(askedQuestion('Happy to help with the move. Which city are you in?')).toBe(true)
     expect(askedQuestion('Here is the plan.')).toBe(false)
     expect(memorySource('Berlin', true)).toBe('Berlin')
+    // "Want me to add tests?" "Yes please": nothing about the user.
+    expect(memorySource('Yes please!', true)).toBeNull()
+    expect(memorySource('ok, go ahead', true)).toBeNull()
     expect(memoryPrompt([], 'Berlin', 'Which city are you in?')).toBe(
       'Profile so far:\n(empty)\n\n<assistant>\n…Which city are you in?\n</assistant>\n\n<message>\nBerlin\n</message>'
     )

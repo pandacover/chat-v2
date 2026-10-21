@@ -93,7 +93,15 @@ const MIGRATIONS: string[] = [
   create index memory_facts_removed on memory_facts(removed_rev);
   alter table sessions add column memory_rev integer;`,
   // Per-chat switch that lets the model see the screen and use the mouse and keyboard.
-  `alter table sessions add column computer_enabled integer not null default 0;`
+  `alter table sessions add column computer_enabled integer not null default 0;`,
+  // A reply's lines while it streams, a row each, folded into messages.content when it stops.
+  // Appending to content itself rewrote the whole reply (and its overflow pages) on every line.
+  `create table message_lines (
+    message_id text not null references messages(id) on delete cascade,
+    idx integer not null,
+    text text not null,
+    primary key (message_id, idx)
+  ) without rowid;`
 ]
 
 /** At most this many facts are kept; past it, new ones are dropped until some are removed. */
@@ -265,15 +273,49 @@ export const makeDb = (file: string) => {
     return map
   }
 
+  /** Lines streamed into message_lines and not yet folded into content, by message. */
+  const pendingLines = (ids: string[]): Map<string, string[]> => {
+    const map = new Map<string, string[]>()
+    if (ids.length === 0) return map
+    const rows = all<{ message_id: string; text: string }>(
+      'select message_id, text from message_lines where message_id in (select value from json_each(?)) order by message_id, idx',
+      JSON.stringify(ids)
+    )
+    for (const row of rows) {
+      const list = map.get(row.message_id) ?? []
+      list.push(row.text)
+      map.set(row.message_id, list)
+    }
+    return map
+  }
+
+  /** A reply's text: what is folded into the row, then the lines streamed since. */
+  const joinLines = (r: { content: string; line_count: number }, lines: string[] | undefined) => {
+    if (!lines?.length) return r.content
+    // Lines in the row already (a continued reply); with none, its content is empty.
+    const folded = r.line_count - lines.length
+    return (folded > 0 ? [r.content, ...lines] : lines).join('\n')
+  }
+
+  /** Moves a reply's streamed lines into its content, once it stops streaming. */
+  const foldLines = (messageId: string) => {
+    const lines = pendingLines([messageId]).get(messageId)
+    if (!lines) return
+    const row = one<{ content: string; line_count: number }>('select content, line_count from messages where id = ?', messageId)
+    if (row) run('update messages set content = ? where id = ?', joinLines(row, lines), messageId)
+    run('delete from message_lines where message_id = ?', messageId)
+  }
+
   const toMessages = (rows: MessageRow[]): Message[] => {
     const atts = attachmentsFor(rows.map((r) => r.id))
+    const lines = pendingLines(rows.filter((r) => r.role === 'assistant').map((r) => r.id))
     return rows.map((r) => ({
       id: r.id,
       sessionId: r.session_id,
       parentId: r.parent_id,
       activeChildId: r.active_child_id,
       role: r.role as Role,
-      content: r.content,
+      content: joinLines(r, lines.get(r.id)),
       status: r.status as MessageStatus,
       lineCount: r.line_count,
       model: r.model,
@@ -610,27 +652,24 @@ export const makeDb = (file: string) => {
     lineage,
     activate,
     /** Durable append of one complete line; returns the line's index. */
-    appendLine: (messageId: string, text: string): number => {
-      const row = one<{ line_count: number }>(
-        `update messages
-           set content = case when line_count = 0 then ? else content || char(10) || ? end,
-               line_count = line_count + 1
-         where id = ? returning line_count`,
-        text,
-        text,
-        messageId
-      )
-      return (row?.line_count ?? 1) - 1
-    },
-    setStatus: (messageId: string, status: MessageStatus, error: string | null = null, tailPartial = false) => {
-      run(
-        'update messages set status = ?, error = ?, tail_partial = ? where id = ?',
-        status,
-        error,
-        tailPartial ? 1 : 0,
-        messageId
-      )
-    },
+    appendLine: (messageId: string, text: string): number =>
+      transaction(() => {
+        const row = one<{ line_count: number }>('update messages set line_count = line_count + 1 where id = ? returning line_count', messageId)
+        if (!row) return 0
+        run('insert into message_lines (message_id, idx, text) values (?, ?, ?)', messageId, row.line_count - 1, text)
+        return row.line_count - 1
+      }),
+    setStatus: (messageId: string, status: MessageStatus, error: string | null = null, tailPartial = false) =>
+      transaction(() => {
+        if (status !== 'streaming') foldLines(messageId)
+        run(
+          'update messages set status = ?, error = ?, tail_partial = ? where id = ?',
+          status,
+          error,
+          tailPartial ? 1 : 0,
+          messageId
+        )
+      }),
     setUsage: (messageId: string, usage: Usage) => {
       run('update messages set usage = ? where id = ?', JSON.stringify(usage), messageId)
     },
@@ -643,6 +682,7 @@ export const makeDb = (file: string) => {
      */
     reopenTail: (messageId: string): string | null =>
       transaction(() => {
+        foldLines(messageId)
         const row = one<{ content: string; line_count: number; tail_partial: number }>(
           'select content, line_count, tail_partial from messages where id = ?',
           messageId
@@ -660,7 +700,10 @@ export const makeDb = (file: string) => {
       }),
     /** Crash recovery: anything still `streaming` at startup was cut off. */
     markInterrupted: (): number =>
-      Number(run(`update messages set status = 'interrupted' where status = 'streaming'`).changes),
+      transaction(() => {
+        for (const { message_id } of all<{ message_id: string }>('select distinct message_id from message_lines')) foldLines(message_id)
+        return Number(run(`update messages set status = 'interrupted' where status = 'streaming'`).changes)
+      }),
     insertAttachment: (a: Omit<StoredAttachment, 'id' | 'messageId' | 'createdAt' | 'analysis'>): StoredAttachment => {
       const id = randomUUID()
       const now = Date.now()

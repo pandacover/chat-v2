@@ -11,6 +11,7 @@ import { initUpdater, offerMoveToApplications } from './updater'
 import { AppPaths } from './services/AppPaths'
 import { Sketches } from './services/Sketches'
 import { Attachments } from './services/Attachments'
+import { shrinkImage } from './images'
 import { Browser } from './services/Browser'
 import { Broadcaster, Chat } from './services/Chat'
 import { Computer } from './services/Computer'
@@ -108,7 +109,7 @@ const makeRuntime = () => {
     chatWindows: electronChatWindows(headless),
     selfPid: process.pid
   })
-  const providers = Layer.mergeAll(OpenRouter.layer, ElevenLabs.layer, Attachments.layer, Browser.layer(emitBrowser, (id) => webContents.fromId(id)), computer).pipe(
+  const providers = Layer.mergeAll(OpenRouter.layer, ElevenLabs.layer, Attachments.layerWith(shrinkImage), Browser.layer(emitBrowser, (id) => webContents.fromId(id)), computer).pipe(
     Layer.provideMerge(base)
   )
   const chat = Chat.layer.pipe(

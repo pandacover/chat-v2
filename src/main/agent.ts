@@ -66,9 +66,34 @@ export interface ToolOutcome {
   step: Step
   /** Ends the run with this line to the user (a refused action, or the user taking over). */
   halt?: string
+  /** A page snapshot, which the next action makes stale (see pruning in Chat.ts). */
+  snapshot?: true
 }
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s)
+
+/** How much of a snapshot's element list goes to the model. */
+const ELEMENT_CHARS = 6000
+
+/**
+ * The element list within ELEMENT_CHARS: elements on screen first, then offscreen ones, each
+ * kept in page order. A busy page lists up to 300 elements (tens of KB) on every action.
+ */
+export const clipElements = (elements: string, budget = ELEMENT_CHARS) => {
+  if (elements.length <= budget) return elements
+  const lines = elements.split('\n')
+  const keep = new Set<number>()
+  let used = 0
+  for (const offscreen of [false, true]) {
+    lines.forEach((line, i) => {
+      if (line.endsWith(' offscreen') !== offscreen || used + line.length + 1 > budget) return
+      keep.add(i)
+      used += line.length + 1
+    })
+  }
+  const left = lines.length - keep.size
+  return [...lines.filter((_, i) => keep.has(i)), `[${left} more elements not listed. Scroll to bring them on screen.]`].join('\n')
+}
 
 const describe = (snap: PageSnapshot, textBudget: number) =>
   [
@@ -76,7 +101,7 @@ const describe = (snap: PageSnapshot, textBudget: number) =>
     `Title: ${snap.title}`,
     `Scroll: ${snap.scroll.y} of ${Math.max(0, snap.scroll.height - snap.scroll.viewport)}px`,
     'Interactive elements:',
-    snap.elements || '(none)',
+    clipElements(snap.elements) || '(none)',
     'Visible text:',
     clip(snap.text, textBudget) || '(none)'
   ].join('\n')
@@ -139,7 +164,7 @@ export const runTool = (
       yield* browser.status(label)
       const snap = yield* effect
       remember(refs, snap)
-      return { text: describe(snap, budget), step: { tool: name, label, ok: true } } satisfies ToolOutcome
+      return { text: describe(snap, budget), step: { tool: name, label, ok: true }, snapshot: true } satisfies ToolOutcome
     })
 
   const run: Effect.Effect<ToolOutcome, { message: string }> = (() => {

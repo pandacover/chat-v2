@@ -34,6 +34,22 @@ export const NEW_SESSION_TITLE = 'New chat'
  * provider can serve it from its cache.
  */
 export const DROPPED_SCREENSHOT = '[An earlier screenshot, removed to save space.]'
+export const DROPPED_SNAPSHOT = '[An earlier page snapshot, removed to save space. Its refs no longer apply.]'
+/**
+ * How much stale page snapshot text a run carries before it is pruned. Each snapshot sits in a
+ * tool result, where the cache breakpoint is, so dropping them one at a time would re-send the
+ * run uncached at every step; dropping them in a batch costs that once per batch.
+ */
+export const STALE_SNAPSHOT_CHARS = 24000
+
+/** Turns every stale snapshot into a note once together they pass STALE_SNAPSHOT_CHARS. */
+export const pruneSnapshots = (snapshots: ChatMessage[]) => {
+  const stale = snapshots.slice(0, -1)
+  const chars = stale.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0)
+  if (chars <= STALE_SNAPSHOT_CHARS) return
+  for (const m of stale) m.content = DROPPED_SNAPSHOT
+  snapshots.splice(0, stale.length)
+}
 
 /** Continuing a reply: the partial reply goes back as the assistant's turn, and this asks for the rest. */
 export const CONTINUE_NOTE =
@@ -139,6 +155,8 @@ export class Chat extends Context.Service<
       // so each sees the facts the previous one saved and none adds the same fact twice.
       const remembering = yield* FiberMap.make<string>()
       const memoryLock = yield* Semaphore.make(1)
+      /** Memory models that refused to answer without thinking, so they aren't asked that way again. */
+      const mustThink = new Set<string>()
       let lastMemoryRun: MemoryRun | null = null
       /** Records how a memory check went and tells open windows (a toast when something changed). */
       const reportMemory = (sessionId: string, run: Omit<MemoryRun, 'at' | 'added' | 'removed' | 'dropped'> & Partial<MemoryRun>) => {
@@ -332,6 +350,8 @@ export class Chat extends Context.Service<
           const ownModel = (computerRun && settings?.computerModel) || actingModel
           // The newest screenshot message this run added; the one before it is dropped when it comes.
           let lastShot: ChatMessage | null = null
+          // Page snapshots this run added, oldest first; all but the newest are stale.
+          const snapshots: ChatMessage[] = []
           // The screen comes with the first request, so the model can act on its first step rather
           // than spend a round trip asking for a screenshot. This only looks: the chat window stays
           // up (left out of the capture on Windows, painted grey on a Mac) until the first computer
@@ -442,11 +462,14 @@ export class Chat extends Context.Service<
                 ? yield* runComputerTool(computer, call.function.name, call.function.arguments, { watch }).pipe(timer.action(step, call.function.name))
                 : yield* runTool(browser, refs, call.function.name, call.function.arguments).pipe(timer.action(step, call.function.name))
               yield* emit(stepLine(outcome.step))
-              request.messages.push({ role: 'tool', tool_call_id: call.id, content: outcome.text })
+              const result: ChatMessage = { role: 'tool', tool_call_id: call.id, content: outcome.text }
+              request.messages.push(result)
+              if (outcome.snapshot) snapshots.push(result)
               if (outcome.image) images.push({ url: outcome.image, desktop })
               if (outcome.halt) halt = outcome.halt
             }
             if (halt !== null) return yield* emit(halt)
+            pruneSnapshots(snapshots)
             // Tool results are text-only on most providers, so screenshots follow as a user turn.
             if (images.length > 0) {
               const shot: ChatMessage = {
@@ -547,11 +570,18 @@ export class Chat extends Context.Service<
                     )
                   )
               // Thinking would spend the token budget (and money) on a one-line JSON reply, so it
-              // is turned off. Models that must think reject that; they get a budget to think in.
-              const reply = yield* ask({ max_tokens: 400, reasoning: { effort: 'none' } }).pipe(
-                Effect.catchTag('ProviderError', () => ask({ max_tokens: 4000 })),
-                Effect.timeout('45 seconds')
-              )
+              // is turned off. Models that must think reject that request; they get a budget to
+              // think in, from then on. Any other failure (rate limit, outage) isn't retried.
+              const thinking = () => ask({ max_tokens: 4000 })
+              const reply = yield* (
+                mustThink.has(input.model)
+                  ? thinking()
+                  : ask({ max_tokens: 400, reasoning: { effort: 'none' } }).pipe(
+                      Effect.catchTag('ProviderError', (e) =>
+                        e.status === 400 || e.status === 422 ? Effect.sync(() => mustThink.add(input.model)).pipe(Effect.andThen(thinking())) : Effect.fail(e)
+                      )
+                    )
+              ).pipe(Effect.timeout('45 seconds'))
               const run = { message: input.message, model: input.model }
               const reading = parseMemoryReply(reply, facts, input.source)
               if (!reading)

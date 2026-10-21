@@ -125,7 +125,9 @@ const marked = (m: ChatMessage): ChatMessage => {
  * that isn't a tool result is marked too, a third breakpoint, so the cache still grows step by step
  * should a provider not take one on a tool result. A message with a screenshot is passed over: the
  * next step replaces it with a note (see DROPPED_SCREENSHOT in Chat.ts), so a breakpoint there would
- * never be read. The request's own messages are left as they are, so breakpoints never pile up past
+ * never be read. Browser page snapshots, in tool results, are replaced too, but only in batches
+ * once stale ones add up (see pruneSnapshots in Chat.ts), so most steps still read the breakpoint
+ * before them. The request's own messages are left as they are, so breakpoints never pile up past
  * Anthropic's limit of four.
  */
 export const withCacheBreakpoints = (model: string, messages: ChatMessage[]): ChatMessage[] => {

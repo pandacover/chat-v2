@@ -1,10 +1,11 @@
 <script lang="ts">
   import { blockRenderer } from '@/lib/markdown'
+  import { highlighter } from '@/lib/highlight.svelte'
 
   let { source, streaming = false, live = false }: { source: string; streaming?: boolean; live?: boolean } = $props()
 
   const render = blockRenderer()
-  const blocks = $derived(render(source, streaming))
+  const blocks = $derived(render(source, streaming, highlighter.hljs !== null))
   let el: HTMLDivElement | undefined = $state()
   let seen = 0
   const reduce = matchMedia('(prefers-reduced-motion: reduce)')

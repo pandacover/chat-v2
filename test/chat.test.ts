@@ -301,6 +301,12 @@ describe('chat', () => {
       [undefined, 4000]
     ])
     expect((await t.run(Db.use((db) => db.use((d) => d.liveFacts())))).map((f) => f.fact)).toEqual(['Has a cat named Miso.'])
+    // The model is remembered as one that must think: the next check asks that way straight away.
+    const s2 = await t.run(newSession)
+    await t.run(Chat.use((c) => c.send({ sessionId: s2.id, parentId: s2.rootId, text: 'My other cat is Tofu', attachmentIds: [] })))
+    await t.waitForDone(2)
+    while (t.requests.filter((r) => r.model === 'thinker/memory').length < 3) await new Promise((r) => setTimeout(r, 5))
+    expect(t.requests.filter((r) => r.model === 'thinker/memory').map((r) => [r.reasoning, r.max_tokens])[2]).toEqual([undefined, 4000])
     await t.runtime.dispose()
   })
 

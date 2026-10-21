@@ -40,11 +40,11 @@ const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches
 /** The user's fonts, read when drawing so a change in Settings shows on the next frame. */
 const font = () => getComputedStyle(document.documentElement).getPropertyValue('--font-ui').trim() || 'system-ui, sans-serif'
 const loadFonts = () => void document.fonts.load(`600 13px ${font()}`).then(() => {
-  layouts.clear()
+  fontsChanged()
   wake()
 })
 addEventListener('storage', () => {
-  layouts.clear()
+  fontsChanged()
   loadFonts()
   wake()
 })
@@ -69,6 +69,8 @@ const resize = () => {
   canvas.height = Math.round(innerHeight * dpr)
   canvas.style.width = `${innerWidth}px`
   canvas.style.height = `${innerHeight}px`
+  paintArrow()
+  tagKey = ''
   wake()
 }
 addEventListener('resize', resize)
@@ -273,7 +275,9 @@ bridge.onEvent((e) => {
   else if (e.type === 'pointer') pointer = e.x === null ? null : { x: e.x, y: e.y }
   else if (e.type === 'status' && e.state !== 'off') setStatus(e.state, e.label)
   askForPointer()
-  if (!maybeSame || drawnFrom() !== before) wake()
+  // The user's pointer moves only the cursor, an element of its own: the canvas stays as it is.
+  if (e.type === 'pointer') nudge()
+  else if (!maybeSame || drawnFrom() !== before) wake()
 })
 
 /** Whether the main process is sending the user's pointer (see askForPointer). */
@@ -455,169 +459,237 @@ const placeTag = (at: Pt, size: Layout, taken: Rect[], drop = TAIL): Rect => {
 const SPIN_W = 18
 
 /** A small spinning arc, for the tag while the model decides. */
-const drawSpinner = (cx: number, cy: number, t: number) => {
-  ctx.save()
-  ctx.lineCap = 'round'
-  ctx.lineWidth = 2
-  ctx.strokeStyle = 'rgba(250,250,249,0.25)'
-  ctx.beginPath()
-  ctx.arc(cx, cy, 5.5, 0, Math.PI * 2)
-  ctx.stroke()
+const drawSpinner = (c: CanvasRenderingContext2D, cx: number, cy: number, t: number) => {
+  c.save()
+  c.lineCap = 'round'
+  c.lineWidth = 2
+  c.strokeStyle = 'rgba(250,250,249,0.25)'
+  c.beginPath()
+  c.arc(cx, cy, 5.5, 0, Math.PI * 2)
+  c.stroke()
   const a = reduced ? 0 : (t / 900) * Math.PI * 2
-  ctx.strokeStyle = ACCENT
-  ctx.beginPath()
-  ctx.arc(cx, cy, 5.5, a, a + Math.PI * 0.6)
-  ctx.stroke()
-  ctx.restore()
+  c.strokeStyle = ACCENT
+  c.beginPath()
+  c.arc(cx, cy, 5.5, a, a + Math.PI * 0.6)
+  c.stroke()
+  c.restore()
 }
 
 /** A tag: dark, solid and crisp, so it reads over any app. With `spin`, a spinner leads the text. */
-const drawTag = (rect: Rect, layout: Layout, alpha: number, spin?: number) => {
+const drawTag = (c: CanvasRenderingContext2D, rect: Rect, layout: Layout, alpha: number, spin?: number) => {
   if (alpha <= 0.01) return
-  ctx.save()
-  ctx.globalAlpha = alpha
-  ctx.shadowColor = 'rgba(0,0,0,0.32)'
-  ctx.shadowBlur = 14
-  ctx.shadowOffsetY = 4
-  ctx.fillStyle = 'rgba(24,24,27,0.95)'
-  ctx.beginPath()
-  ctx.roundRect(rect.x, rect.y, rect.w, rect.h, 8)
-  ctx.fill()
-  ctx.shadowColor = 'transparent'
-  ctx.strokeStyle = 'rgba(255,255,255,0.12)'
-  ctx.lineWidth = 1
-  ctx.beginPath()
-  ctx.roundRect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1, 7.5)
-  ctx.stroke()
-  if (spin !== undefined) drawSpinner(rect.x + TAG.padX + 5.5, rect.y + rect.h / 2, spin)
+  c.save()
+  c.globalAlpha = alpha
+  c.shadowColor = 'rgba(0,0,0,0.32)'
+  c.shadowBlur = 14
+  c.shadowOffsetY = 4
+  c.fillStyle = 'rgba(24,24,27,0.95)'
+  c.beginPath()
+  c.roundRect(rect.x, rect.y, rect.w, rect.h, 8)
+  c.fill()
+  c.shadowColor = 'transparent'
+  c.strokeStyle = 'rgba(255,255,255,0.12)'
+  c.lineWidth = 1
+  c.beginPath()
+  c.roundRect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1, 7.5)
+  c.stroke()
+  if (spin !== undefined) drawSpinner(c, rect.x + TAG.padX + 5.5, rect.y + rect.h / 2, spin)
   const tx = rect.x + TAG.padX + (spin !== undefined ? SPIN_W : 0)
-  ctx.font = `600 ${TAG.size}px ${font()}`
-  ctx.fillStyle = '#fafaf9'
-  ctx.textAlign = 'left'
-  ctx.textBaseline = 'middle'
-  layout.lines.forEach((l, i) => ctx.fillText(l, tx, rect.y + TAG.padY + TAG.line * (i + 0.5) + 0.5))
-  ctx.restore()
+  c.font = `600 ${TAG.size}px ${font()}`
+  c.fillStyle = '#fafaf9'
+  c.textAlign = 'left'
+  c.textBaseline = 'middle'
+  layout.lines.forEach((l, i) => c.fillText(l, tx, rect.y + TAG.padY + TAG.line * (i + 0.5) + 0.5))
+  c.restore()
 }
 
 // --- The pointer ---------------------------------------------------------------------------
 
 /** The assistant's pointer: a plain arrowhead in the accent colour, outlined in white so it shows on anything. */
-const drawPointer = (x: number, y: number) => {
-  ctx.save()
-  ctx.beginPath()
-  ctx.moveTo(x + POINTER[0]!.x, y + POINTER[0]!.y)
-  for (const p of POINTER.slice(1)) ctx.lineTo(x + p.x, y + p.y)
-  ctx.closePath()
-  ctx.lineJoin = 'round'
-  ctx.shadowColor = 'rgba(0,0,0,0.35)'
-  ctx.shadowBlur = 6
-  ctx.shadowOffsetY = 2
-  ctx.strokeStyle = '#ffffff'
-  ctx.lineWidth = 3
-  ctx.stroke()
-  ctx.shadowColor = 'transparent'
-  ctx.fillStyle = ACCENT
-  ctx.fill()
-  ctx.restore()
+const drawPointer = (c: CanvasRenderingContext2D, x: number, y: number) => {
+  c.save()
+  c.beginPath()
+  c.moveTo(x + POINTER[0]!.x, y + POINTER[0]!.y)
+  for (const p of POINTER.slice(1)) c.lineTo(x + p.x, y + p.y)
+  c.closePath()
+  c.lineJoin = 'round'
+  c.shadowColor = 'rgba(0,0,0,0.35)'
+  c.shadowBlur = 6
+  c.shadowOffsetY = 2
+  c.strokeStyle = '#ffffff'
+  c.lineWidth = 3
+  c.stroke()
+  c.shadowColor = 'transparent'
+  c.fillStyle = ACCENT
+  c.fill()
+  c.restore()
+}
+
+// --- The cursor's elements ---------------------------------------------------------------
+
+/**
+ * The cursor and its tag are small canvases of their own, moved with a CSS transform. Following
+ * the user's pointer then moves two layers in the compositor rather than repainting a canvas the
+ * size of the screen, which every frame of the cursor cost while it was drawn on that canvas.
+ */
+const element = () => {
+  const el = document.createElement('canvas')
+  el.className = 'cursor'
+  el.hidden = true
+  document.body.insertBefore(el, pill)
+  return el
+}
+const arrow = element()
+const tagEl = element()
+const arrowCtx = arrow.getContext('2d')!
+const tagCtx = tagEl.getContext('2d')!
+/** Room around the arrowhead and a tag for their outline and shadow. */
+const ARROW_PAD = 9
+const ARROW_BOX = { w: 18 + ARROW_PAD * 2, h: 22 + ARROW_PAD * 2 }
+const TAG_PAD = 20
+
+function paintArrow() {
+  arrow.width = Math.round(ARROW_BOX.w * dpr)
+  arrow.height = Math.round(ARROW_BOX.h * dpr)
+  arrow.style.width = `${ARROW_BOX.w}px`
+  arrow.style.height = `${ARROW_BOX.h}px`
+  arrowCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  drawPointer(arrowCtx, ARROW_PAD, ARROW_PAD)
+}
+
+/** What the tag canvas shows, so it is painted again only when that changes. */
+let tagKey = ''
+function fontsChanged() {
+  layouts.clear()
+  tagKey = ''
+}
+
+const paintTag = (layout: Layout, text: string, spin: number | undefined) => {
+  const key = `${text}|${layout.w}x${layout.h}|${spin ?? ''}`
+  if (key === tagKey) return
+  tagKey = key
+  const w = layout.w + TAG_PAD * 2
+  const h = layout.h + TAG_PAD * 2
+  if (tagEl.width !== Math.round(w * dpr) || tagEl.height !== Math.round(h * dpr)) {
+    tagEl.width = Math.round(w * dpr)
+    tagEl.height = Math.round(h * dpr)
+    tagEl.style.width = `${w}px`
+    tagEl.style.height = `${h}px`
+  }
+  tagCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  tagCtx.clearRect(0, 0, w, h)
+  drawTag(tagCtx, { x: TAG_PAD, y: TAG_PAD, w: layout.w, h: layout.h }, layout, 1, spin)
+}
+
+/** Writes a style only when it changes, so a still cursor costs no style work. */
+const styled = new WeakMap<HTMLElement, { transform: string; opacity: string; hidden: boolean }>()
+const place = (el: HTMLCanvasElement, x: number, y: number, alpha: number) => {
+  const was = styled.get(el) ?? { transform: '', opacity: '', hidden: true }
+  const hidden = alpha <= 0.01
+  if (hidden !== was.hidden) el.hidden = hidden
+  if (hidden) return styled.set(el, { ...was, hidden })
+  // On whole device pixels, so the tag's text stays crisp.
+  const px = (v: number) => Math.round(v * dpr) / dpr
+  const transform = `translate(${px(x - view.dx)}px, ${px(y - view.dy)}px)`
+  const opacity = alpha >= 0.99 ? '1' : alpha.toFixed(3)
+  if (transform !== was.transform) el.style.transform = transform
+  if (opacity !== was.opacity) el.style.opacity = opacity
+  styled.set(el, { transform, opacity, hidden })
 }
 
 // --- Frames --------------------------------------------------------------------------------
 
 /**
  * A turning spinner is the one thing that animates for whole model calls, so on its own it gets
- * about 15 frames a second, and each of those repaints only the box it turns in.
+ * about 15 frames a second, each repainting only the tag it sits in.
  */
 const SPIN_FRAME_MS = 66
-/** Half the side of the box a spinner frame repaints: the arc's radius plus its stroke and some room. */
-const SPIN_BOX = 9
 
 let frame = 0
-/** The box the next frame repaints, or null for the whole screen (see wake and spinLater). */
-let clipNext: Rect | null = null
+/** Whether the next frame repaints the screen-wide canvas (see wake), not only moves the cursor (see nudge). */
+let sceneDirty = true
 let spinTimer: ReturnType<typeof setTimeout> | 0 = 0
+/** Where the finished marks' tags sat in the last repaint, so the cursor's tag keeps clear of them between repaints. */
+let chipRects: Rect[] = []
+
 const render = () => {
   frame = 0
-  const clip = clipNext
-  clipNext = null
   const t = now()
   const dt = Math.min(64, t - last)
   last = t
+  const full = sceneDirty
+  sceneDirty = false
+  /** More frames to come for the cursor alone; `sceneBusy`, for the canvas as well. */
   let busy = false
-  /** Where the spinner turns, when it is up. */
-  let spin: Rect | null = null
-  // Display coordinates: the window may sit offset from the display's corner.
-  ctx.setTransform(dpr, 0, 0, dpr, -view.dx * dpr, -view.dy * dpr)
-  // A spinner frame draws everything as usual, but only inside the spinner's box: nothing else
-  // has moved since the last frame, or that frame would have been a whole one.
-  ctx.save()
-  if (clip) {
-    ctx.beginPath()
-    ctx.rect(clip.x, clip.y, clip.w, clip.h)
-    ctx.clip()
-    ctx.clearRect(clip.x, clip.y, clip.w, clip.h)
-  } else ctx.clearRect(view.dx, view.dy, innerWidth, innerHeight)
-  ctx.lineCap = 'round'
-  ctx.lineJoin = 'round'
-
-  // Marks, in order: the cursor draws each in turn, then parks at it while its tag drops into place.
-  drawn = drawn.filter((d) => d.fadeAt === null || t - d.fadeAt < 260)
+  let sceneBusy = false
   let pen: Pt | null = null
   let penTag: string | null = null
   const chips: Array<{ d: Drawn; alpha: number }> = []
-  let ready = t
-  for (const d of drawn) {
-    if (d.fadeAt === null && !d.plan) {
-      // Its turn: plan the route from where the cursor is now.
-      if (ready > t) break
-      const from = cursor.alpha > 0.05 ? { x: cursor.x, y: cursor.y } : { x: (d.ink.strokes[0]?.pts[0] ?? d.ink.rest).x - 50, y: (d.ink.strokes[0]?.pts[0] ?? d.ink.rest).y - 40 }
-      d.plan = planMark(d, from)
-      d.start = t
-      d.end = t + d.plan.reduce((sum, s) => sum + s.dur, 0)
-    }
-    if (!d.plan) continue
-    ctx.save()
-    const fade = d.fadeAt === null ? 1 : Math.max(0, 1 - (t - d.fadeAt) / 260)
-    if (fade < 1) busy = true
-    ctx.globalAlpha = fade
-    if (t >= d.end) {
-      drawStrokes(d, d.ink.strokes.length, 1)
-      if (d.ink.label) chips.push({ d, alpha: fade })
-    } else if (d.fadeAt === null) {
-      busy = true
-      let elapsed = t - d.start
-      // The strokes before the pen are whole; the one under it is drawn up to `part`.
-      let upTo = -1
-      let part = 1
-      for (const s of d.plan) {
-        if (elapsed >= s.dur) {
-          elapsed -= s.dur
+
+  if (full) {
+    // Display coordinates: the window may sit offset from the display's corner.
+    ctx.setTransform(dpr, 0, 0, dpr, -view.dx * dpr, -view.dy * dpr)
+    ctx.clearRect(view.dx, view.dy, innerWidth, innerHeight)
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+
+    // Marks, in order: the cursor draws each in turn, then parks at it while its tag drops into place.
+    drawn = drawn.filter((d) => d.fadeAt === null || t - d.fadeAt < 260)
+    let ready = t
+    for (const d of drawn) {
+      if (d.fadeAt === null && !d.plan) {
+        // Its turn: plan the route from where the cursor is now.
+        if (ready > t) break
+        const from = cursor.alpha > 0.05 ? { x: cursor.x, y: cursor.y } : { x: (d.ink.strokes[0]?.pts[0] ?? d.ink.rest).x - 50, y: (d.ink.strokes[0]?.pts[0] ?? d.ink.rest).y - 40 }
+        d.plan = planMark(d, from)
+        d.start = t
+        d.end = t + d.plan.reduce((sum, s) => sum + s.dur, 0)
+      }
+      if (!d.plan) continue
+      ctx.save()
+      const fade = d.fadeAt === null ? 1 : Math.max(0, 1 - (t - d.fadeAt) / 260)
+      if (fade < 1) sceneBusy = true
+      ctx.globalAlpha = fade
+      if (t >= d.end) {
+        drawStrokes(d, d.ink.strokes.length, 1)
+        if (d.ink.label) chips.push({ d, alpha: fade })
+      } else if (d.fadeAt === null) {
+        sceneBusy = true
+        let elapsed = t - d.start
+        // The strokes before the pen are whole; the one under it is drawn up to `part`.
+        let upTo = -1
+        let part = 1
+        for (const s of d.plan) {
+          if (elapsed >= s.dur) {
+            elapsed -= s.dur
+            if (s.stroke !== null) {
+              upTo = s.stroke
+              part = 1
+            }
+            pen = s.to
+            continue
+          }
+          const k = s.dur ? elapsed / s.dur : 1
           if (s.stroke !== null) {
             upTo = s.stroke
-            part = 1
-          }
-          pen = s.to
-          continue
+            part = easeSine(k)
+            const pts = portion(d.ink.strokes[s.stroke]!.pts, part)
+            pen = pts[pts.length - 1]!
+          } else pen = along(s.from, s.to, s.bend, ease(k))
+          break
         }
-        const k = s.dur ? elapsed / s.dur : 1
-        if (s.stroke !== null) {
-          upTo = s.stroke
-          part = easeSine(k)
-          const pts = portion(d.ink.strokes[s.stroke]!.pts, part)
-          pen = pts[pts.length - 1]!
-        } else pen = along(s.from, s.to, s.bend, ease(k))
-        break
-      }
-      if (upTo >= 0) drawStrokes(d, upTo, part)
-      pen ??= d.plan[0]?.from ?? d.ink.rest
-      if (d.ink.label) penTag = d.ink.label
-    } else drawStrokes(d, d.ink.strokes.length, 1)
-    ctx.restore()
-    // The next mark waits for this one, with a beat between them.
-    ready = d.fadeAt === null ? d.end + 80 : ready
-    if (pen) break
+        if (upTo >= 0) drawStrokes(d, upTo, part)
+        pen ??= d.plan[0]?.from ?? d.ink.rest
+        if (d.ink.label) penTag = d.ink.label
+      } else drawStrokes(d, d.ink.strokes.length, 1)
+      ctx.restore()
+      // The next mark waits for this one, with a beat between them.
+      ready = d.fadeAt === null ? d.end + 80 : ready
+      if (pen) break
+    }
+    // Marks still waiting their turn keep the frames coming.
+    if (drawn.some((d) => d.fadeAt === null && !d.plan)) sceneBusy = true
   }
-  // Marks still waiting their turn keep the frames coming.
-  if (drawn.some((d) => d.fadeAt === null && !d.plan)) busy = true
 
   // Where the cursor goes: the pen, a glide, beside the user's pointer, or where it was left.
   const following = !driven && pointer !== null && (follow || state === 'working')
@@ -631,8 +703,9 @@ const render = () => {
     const p = along(cursor.from, cursor.to, cursor.bend, ease(k))
     cursor.x = p.x
     cursor.y = p.y
+    // The trail it leaves is on the canvas.
     trail.push({ x: p.x, y: p.y, t })
-    busy = true
+    sceneBusy = true
   } else if (driven && cursor.dur) {
     cursor.x = cursor.to.x
     cursor.y = cursor.to.y
@@ -663,103 +736,105 @@ const render = () => {
     busy = true
   } else cursor.alpha = goal
 
-  trail = trail.filter((p) => t - p.t < 650)
-  if (trail.length > 1) {
-    for (let i = 1; i < trail.length; i++) {
-      const a = trail[i - 1]!
-      const b = trail[i]!
-      ctx.globalAlpha = Math.max(0, 1 - (t - b.t) / 650) * 0.5
-      strokePath([a, b], 2, ACCENT, false)
-    }
-    ctx.globalAlpha = 1
-    busy = true
-  }
-  if (dragFrom && cursor.alpha > 0) {
-    ctx.setLineDash([6, 7])
-    strokePath([dragFrom, { x: cursor.x, y: cursor.y }], 2, ACCENT, false)
-    ctx.setLineDash([])
-  }
+  /** How far a finished mark's tag hangs: below the cursor's tail while it rests there, snug once it leaves. */
+  const chipDrop = (d: Drawn) => (cursor.alpha > 0.05 && dist(cursor, d.ink.rest) < 20 ? TAIL : SNUG)
 
-  // Click ripples: two rough rings spreading out from the point.
-  ripples = ripples.filter((p) => t - p.t < 520)
-  for (const p of ripples) {
-    const k = (t - p.t) / 520
-    busy = true
-    if (k < 0) continue
-    const r = rng(`${p.x}${p.y}${p.t}`)
-    ctx.globalAlpha = 1 - k
-    for (const [i, size] of [6, 14].entries()) {
-      const rad = size + k * (22 + i * 10)
-      const pts: Pt[] = []
-      for (let a = 0; a <= 26; a++) {
-        const ang = (a / 24) * Math.PI * 2
-        pts.push({ x: p.x + Math.cos(ang) * rad * (1 + r() * 0.05), y: p.y + Math.sin(ang) * rad * (1 + r() * 0.05) })
+  if (full) {
+    trail = trail.filter((p) => t - p.t < 650)
+    if (trail.length > 1) {
+      for (let i = 1; i < trail.length; i++) {
+        const a = trail[i - 1]!
+        const b = trail[i]!
+        ctx.globalAlpha = Math.max(0, 1 - (t - b.t) / 650) * 0.5
+        strokePath([a, b], 2, ACCENT, false)
       }
-      strokePath(pts, 2.2 - i * 0.6, p.color, false)
+      ctx.globalAlpha = 1
+      sceneBusy = true
     }
-    ctx.globalAlpha = 1
-  }
+    if (dragFrom && cursor.alpha > 0) {
+      ctx.setLineDash([6, 7])
+      strokePath([dragFrom, { x: cursor.x, y: cursor.y }], 2, ACCENT, false)
+      ctx.setLineDash([])
+    }
 
-  // Tags: the finished marks' labels where the cursor left them, then the cursor's own.
-  const taken: Rect[] = []
-  for (const { d, alpha } of chips) {
-    const layout = layoutTag(d.ink.label!)
-    // The tag drops with the cursor; once it moves on, the tag settles up against its mark.
-    const held = cursor.alpha > 0.05 && dist(cursor, d.ink.rest) < 20
-    const goal = held ? TAIL : SNUG
-    if (Math.abs(d.drop - goal) > 0.3) {
-      d.drop += (goal - d.drop) * (reduced ? 1 : Math.min(1, dt / 90))
-      busy = true
-    } else d.drop = goal
-    const rect = placeTag(d.ink.rest, layout, taken, d.drop)
-    taken.push(rect)
-    drawTag(rect, layout, alpha)
-  }
-
-  if (cursor.alpha > 0.01) {
-    ctx.globalAlpha = cursor.alpha
-    drawPointer(cursor.x, cursor.y)
-    ctx.globalAlpha = 1
-    const deciding = penTag === null && thinking !== null && (state === 'working' || !driven)
-    const text = penTag ?? (deciding ? thinking : state === 'working' ? workLabel : !driven ? hint : '')
-    if (text) {
-      const base = layoutTag(text)
-      const layout = deciding ? { ...base, w: base.w + SPIN_W } : base
-      const rect = placeTag(cursor, layout, taken)
-      drawTag(rect, layout, cursor.alpha, deciding ? t : undefined)
-      // The spinner turns (drawSpinner's centre, as drawTag places it).
-      if (deciding && !reduced) {
-        const cx = rect.x + TAG.padX + 5.5
-        const cy = rect.y + rect.h / 2
-        // On whole device pixels, so clearing and redrawing it leaves no half-cleared edge.
-        const x0 = view.dx + Math.floor((cx - SPIN_BOX - view.dx) * dpr) / dpr
-        const y0 = view.dy + Math.floor((cy - SPIN_BOX - view.dy) * dpr) / dpr
-        const x1 = view.dx + Math.ceil((cx + SPIN_BOX - view.dx) * dpr) / dpr
-        const y1 = view.dy + Math.ceil((cy + SPIN_BOX - view.dy) * dpr) / dpr
-        spin = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    // Click ripples: two rough rings spreading out from the point.
+    ripples = ripples.filter((p) => t - p.t < 520)
+    for (const p of ripples) {
+      const k = (t - p.t) / 520
+      sceneBusy = true
+      if (k < 0) continue
+      const r = rng(`${p.x}${p.y}${p.t}`)
+      ctx.globalAlpha = 1 - k
+      for (const [i, size] of [6, 14].entries()) {
+        const rad = size + k * (22 + i * 10)
+        const pts: Pt[] = []
+        for (let a = 0; a <= 26; a++) {
+          const ang = (a / 24) * Math.PI * 2
+          pts.push({ x: p.x + Math.cos(ang) * rad * (1 + r() * 0.05), y: p.y + Math.sin(ang) * rad * (1 + r() * 0.05) })
+        }
+        strokePath(pts, 2.2 - i * 0.6, p.color, false)
       }
+      ctx.globalAlpha = 1
     }
-  }
-  ctx.restore()
 
-  if (busy) wake()
-  else if (spin) spinLater(spin)
+    // The finished marks' labels, where the cursor left them.
+    chipRects = []
+    for (const { d, alpha } of chips) {
+      const layout = layoutTag(d.ink.label!)
+      // The tag drops with the cursor; once it moves on, the tag settles up against its mark.
+      const goal = chipDrop(d)
+      if (Math.abs(d.drop - goal) > 0.3) {
+        d.drop += (goal - d.drop) * (reduced ? 1 : Math.min(1, dt / 90))
+        sceneBusy = true
+      } else d.drop = goal
+      const rect = placeTag(d.ink.rest, layout, chipRects, d.drop)
+      chipRects.push(rect)
+      drawTag(ctx, rect, layout, alpha)
+    }
+  } else if (trail.length || ripples.length || dragFrom || drawn.some((d) => d.fadeAt === null && d.ink.label && Math.abs(d.drop - chipDrop(d)) > 0.3)) {
+    // The cursor came to (or left) a mark whose tag moves with it: the canvas changes next frame.
+    sceneBusy = true
+  }
+
+  // The cursor and its tag.
+  place(arrow, cursor.x - ARROW_PAD, cursor.y - ARROW_PAD, cursor.alpha)
+  const deciding = penTag === null && thinking !== null && (state === 'working' || !driven)
+  const text = cursor.alpha > 0.01 ? (penTag ?? (deciding ? thinking : state === 'working' ? workLabel : !driven ? hint : '')) : ''
+  const spinning = !!text && deciding && !reduced
+  if (text) {
+    const base = layoutTag(text)
+    const layout = deciding ? { ...base, w: base.w + SPIN_W } : base
+    const rect = placeTag(cursor, layout, chipRects)
+    paintTag(layout, text, deciding ? (spinning ? t : 0) : undefined)
+    place(tagEl, rect.x - TAG_PAD, rect.y - TAG_PAD, cursor.alpha)
+  } else place(tagEl, 0, 0, 0)
+
+  if (sceneBusy) sceneDirty = true
+  if (busy || sceneBusy) schedule()
+  else if (spinning) spinLater()
 }
 
-/** Draws the whole screen on the next frame. */
-function wake() {
-  clipNext = null
+function schedule() {
   if (!frame) frame = requestAnimationFrame(render)
 }
 
-/** Turns the spinner in `box` a step, a moment from now, unless a whole frame comes first. */
-function spinLater(box: Rect) {
+/** Repaints the screen-wide canvas on the next frame. */
+function wake() {
+  sceneDirty = true
+  schedule()
+}
+
+/** Moves the cursor on the next frame, leaving the canvas as it is. */
+function nudge() {
+  schedule()
+}
+
+/** Turns the spinner a step, a moment from now, unless a frame comes first. */
+function spinLater() {
   if (spinTimer) return
   spinTimer = setTimeout(() => {
     spinTimer = 0
-    if (frame) return
-    clipNext = box
-    frame = requestAnimationFrame(render)
+    schedule()
   }, SPIN_FRAME_MS)
 }
 

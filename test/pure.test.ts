@@ -5,7 +5,9 @@ import { parseSseLine } from '../src/main/sse'
 import { splitSteps, stepLine, summarizeSteps } from '../src/shared/steps'
 import { normalizeSettings, DEFAULT_SETTINGS } from '../src/main/services/SettingsStore'
 import { classify } from '../src/main/services/Attachments'
-import { cleanTitle } from '../src/main/services/Chat'
+import { DROPPED_SNAPSHOT, STALE_SNAPSHOT_CHARS, cleanTitle, pruneSnapshots } from '../src/main/services/Chat'
+import type { ChatMessage } from '../src/main/services/OpenRouter'
+import { clipElements } from '../src/main/agent'
 
 const feed = (deltas: string[]) => {
   const buf = makeLineBuffer()
@@ -229,5 +231,28 @@ describe('pricing', () => {
   test('formats per-million prices', async () => {
     const { money } = await import('../src/renderer/src/lib/pricing')
     expect([15, 3.75, 3, 0.3, 0.25, 0.075, 0.025, 0.0005, 0].map(money)).toEqual(['$15', '$3.75', '$3', '$0.30', '$0.25', '$0.075', '$0.025', '$0.0005', '$0'])
+  })
+})
+
+describe('browser snapshots', () => {
+  const line = (i: number, offscreen = false) => `[e${i}] button "Button number ${i}"${offscreen ? ' offscreen' : ''}`
+
+  test('element lists keep on-screen elements first, in page order, within the budget', () => {
+    const lines = [line(1, true), line(2), line(3, true), line(4)]
+    expect(clipElements(lines.join('\n'))).toBe(lines.join('\n'))
+    const clipped = clipElements(lines.join('\n'), line(2).length + line(4).length + line(1, true).length + 3)
+    expect(clipped.split('\n')).toEqual([line(1, true), line(2), line(4), '[1 more elements not listed. Scroll to bring them on screen.]'])
+  })
+
+  test('stale snapshots are dropped together once they add up, never the newest', () => {
+    const big = 'x'.repeat(STALE_SNAPSHOT_CHARS / 2)
+    const snaps = [{ role: 'tool', content: big }, { role: 'tool', content: big }] as ChatMessage[]
+    pruneSnapshots(snaps)
+    expect(snaps.map((m) => m.content)).toEqual([big, big])
+    snaps.push({ role: 'tool', content: big } as ChatMessage, { role: 'tool', content: 'newest' } as ChatMessage)
+    const all = [...snaps]
+    pruneSnapshots(snaps)
+    expect(all.map((m) => m.content)).toEqual([DROPPED_SNAPSHOT, DROPPED_SNAPSHOT, DROPPED_SNAPSHOT, 'newest'])
+    expect(snaps.map((m) => m.content)).toEqual(['newest'])
   })
 })

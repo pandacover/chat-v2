@@ -27,6 +27,8 @@ export default defineConfig({
     resolve: { alias: { ...shared, '@': resolve(__dirname, 'src/renderer/src') } },
     plugins: [svelte(), tailwindcss()],
     build: {
+      // electron-vite leaves the renderer unminified by default: 740 KB of script to parse at startup.
+      minify: true,
       rollupOptions: {
         // The overlay and the hidden page that streams the screen for computer use are pages of their own.
         input: {

@@ -1,9 +1,6 @@
 import DOMPurify from 'dompurify'
-import hljs from 'highlight.js/lib/common'
 import { Marked, type Tokens } from 'marked'
-
-const escapeHtml = (s: string) =>
-  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+import { escapeHtml, highlighter } from './highlight.svelte'
 
 const marked = new Marked({
   gfm: true,
@@ -11,8 +8,9 @@ const marked = new Marked({
   renderer: {
     code({ text, lang }: Tokens.Code) {
       const language = (lang ?? '').trim().split(/\s+/)[0] ?? ''
+      const hljs = language ? highlighter.hljs : null
       const highlighted =
-        language && hljs.getLanguage(language)
+        hljs && hljs.getLanguage(language)
           ? hljs.highlight(text, { language, ignoreIllegals: true }).value
           : escapeHtml(text)
       return `<div class="code-block"><div class="code-head"><span>${escapeHtml(language || 'text')}</span><button type="button" class="copy-code" data-copy>Copy</button></div><pre><code class="hljs">${highlighted}</code></pre></div>`
@@ -60,7 +58,27 @@ const SELF_CONTAINED = new Set(['space', 'paragraph', 'heading', 'code', 'list',
  */
 export const blockRenderer = () => {
   let cache = new Map<string, string>()
-  return (md: string, streaming = false): string[] => {
+  // The last call's input and output: a message re-renders with the same text whenever its chat
+  // reloads (a send, a branch switch, a model change), and finished messages keep no cache.
+  let lastMd: string | null = null
+  let lastStreaming = false
+  let lastBlocks: string[] = []
+  let lastHighlighted = false
+  /** `highlighted`: whether highlight.js has loaded; blocks rendered before it are redone once. */
+  return (md: string, streaming = false, highlighted = true): string[] => {
+    if (highlighted !== lastHighlighted) {
+      lastHighlighted = highlighted
+      lastMd = null
+      cache = new Map()
+    }
+    if (md === lastMd && streaming === lastStreaming) return lastBlocks
+    lastMd = md
+    lastStreaming = streaming
+    lastBlocks = render(md, streaming)
+    return lastBlocks
+  }
+
+  function render(md: string, streaming: boolean): string[] {
     const tokens = marked.lexer(streaming ? closeOpenFence(md) : md)
     // Reference-style link definitions apply across blocks, so render those messages whole.
     if (Object.keys(tokens.links).length > 0 || tokens.some((t) => !SELF_CONTAINED.has(t.type))) {

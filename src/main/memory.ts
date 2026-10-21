@@ -20,7 +20,12 @@ const FACT_CHARS = 200
 const MAX_ADDS = 8
 
 // The user talking about themselves: "I", "my", "call me", contractions, "we"/"our" for family.
-const SELF = /\b(?:i|i'm|im|i've|i'd|i'll|me|my|mine|myself|we|we're|our|ours|us)\b/i
+// Not "me" or "us" alone: those are mostly requests ("help me fix this", "show us").
+const SELF = /\b(?:i|i'm|im|i've|i'd|i'll|my|mine|myself|we|we're|our|ours|call me)\b/i
+// "How do I…", "can I…", "should we…": asking how to do something, not saying something about yourself.
+const ASKING = /\b(?:can|could|should|would|will|shall|may|might|do|did|does|am|have)\s+(?:i|we)\b/gi
+// Replies to "Want me to…?" and the like, which say nothing about the user.
+const ACK = /^(?:(?:yes|yeah|yep|yup|y|no|nope|nah|ok|okay|k|sure|thanks|thank you|ty|please|go ahead|do it|continue|go on|sounds good|great|perfect|cool|nice|got it|that works|both|neither)[\s,.!]*)+$/i
 
 /** Whether the assistant's last message ended by asking something; a bare answer ("Berlin") then counts. */
 export const askedQuestion = (previous: string | null) => !!previous && previous.slice(-300).includes('?')
@@ -41,7 +46,8 @@ export const memorySource = (text: string, answering = false): string | null => 
     .replace(/https?:\/\/\S+/g, ' ')
     .replace(/[ \t]+/g, ' ')
     .trim()
-  if (own.length < 2 || (!answering && (own.length < 4 || !SELF.test(own)))) return null
+  const self = SELF.test(own.replace(ASKING, ' '))
+  if (own.length < 2 || (!answering && (own.length < 4 || !self)) || (answering && !self && ACK.test(own))) return null
   return own.slice(0, SOURCE_CHARS)
 }
 

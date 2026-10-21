@@ -290,11 +290,33 @@ export class Browser extends Context.Service<Browser, BrowserApi>()('chat-v2/Bro
       const run = <A>(wc: WebContents, js: string) => wc.mainFrame.executeJavaScript(js, true) as Promise<A>
       const exec = <A>(wc: WebContents, js: string) => attempt('Page script', () => run<A>(wc, js))
 
+      /** Waits up to 4 s for a page that renders with script to stop adding text. */
+      const textSettled = async (wc: WebContents) => {
+        let last = -1
+        const started = Date.now()
+        while (Date.now() - started < 4000) {
+          const size = await run<number>(wc, 'document.body ? document.body.innerText.length : 0').catch(() => 0)
+          if (size > 200 && size === last) break
+          if (!wc.isLoading() && size === last) break
+          last = size
+          await sleep(250)
+        }
+      }
+
+      /**
+       * After an action: waits for a navigation it started to reach a parsed document, then for the
+       * text to settle. Not for wc.isLoading(), which counts ad and tracker frames and kept every
+       * action on a busy page waiting up to 12 s.
+       */
       const settle = (wc: WebContents, ms = 500) =>
         attempt('Waiting for the page', async () => {
           await sleep(ms)
+          if (!wc.isLoading()) return
           const started = Date.now()
-          while (wc.isLoading() && Date.now() - started < 12000) await sleep(150)
+          const parsing = async () =>
+            wc.isWaitingForResponse() || (await run<string>(wc, 'document.readyState').catch(() => 'loading')) === 'loading'
+          while (Date.now() - started < 12000 && (await parsing())) await sleep(150)
+          if (wc.isLoading()) await textSettled(wc)
         })
 
       /**
@@ -324,15 +346,7 @@ export class Browser extends Context.Service<Browser, BrowserApi>()('chat-v2/Bro
           // A load that already failed is reported; one still going is fine.
           await Promise.race([loaded, sleep(0)])
           // Pages that render their article with script fill in after parsing: wait for the text to hold still.
-          let last = -1
-          const started = Date.now()
-          while (Date.now() - started < 4000) {
-            const size = await run<number>(wc, 'document.body ? document.body.innerText.length : 0').catch(() => 0)
-            if (size > 200 && size === last) break
-            if (!wc.isLoading() && size === last) break
-            last = size
-            await sleep(250)
-          }
+          await textSettled(wc)
         })
 
       const snapshotOf = (wc: WebContents) => exec<PageSnapshot>(wc, SNAPSHOT_JS)

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tip } from '@/lib/tooltip'
-  import hljs from 'highlight.js/lib/common'
+  import { escapeHtml, highlighter } from '@/lib/highlight.svelte'
   import { fade } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
   import Icon from './Icon.svelte'
@@ -24,7 +24,7 @@
   // re-publish it or re-highlight its code.
   const source = $derived(current?.block.content ?? '')
   const html = $derived(current?.block.kind === 'html' ? source : undefined)
-  const highlighted = $derived(hljs.highlight(source, { language: isBoard ? 'json' : 'xml' }).value)
+  const highlighted = $derived(highlighter.hljs?.highlight(source, { language: isBoard ? 'json' : 'xml' }).value ?? escapeHtml(source))
 
   $effect(() => {
     if (html === undefined) return

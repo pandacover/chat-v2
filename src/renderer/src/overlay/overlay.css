@@ -172,3 +172,15 @@ body {
     transition: none;
   }
 }
+
+/* The cursor and its tag: small canvases moved by transform, so following the pointer repaints nothing. */
+.cursor {
+  position: fixed;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+.cursor[hidden] {
+  display: none;
+}
