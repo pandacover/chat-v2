@@ -526,6 +526,10 @@ class AppState {
       this.appendLine(message, e.text)
       return
     }
+    if (e.type === 'attachment') {
+      if (!message.attachments.some((a) => a.id === e.attachment.id)) message.attachments.push(e.attachment)
+      return
+    }
     // A final backfill picks up anything flushed at the very end.
     void this.backfill(e.messageId).then(() => {
       const m = this.find(e.messageId)

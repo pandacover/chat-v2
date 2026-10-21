@@ -5,7 +5,7 @@
   import { parseMoodboard } from '@shared/moodboard'
   import { splitSteps, type Step } from '@shared/steps'
   import StepList from './StepList.svelte'
-  import type { PathNode } from '@shared/types'
+  import type { Attachment, PathNode } from '@shared/types'
   import { fade, fly } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
   import AttachmentChip from './AttachmentChip.svelte'
@@ -51,6 +51,11 @@
       }
     }
   })
+
+  const saveImage = async (a: Attachment) => {
+    const path = await app.attempt(() => window.api.attachments.saveAs(a.id, a.name))
+    if (path) app.toast(`Saved to ${path}`, 'info')
+  }
 
   const copy = async () => {
     await navigator.clipboard.writeText(message.content)
@@ -225,6 +230,26 @@
         </button>
       {/if}
     {/each}
+
+    {#if message.attachments.length > 0}
+      <!-- Files the assistant made for the user, like a screenshot of the browser. -->
+      <div class="flex flex-wrap gap-2">
+        {#each message.attachments as a (a.id)}
+          {#if a.kind === 'image'}
+            <div class="group/shot relative max-w-md overflow-hidden rounded-lg shadow-[0_0_0_1px_var(--line)]" in:fade={{ duration: live ? 200 : 0 }}>
+              <img src={window.api.attachments.url(a.id)} alt={a.name} class="block max-h-80 w-auto" />
+              <button
+                class="absolute top-2 right-2 rounded-md bg-fg px-2 py-0.5 text-[12px] font-medium text-bg opacity-0 transition-opacity group-hover/shot:opacity-100 focus-visible:opacity-100"
+                use:tip={`Save ${a.name}`}
+                onclick={() => saveImage(a)}>Save</button
+              >
+            </div>
+          {:else}
+            <AttachmentChip attachment={a} />
+          {/if}
+        {/each}
+      </div>
+    {/if}
 
     {#if streaming && app.control.active && blocks.at(-1)?.type !== 'steps'}
       <StepList steps={[]} live running />

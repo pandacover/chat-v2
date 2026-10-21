@@ -35,6 +35,15 @@ export interface Shot {
   png: Uint8Array<ArrayBuffer>
 }
 
+/** A recording of the panel, saved as a video file. */
+export interface Recording {
+  path: string
+  seconds: number
+}
+
+/** The panel's answer to a `record` event, once a finished video has been written to `path`. */
+export type PanelReply = { ok: true; path?: string; seconds?: number } | { ok: false; error: string }
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /** Runs in the page: tags visible interactive elements with refs and summarises the page. */
@@ -244,9 +253,15 @@ export interface BrowserApi {
   readonly evaluate: (code: string) => Effect.Effect<string, BrowserError>
   readonly elementAt: (x: number, y: number) => Effect.Effect<ElementInfo | null, BrowserError>
   readonly screencast: (on: boolean) => Effect.Effect<void, BrowserError>
+  /** Starts recording the panel for the assistant (the panel encodes the video). */
+  readonly startRecording: Effect.Effect<void, BrowserError>
+  /** Stops the assistant's recording and returns the saved file; null when none was made. */
+  readonly stopRecording: Effect.Effect<Recording | null, BrowserError>
+  /** The panel answering a `record` event, or reporting an assistant recording that ended on its own. */
+  readonly recordReply: (reply: PanelReply) => Effect.Effect<void>
   /** Marks the agent as driving (misty border on) and says what it is doing. */
   readonly status: (label: string) => Effect.Effect<void>
-  /** Hands the browser back to the user. Safe to call when not in control. */
+  /** Hands the browser back to the user, saving a recording the assistant left running. Safe to call when not in control. */
   readonly release: Effect.Effect<void>
 }
 
@@ -256,6 +271,11 @@ export class Browser extends Context.Service<Browser, BrowserApi>()('chat-v2/Bro
       let guest: WebContents | null = null
       let waiting: Array<() => void> = []
       let casting = false
+      // Whether the panel is recording for the assistant, and a recording of its that ended
+      // without being asked to (the user pressed stop, or it ran out of time).
+      let agentRecording = false
+      let unclaimed: Recording | null = null
+      let answer: ((reply: PanelReply) => void) | null = null
 
       const fail = (message: string) => new BrowserError({ message })
       const attempt = <A>(what: string, f: () => Promise<A>) =>
@@ -405,6 +425,42 @@ export class Browser extends Context.Service<Browser, BrowserApi>()('chat-v2/Bro
           }
         })
 
+      /** Asks the panel to start or stop recording and waits for its answer (saving a video takes a moment). */
+      const askPanel = (on: boolean) =>
+        Effect.tryPromise({
+          try: (signal) =>
+            new Promise<PanelReply>((resolve, reject) => {
+              const done = () => {
+                clearTimeout(timer)
+                if (answer === waiter) answer = null
+              }
+              const waiter = (reply: PanelReply) => {
+                done()
+                resolve(reply)
+              }
+              const timer = setTimeout(() => {
+                done()
+                reject(new Error('the browser panel did not answer'))
+              }, on ? 8000 : 30000)
+              // A reply that stops waiting (the user pressed Stop) leaves no waiter behind.
+              signal.addEventListener('abort', done)
+              answer = waiter
+              emit({ type: 'record', on })
+            }),
+          catch: (cause) => fail(`${on ? 'Starting the recording' : 'Saving the recording'}: ${errorMessage(cause)}`)
+        }).pipe(Effect.flatMap((reply) => (reply.ok ? Effect.succeed(reply) : Effect.fail(fail(reply.error)))))
+
+      const stopRecording = Effect.gen(function* () {
+        const ended = unclaimed
+        unclaimed = null
+        if (!agentRecording) return ended
+        agentRecording = false
+        // A closed panel took its recording with it.
+        if (!live()) return ended
+        const reply = yield* askPanel(false)
+        return reply.ok && reply.path ? { path: reply.path, seconds: reply.seconds ?? 0 } : ended
+      })
+
       const api: BrowserApi = {
         attach: (id) =>
           Effect.suspend(() => {
@@ -412,6 +468,8 @@ export class Browser extends Context.Service<Browser, BrowserApi>()('chat-v2/Bro
             if (!wc || wc.getType() !== 'webview') return Effect.fail(fail('Not a browser view'))
             guest = wc
             casting = false
+            // A new panel isn't recording.
+            agentRecording = false
             wc.debugger.on('message', (_e, method, params) => {
               if (method !== 'Page.screencastFrame') return
               // Every frame must be acknowledged or Chromium stops sending them.
@@ -529,9 +587,35 @@ export class Browser extends Context.Service<Browser, BrowserApi>()('chat-v2/Bro
             else yield* cdp(wc, 'Page.stopScreencast')
           }),
 
+        startRecording: Effect.gen(function* () {
+          yield* ensure
+          if (agentRecording) return
+          unclaimed = null
+          yield* askPanel(true)
+          agentRecording = true
+        }),
+
+        stopRecording,
+
+        recordReply: (reply) =>
+          Effect.sync(() => {
+            if (answer) return answer(reply)
+            if (reply.ok && reply.path) {
+              agentRecording = false
+              unclaimed = { path: reply.path, seconds: reply.seconds ?? 0 }
+            }
+          }),
+
         status: (label) => Effect.sync(() => emit({ type: 'control', active: true, label })),
 
-        release: Effect.sync(() => emit({ type: 'control', active: false, label: '' }))
+        // A recording left running is stopped without waiting: the panel saves it and says where.
+        release: Effect.sync(() => {
+          if (agentRecording) {
+            agentRecording = false
+            emit({ type: 'record', on: false })
+          }
+          emit({ type: 'control', active: false, label: '' })
+        })
       }
       return Browser.of(api)
     })

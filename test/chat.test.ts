@@ -46,6 +46,9 @@ const fakeBrowser = (log: string[]) =>
       evaluate: () => Effect.succeed('42'),
       elementAt: () => Effect.succeed(null),
       screencast: () => Effect.void,
+      startRecording: Effect.sync(() => void log.push('record start')),
+      stopRecording: Effect.sync(() => (log.push('record stop'), { path: 'C:\\Videos\\chat-v2\\recording-1.webm', seconds: 7 })),
+      recordReply: () => Effect.void,
       status: (label) => Effect.sync(() => void log.push(`status ${label}`)),
       release: Effect.sync(() => void log.push('release'))
     } satisfies BrowserApi)
@@ -505,6 +508,41 @@ describe('chat', () => {
     expect(t.requests[1]!.messages.at(-1)).toMatchObject({ role: 'tool', tool_call_id: 'c1' })
     expect(String((t.requests[1]!.messages.at(-1) as { content: string }).content)).toContain('[e1] button "Buy now"')
     // Chats without the switch get no tools.
+    await t.runtime.dispose()
+  })
+
+  test('browser agent: a saved screenshot goes on the reply, and a recording is saved to a file', async () => {
+    const log: string[] = []
+    const tool = (id: string, name: string, args: object): ChatDelta => ({ type: 'tool', index: 0, id, name, args: JSON.stringify(args) })
+    const t = setup(
+      (req) => {
+        const turns = req.messages.filter((m) => m.role === 'tool').length
+        if (turns === 0) return Stream.make(tool('s1', 'browser_screenshot', { save: true }))
+        if (turns === 1) return Stream.make(tool('r1', 'browser_record', { action: 'start' }))
+        if (turns === 2) return Stream.make(tool('r2', 'browser_record', { action: 'stop' }))
+        return Stream.make('Here they are.')
+      },
+      undefined,
+      log
+    )
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { browserEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'screenshot and record it', attachmentIds: [] })))
+    await t.waitForDone(1)
+
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    const reply = view.path[1]!.message
+    expect(reply.attachments).toHaveLength(1)
+    expect(reply.attachments[0]).toMatchObject({ kind: 'image', mime: 'image/png', messageId: reply.id })
+    expect(reply.attachments[0]!.name).toMatch(/^screenshot-\d{6}\.png$/)
+    // Open windows hear about it as it happens, not only on reload.
+    expect(t.events.find((e) => e.type === 'attachment')).toMatchObject({ messageId: reply.id, attachment: { id: reply.attachments[0]!.id } })
+    expect(log).toContain('record start')
+    expect(log).toContain('record stop')
+    expect(reply.content).toContain('"label":"Recorded 7s of the browser","ok":true,"detail":"C:\\\\Videos\\\\chat-v2\\\\recording-1.webm"')
+    // The model sees the screenshot it saved, and is told where the video went.
+    expect(t.requests[1]!.messages.at(-1)).toMatchObject({ role: 'user', content: [{ type: 'text' }, { type: 'image_url' }] })
+    expect(String((t.requests[3]!.messages.at(-1) as { content: string }).content)).toContain('recording-1.webm')
     await t.runtime.dispose()
   })
 

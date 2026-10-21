@@ -45,6 +45,7 @@ const api: Api = {
   attachments: {
     add: (input) => call('attachments:add', input),
     discard: (id) => call('attachments:discard', id),
+    saveAs: (id, name) => call('attachments:saveAs', id, name),
     setAnalysis: (id, analysis) => call('attachments:setAnalysis', id, analysis),
     url: (id) => `attachment://${id}/`
   },
@@ -96,6 +97,7 @@ const api: Api = {
     elementAt: (x, y) => call('browser:elementAt', x, y),
     screencast: (on) => call('browser:screencast', on),
     saveRecording: (data) => call('browser:saveRecording', data),
+    recordReply: (reply) => call('browser:recordReply', reply),
     reveal: (path) => call('browser:reveal', path),
     onEvent: (listener) => {
       const handler = (_event: unknown, payload: BrowserEvent) => listener(payload)

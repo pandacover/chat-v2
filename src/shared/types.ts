@@ -226,6 +226,8 @@ export type StreamEvent =
   | { type: 'title'; sessionId: string; title: string }
   /** Memory changed after a message (learned in the background, so this can arrive any time). */
   | { type: 'memory'; sessionId: string; added: string[]; removed: string[] }
+  /** A file the assistant added to its reply mid-run (a screenshot it saved for the user). */
+  | { type: 'attachment'; messageId: string; attachment: Attachment }
 
 export interface AppError {
   tag: string
@@ -294,6 +296,8 @@ export interface Api {
     add(input: NewAttachmentInput): Promise<Attachment>
     setAnalysis(id: string, analysis: AudioAnalysis): Promise<void>
     discard(id: string): Promise<void>
+    /** Asks where to save a copy of the file and writes it; null when the user cancels. */
+    saveAs(id: string, name: string): Promise<string | null>
     url(id: string): string
   }
   settings: {
@@ -361,6 +365,11 @@ export type BrowserEvent =
   | { type: 'cursor'; x: number; y: number; click: boolean }
   | { type: 'control'; active: boolean; label: string }
   | { type: 'frame'; data: string }
+  /** The assistant starts or stops recording the panel; the panel answers with recordReply. */
+  | { type: 'record'; on: boolean }
+
+/** The panel's answer to a `record` event: started, or the finished video of an assistant recording. */
+export type RecordReply = { ok: true; data?: ArrayBuffer; seconds?: number } | { ok: false; error: string }
 
 export interface BrowserApi {
   /** Registers the panel's <webview> so the main process (and the agent) can drive it. */
@@ -373,6 +382,8 @@ export interface BrowserApi {
   screencast(on: boolean): Promise<void>
   /** Writes a finished recording to disk and returns its path. */
   saveRecording(data: ArrayBuffer): Promise<string>
+  /** Answers a `record` event. With a finished video, saves it and returns its path. */
+  recordReply(reply: RecordReply): Promise<string | null>
   reveal(path: string): Promise<void>
   onEvent(listener: (event: BrowserEvent) => void): () => void
 }

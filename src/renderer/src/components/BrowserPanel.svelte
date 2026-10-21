@@ -46,6 +46,11 @@
   let paintTimer: ReturnType<typeof setInterval> | undefined
   let lastFrame: HTMLImageElement | null = null
   let offFrames: (() => void) | null = null
+  // Who started the recording: the user's goes into their message, the assistant's back to its reply.
+  let recordingFor: 'user' | 'agent' = 'user'
+  let recLimit: ReturnType<typeof setTimeout> | undefined
+  /** How long the assistant may record before the panel stops it. */
+  const AGENT_RECORDING_MS = 5 * 60_000
 
   type Rect = { x: number; y: number; width: number; height: number }
 
@@ -89,7 +94,11 @@
     el.addEventListener('page-title-updated', sync)
     el.addEventListener('did-start-loading', start)
     el.addEventListener('did-stop-loading', stop)
+    const offRecord = window.api.browser.onEvent((e) => {
+      if (e.type === 'record') void (e.on ? agentStart() : agentStop())
+    })
     return () => {
+      offRecord()
       el.removeEventListener('dom-ready', onReady)
       el.removeEventListener('did-navigate', sync)
       el.removeEventListener('did-navigate-in-page', sync)
@@ -282,7 +291,8 @@
     }
   }
 
-  const startRecording = async () => {
+  const startRecording = async (by: 'user' | 'agent' = 'user') => {
+    recordingFor = by
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d')!
     const sizeFrom = stage!.getBoundingClientRect()
@@ -312,6 +322,12 @@
     recorder.onstop = async () => {
       const blob = new Blob(chunks, { type: 'video/webm' })
       const seconds = Math.round((Date.now() - recStart) / 1000)
+      if (by === 'agent') {
+        // The reply that asked for it is told where it went; the user sees it here.
+        const path = await app.attempt(async () => window.api.browser.recordReply({ ok: true, data: await blob.arrayBuffer(), seconds }))
+        if (path) app.toast(`Recording saved to ${path}`, 'info')
+        return
+      }
       const path = await app.attempt(async () => window.api.browser.saveRecording(await blob.arrayBuffer()))
       if (!path) return
       const body = `Screen recording of ${app.browser.title || host} (${app.browser.url}), ${seconds}s.\nSaved to: ${path}\n`
@@ -325,11 +341,13 @@
     recStart = Date.now()
     recElapsed = 0
     recTimer = setInterval(() => (recElapsed = Math.floor((Date.now() - recStart) / 1000)), 250)
+    if (by === 'agent') recLimit = setTimeout(() => void stopRecording(), AGENT_RECORDING_MS)
     recording = true
   }
 
   const stopRecording = async () => {
     recording = false
+    clearTimeout(recLimit)
     clearInterval(recTimer)
     clearInterval(paintTimer)
     offFrames?.()
@@ -338,6 +356,25 @@
     await window.api.browser.screencast(false).catch(() => undefined)
     if (recorder?.state !== 'inactive') recorder?.stop()
     recorder = null
+  }
+
+  // The assistant's browser_record: each start and stop is answered, a stop with the finished video (see onstop).
+  const agentStart = async () => {
+    if (recording) {
+      const reply = recordingFor === 'agent' ? { ok: true as const } : { ok: false as const, error: 'The user is already recording the browser.' }
+      return void window.api.browser.recordReply(reply).catch(() => undefined)
+    }
+    try {
+      await startRecording('agent')
+      await window.api.browser.recordReply({ ok: true })
+    } catch (e) {
+      await window.api.browser.recordReply({ ok: false, error: e instanceof Error ? e.message : String(e) }).catch(() => undefined)
+    }
+  }
+  const agentStop = async () => {
+    if (recording && recordingFor === 'agent') return stopRecording()
+    // No recording of the assistant's is running (it already ended, or this one is the user's): no video to send.
+    await window.api.browser.recordReply({ ok: true }).catch(() => undefined)
   }
 
   const clock = $derived(`${Math.floor(recElapsed / 60)}:${String(recElapsed % 60).padStart(2, '0')}`)

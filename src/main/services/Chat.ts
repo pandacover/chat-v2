@@ -6,7 +6,7 @@ import { makeLineBuffer } from '@shared/lines'
 import type { MemoryRun, Message, MessageStatus, Session, SessionView, StreamEvent, Usage } from '@shared/types'
 import { type DbError, InvalidInput, type NotFound, errorMessage } from '../errors'
 import { WRITING_GUIDELINES } from '../guidelines'
-import { BROWSER_INSTRUCTIONS, BROWSER_TOOLS, MAX_AGENT_STEPS, runTool } from '../agent'
+import { BROWSER_INSTRUCTIONS, BROWSER_TOOLS, MAX_AGENT_STEPS, type ToolOutcome, runTool } from '../agent'
 import { MAX_COMPUTER_STEPS, computerInstructions, computerTools, runComputerTool } from '../computerTools'
 import { MEMORY_INSTRUCTIONS, askedQuestion, memoryPrompt, memorySource, parseMemoryReply, profileBlock } from '../memory'
 import { stepLine, summarizeSteps } from '@shared/steps'
@@ -285,6 +285,23 @@ export class Chat extends Context.Service<
           return own
         })
 
+      /** Saves a file a tool made for the user (a screenshot) on the reply, and shows it in open windows. */
+      const attachToReply = (messageId: string, outcome: ToolOutcome) =>
+        Effect.gen(function* () {
+          const attachment = yield* attachments.add(outcome.attach!)
+          yield* db.use((d) => d.bindAttachments([attachment.id], messageId))
+          broadcaster.send({ type: 'attachment', messageId, attachment: { ...attachment, messageId } })
+          return outcome
+        }).pipe(
+          Effect.catch((e) =>
+            Effect.succeed<ToolOutcome>({
+              ...outcome,
+              text: `${outcome.text}\nBut it could not be attached to your reply: ${e.message}`,
+              step: { ...outcome.step, ok: false, detail: `Could not attach it: ${e.message}` }
+            })
+          )
+        )
+
       /**
        * Streams a reply into `assistant`, durably: every completed line is appended
        * to the row before it is broadcast, so a reloaded window can re-read it and
@@ -458,9 +475,10 @@ export class Chat extends Context.Service<
               }
               if (!desktop) usedBrowser = true
               if (!desktop && computerRun) yield* computer.hint(browserHint(call.function.name, call.function.arguments))
-              const outcome = desktop
+              let outcome = desktop
                 ? yield* runComputerTool(computer, call.function.name, call.function.arguments, { watch }).pipe(timer.action(step, call.function.name))
                 : yield* runTool(browser, refs, call.function.name, call.function.arguments).pipe(timer.action(step, call.function.name))
+              if (outcome.attach) outcome = yield* attachToReply(assistant.id, outcome)
               yield* emit(stepLine(outcome.step))
               const result: ChatMessage = { role: 'tool', tool_call_id: call.id, content: outcome.text }
               request.messages.push(result)

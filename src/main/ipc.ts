@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { BrowserWindow, app, dialog, ipcMain, shell, systemPreferences } from 'electron'
 import { Cause, Effect, type ManagedRuntime } from 'effect'
-import type { AudioAnalysis, IpcResult, MemoryView, NewAttachmentInput, SessionPatch, SettingsPatch } from '@shared/types'
+import type { AudioAnalysis, IpcResult, MemoryView, NewAttachmentInput, RecordReply, SessionPatch, SettingsPatch } from '@shared/types'
 import { errorMessage } from './errors'
 import { checkForUpdates, downloadUpdate, installUpdate, updateState } from './updater'
 import { publishArtifact } from './protocols'
@@ -32,6 +32,15 @@ const rect = (v: unknown): Rect | undefined => {
   return r && [r.x, r.y, r.width, r.height].every((n) => typeof n === 'number') ? (r as Rect) : undefined
 }
 const stamp = () => new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+
+/** Writes a browser recording to Videos/chat-v2 and returns its path. */
+const saveRecording = (data: ArrayBuffer) => {
+  const dir = join(app.getPath('videos'), 'chat-v2')
+  mkdirSync(dir, { recursive: true })
+  const file = join(dir, `recording-${stamp()}.webm`)
+  writeFileSync(file, new Uint8Array(data))
+  return file
+}
 
 const ids = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [])
 
@@ -167,6 +176,20 @@ const handlers: Record<string, Handler> = {
       a.add({ name: str(input.name, 'name'), mime: typeof input.mime === 'string' ? input.mime : '', data: input.data })
     ),
   'attachments:discard': (id) => Attachments.use((a) => a.discard(str(id, 'id'))),
+  'attachments:saveAs': (id, name) =>
+    Effect.gen(function* () {
+      const file = yield* (yield* Attachments).read(str(id, 'id'))
+      const fileName = str(name, 'name').replace(/[\\/:*?"<>|]+/g, '-')
+      const where = file.mime.startsWith('image/') ? 'pictures' : 'downloads'
+      return yield* Effect.promise(async () => {
+        const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+        const options = { defaultPath: join(app.getPath(where), fileName) }
+        const result = win ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options)
+        if (result.canceled || !result.filePath) return null
+        writeFileSync(result.filePath, file.data)
+        return result.filePath
+      })
+    }),
   'attachments:setAnalysis': (id, analysis: AudioAnalysis) =>
     Db.use((db) => db.use((d) => d.setAnalysis(str(id, 'id'), analysis))),
 
@@ -227,13 +250,22 @@ const handlers: Record<string, Handler> = {
     ),
   'browser:elementAt': (x, y) => Browser.use((b) => b.elementAt(Number(x), Number(y))),
   'browser:screencast': (on) => Browser.use((b) => b.screencast(on === true)),
-  'browser:saveRecording': (data: ArrayBuffer) =>
-    Effect.sync(() => {
-      const dir = join(app.getPath('videos'), 'chat-v2')
-      mkdirSync(dir, { recursive: true })
-      const file = join(dir, `recording-${stamp()}.webm`)
-      writeFileSync(file, new Uint8Array(data))
-      return file
+  'browser:saveRecording': (data: ArrayBuffer) => Effect.sync(() => saveRecording(data)),
+  // The panel answering the assistant's start or stop; a finished video is saved where the user's own go.
+  'browser:recordReply': (reply: RecordReply) =>
+    Effect.gen(function* () {
+      const browser = yield* Browser
+      if (!reply.ok) return yield* browser.recordReply({ ok: false, error: str(reply.error, 'error') }).pipe(Effect.as(null))
+      if (!(reply.data instanceof ArrayBuffer)) return yield* browser.recordReply({ ok: true }).pipe(Effect.as(null))
+      let path: string
+      try {
+        path = saveRecording(reply.data)
+      } catch (e) {
+        yield* browser.recordReply({ ok: false, error: `Could not save the recording: ${errorMessage(e)}` })
+        throw e
+      }
+      yield* browser.recordReply({ ok: true, path, seconds: Math.round(Number(reply.seconds) || 0) })
+      return path
     }),
   'browser:reveal': (path) => Effect.sync(() => shell.showItemInFolder(str(path, 'path'))),
 
