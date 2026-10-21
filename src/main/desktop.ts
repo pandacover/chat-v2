@@ -68,6 +68,11 @@ export interface ScreenPort {
   mark?(): Promise<number | null>
   /** Gets ready to capture often (opens the stream); captures work meanwhile. */
   prepare?(): void
+  /**
+   * A reply has control: opens the stream and keeps it open, however long the model takes between
+   * looks, until `release` (macOS).
+   */
+  hold?(): void
   /** Done capturing for now. */
   release?(): void
   /** Quitting: done capturing for good. Ends what it started (a stream, a helper process) and starts nothing again. */

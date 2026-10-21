@@ -3,8 +3,10 @@
 // desktop.ts). A screenshot is the newest frame, scaled, covered and encoded by the helper, and the
 // stream's own frame reports say when the screen changed, so actions wait only until it holds
 // still. The whole app is left out of the stream: the overlay is never hidden for a capture, and a
-// reply's first look sees what's under the chat. Without the helper (not built, failing, no
-// permission) it captures as before: getSources, with the overlay hidden for each capture.
+// reply's first look sees what's under the chat. A capture while the stream is starting (or after
+// it closed) waits for it rather than hide the overlay, which shows as a blink. Without the helper
+// (not built, failing, no permission) it captures as before: getSources, with the overlay hidden
+// for each capture.
 // Electron is injected (see macScreen in desktop.ts), so this loads in tests.
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import type { DisplayInfo, ScreenChanges, ScreenPort } from './desktop'
@@ -28,6 +30,8 @@ export interface MacCaptureDeps {
   idleMs?: number
   /** How long a stream opened ahead of a reply (`prepare`) stays open unused. */
   prewarmIdleMs?: number
+  /** How long `watchable`, or a capture, waits for the stream to come up (WATCHABLE_WAIT_MS). */
+  upWaitMs?: number
 }
 
 /**
@@ -41,7 +45,7 @@ export const MAC_STREAM_IDLE_MS = 10_000
  * chat closes it when it ends.
  */
 export const MAC_PREWARM_IDLE_MS = 10_000
-/** How long `watchable` waits for the stream to come up, when it wasn't already. */
+/** How long `watchable`, or a capture, waits for the stream to come up, when it wasn't already. */
 export const WATCHABLE_WAIT_MS = 3000
 /** A stream that failed this many times stays off; getSources still works. */
 const MAX_FAILURES = 3
@@ -61,6 +65,8 @@ export const macCaptureScreen = (deps: MacCaptureDeps): ScreenPort => {
   let idle: ReturnType<typeof setTimeout> | null = null
   /** Counts closes, so a start that finishes after a close is thrown away. */
   let generation = 0
+  /** A reply has control (`hold`): the stream doesn't close when idle, only when released. */
+  let held = false
 
   const warned = new Set<string>()
   const warn = (m: string) => {
@@ -91,6 +97,7 @@ export const macCaptureScreen = (deps: MacCaptureDeps): ScreenPort => {
 
   const close = () => {
     generation++
+    held = false
     if (idle) clearTimeout(idle)
     idle = null
     const was = streaming !== null || opening !== null
@@ -144,12 +151,35 @@ export const macCaptureScreen = (deps: MacCaptureDeps): ScreenPort => {
    * closes after `idleMs` without another call.
    */
   const use = (idleMs = deps.idleMs ?? MAC_STREAM_IDLE_MS) => {
-    if (streaming !== null && streaming !== displayKey()) close()
+    if (streaming !== null && streaming !== displayKey()) {
+      // A new display reopens the stream; a reply holding it still does.
+      const keep = held
+      close()
+      held = keep
+    }
     if (idle) clearTimeout(idle)
-    idle = setTimeout(close, idleMs)
+    idle = held ? null : setTimeout(close, idleMs)
     if (streaming !== null) return true
     void open()
     return false
+  }
+
+  /** A start that outlasted a wait for it: it isn't waited for again. */
+  let stalled: Promise<boolean> | null = null
+  /** The stream is up, or comes up within WATCHABLE_WAIT_MS (it opens it): whether it is. */
+  const upSoon = async () => {
+    if (use()) return true
+    const starting = open()
+    if (starting === stalled) return false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const timeout = new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), deps.upWaitMs ?? WATCHABLE_WAIT_MS)))
+    try {
+      const up = await Promise.race([starting, timeout])
+      if (!up && opening === starting) stalled = starting
+      return up
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
   }
 
   const live = () => streaming !== null && streaming === displayKey()
@@ -163,8 +193,10 @@ export const macCaptureScreen = (deps: MacCaptureDeps): ScreenPort => {
 
     capture: async (size, cover, crop, opts) => {
       // The stream's newest frame is the screen: every change reaches it within a frame (1/15 s),
-      // and this app is never in it, so `fresh` needs nothing more.
-      if (use() && helper) {
+      // and this app is never in it, so `fresh` needs nothing more. One that is starting, or
+      // reopening after the model took a while, is waited for: about as long as getSources takes,
+      // without hiding the overlay.
+      if ((await upSoon()) && helper) {
         const t = performance.now()
         const d = deps.display()
         const rel = crop ? { x: crop.x - d.x, y: crop.y - d.y, w: crop.w, h: crop.h } : null
@@ -206,18 +238,13 @@ export const macCaptureScreen = (deps: MacCaptureDeps): ScreenPort => {
       }
     },
 
-    watchable: async () => {
-      if (use()) return true
-      let timer: ReturnType<typeof setTimeout> | null = null
-      const timeout = new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), WATCHABLE_WAIT_MS)))
-      try {
-        return await Promise.race([open(), timeout])
-      } finally {
-        if (timer) clearTimeout(timer)
-      }
-    },
+    watchable: () => upSoon(),
 
     prepare: () => void use(deps.prewarmIdleMs ?? MAC_PREWARM_IDLE_MS),
+    hold: () => {
+      held = true
+      void use()
+    },
     release: close,
     /** Quitting: stops the stream and ends the helper process; nothing starts it again. */
     close: () => {

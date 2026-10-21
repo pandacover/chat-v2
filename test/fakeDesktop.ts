@@ -67,6 +67,8 @@ export interface FakeDesktop {
   canStream: boolean
   /** Times the stream was closed (a reply ended, computer mode went off). */
   released: number
+  /** Times a reply took hold of the stream, so it stays open until released (macOS). */
+  held: number
   /** Times the screen was closed for good (quitting). */
   closed: number
 }
@@ -102,6 +104,7 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'da
     changeLooks: 0,
     canStream: true,
     released: 0,
+    held: 0,
     closed: 0,
     ports: null as unknown as ComputerPorts
   }
@@ -161,6 +164,7 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'da
             keepsAppOut: () => d.streamUp,
             keepsOverlayOut: true,
             prepare: () => void d.prepared++,
+            hold: () => void d.held++,
             release: () => void d.released++,
             close: () => void d.closed++
           }

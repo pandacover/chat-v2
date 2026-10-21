@@ -84,11 +84,23 @@ describe('mac capture port', () => {
     expect(await screen.changes!()).toEqual({ count: 2, stillMs: 42 })
   })
 
-  test("until the stream is up, captures are getSources' with the overlay hidden, and a capture that must leave the app out refuses", async () => {
-    const { screen, t } = port()
+  test("a stream that can't come up in time leaves captures to getSources, with the overlay hidden, and a capture that must leave the app out refuses", async () => {
+    // A helper that never answers its ready line: the stream never comes up.
+    const hung = () => {
+      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+      children.push(child)
+      return child
+    }
+    const { screen, t } = port([], { spawnHelper: hung, upWaitMs: 100 })
+    const first = performance.now()
     const shot = await screen.capture({ w: 1280, h: 800 }, [])
+    expect(performance.now() - first).toBeGreaterThanOrEqual(95)
+    // A start that outlasted one wait isn't waited for again.
+    const second = performance.now()
+    await screen.capture({ w: 1280, h: 800 }, [])
+    expect(performance.now() - second).toBeLessThan(50)
     expect(shot.dataUrl).toBe('data:image/jpeg;base64,SOURCES')
-    expect(t.hides).toBe(1)
+    expect(t.hides).toBe(2)
     expect(Object.keys(shot.ms!)).toContain('hide')
     expect(await screen.changes!()).toBeNull()
     expect(screen.live!()).toBe(false)
@@ -178,6 +190,46 @@ describe('mac capture port', () => {
     screen.prepare!()
     await sleep(50)
     expect(t.spawns).toBe(1)
+  })
+
+  // The overlay blinking on a Mac: every capture that doesn't come from the stream hides it
+  // (setOpacity(0), a frame's wait, getSources, then back), so a capture must not miss a stream
+  // that is starting, or one that closed while the model took its time over the next step.
+  test('a capture while the stream is still starting waits for it, and never hides the overlay', async () => {
+    const { screen, requests, t } = port()
+    screen.prepare!()
+    const shot = await screen.capture({ w: 1280, h: 800 }, [])
+    expect(shot.dataUrl).toBe(`data:image/jpeg;base64,${Buffer.from('SCK').toString('base64')}`)
+    expect(t.hides).toBe(0)
+    expect(t.fallbacks).toBe(0)
+    expect(requests()).toEqual([`start 69733378 ${SELF_PID} 2880 1800`, 'grab 1280 800 [] null 2880'])
+  })
+
+  test('a step after a long think captures from the stream, without hiding the overlay', async () => {
+    const { screen, t } = port([], { idleMs: 100 })
+    expect(await screen.watchable!()).toBe(true)
+    await screen.capture({ w: 1280, h: 800 }, [])
+    // The model takes longer than the idle time over its next step.
+    await sleep(250)
+    const shot = await screen.capture({ w: 1280, h: 800 }, [])
+    expect(shot.dataUrl).toBe(`data:image/jpeg;base64,${Buffer.from('SCK').toString('base64')}`)
+    expect(t.hides).toBe(0)
+  })
+
+  test('a stream held for a reply stays open however long the model thinks, until released', async () => {
+    const { screen, requests } = port([], { idleMs: 100, prewarmIdleMs: 100 })
+    screen.hold!()
+    expect(await screen.watchable!()).toBe(true)
+    await screen.capture({ w: 1280, h: 800 }, [])
+    await sleep(300)
+    expect(screen.live!()).toBe(true)
+    expect(requests().filter((r) => r === 'stop')).toEqual([])
+    screen.release!()
+    expect(screen.live!()).toBe(false)
+    // Released, it's back to closing when idle.
+    expect(await screen.watchable!()).toBe(true)
+    await sleep(300)
+    expect(screen.live!()).toBe(false)
   })
 
   test("where only the app's windows could be left out, the overlay is still hidden and the glance can't rely on the stream", async () => {
@@ -386,9 +438,10 @@ describe('mac computer service with the stream', () => {
     expect(await t.run(Computer.use((c) => c.glance('r')))).not.toBeNull()
   })
 
-  test('a reply ending closes the stream', async () => {
+  test('a reply holds the stream from taking control until it ends, which closes it', async () => {
     const t = service()
     await t.run(Computer.use((c) => c.begin('r')))
+    expect(t.desktop.held).toBe(1)
     await t.run(Computer.use((c) => c.end('r')))
     expect(t.desktop.released).toBe(1)
   })

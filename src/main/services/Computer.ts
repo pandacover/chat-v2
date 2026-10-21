@@ -724,6 +724,9 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               screen.prepare?.()
               yield* checkScale
               owner = id
+              // And stays open until `end`, however long the model takes: a Mac hides the overlay
+              // for a capture the stream can't take, which shows as a blink.
+              screen.hold?.()
               workWindow = null
               agentAt = null
               // The reply's glance is the screenshot its first action aims at.
