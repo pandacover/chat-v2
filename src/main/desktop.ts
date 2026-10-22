@@ -476,8 +476,8 @@ export const electronOverlay = (headless: boolean): OverlayPort => {
       }
       // The mode outlives the window: a new overlay starts with the latest one.
       if (event.type === 'mode') mode = event
-      // A hint or the mode alone doesn't bring the overlay up.
-      if (!win && (event.type === 'mode' || event.type === 'hint' || event.type === 'clear')) return
+      // A hint, words or the mode alone don't bring the overlay up.
+      if (!win && (event.type === 'mode' || event.type === 'hint' || event.type === 'say' || event.type === 'clear')) return
       if (!win) create()
       // Hovering the status bar needs mouse moves forwarded, which on Windows takes a system-wide
       // mouse hook: only while the bar is up, not the whole time computer mode keeps the overlay open.

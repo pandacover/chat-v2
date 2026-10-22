@@ -361,6 +361,9 @@ export class Chat extends Context.Service<
           // A computer step is a small decision on a fresh screenshot, so the model thinks as much
           // as Settings say (low by default). Models that can't take an effort ignore it.
           if (computerRun) request.reasoning = { effort: settings?.computerReasoningEffort ?? 'low' }
+          // A computer step may be several actions the screenshot already shows the way to; they run
+          // one after another, each checked against that screenshot (see Computer.thinking).
+          if (computerRun) request.parallel_tool_calls = true
           // Computer runs can have their own model, so a chat can talk with one and act with a faster one.
           // Runs with tools never go to the auto-router: it could pick another model at every step.
           const actingModel = request.tools ? toolModel(chatModel) : chatModel
@@ -415,7 +418,8 @@ export class Chat extends Context.Service<
                   }
                   if (delta.type === 'text') {
                     text += delta.text
-                    return Effect.forEach(buffer.push(delta.text), emit, { discard: true })
+                    // The cursor carries what the assistant says, as it says it.
+                    return Effect.forEach(buffer.push(delta.text), emit, { discard: true }).pipe(Effect.andThen(computerRun ? computer.say(text) : Effect.void))
                   }
                   const call = calls.get(delta.index) ?? { id: '', name: '', args: '' }
                   if (delta.id) call.id = delta.id
@@ -435,6 +439,8 @@ export class Chat extends Context.Service<
               })
             )
             if (calls.size === 0 || !request.tools) return
+            // Acting without a word this step: what it said for an earlier one no longer fits.
+            if (computerRun && !text.trim()) yield* computer.say('')
             if (step >= maxSteps) {
               yield* endLine
               yield* emit(`Stopped after ${maxSteps} steps. Ask me to keep going if you want me to continue.`)
@@ -456,10 +462,19 @@ export class Chat extends Context.Service<
             })
             const images: Array<{ url: string; desktop: boolean }> = []
             let halt: string | null = null
+            /** Why the rest of this step's calls aren't run: one before them failed or was held back. */
+            let skip: string | null = null
+            /** The newest screenshot of the desktop this step, and the result it belongs to. */
+            let screen: { url: string; result: ChatMessage; brief?: string } | null = null
+            let acted = 0
             for (const call of toolCalls) {
               // Every call needs a result, even ones after a refusal, or the request is malformed.
               if (halt !== null) {
                 request.messages.push({ role: 'tool', tool_call_id: call.id, content: 'Not run: control was handed back to the user.' })
+                continue
+              }
+              if (skip !== null) {
+                request.messages.push({ role: 'tool', tool_call_id: call.id, content: `Not run: ${skip}` })
                 continue
               }
               const desktop = call.function.name.startsWith('computer_')
@@ -483,19 +498,35 @@ export class Chat extends Context.Service<
               const result: ChatMessage = { role: 'tool', tool_call_id: call.id, content: outcome.text }
               request.messages.push(result)
               if (outcome.snapshot) snapshots.push(result)
-              if (outcome.image) images.push({ url: outcome.image, desktop })
+              // Of the desktop, only the screen after the last action goes back: an earlier one would
+              // show a screen that is gone, and the model could take it for the current one.
+              if (outcome.image && desktop && call.function.name !== 'computer_zoom') {
+                if (screen?.brief) screen.result.content = screen.brief
+                screen = { url: outcome.image, result, ...(outcome.brief ? { brief: outcome.brief } : {}) }
+                acted++
+              } else if (outcome.image) images.push({ url: outcome.image, desktop })
               if (outcome.halt) halt = outcome.halt
+              // The calls after a desktop action that failed were planned on it having worked.
+              else if (desktop && !outcome.step.ok && call !== toolCalls.at(-1)) skip = `the ${call.function.name} before this didn't go as planned, so this was left for you to plan again.`
             }
             if (halt !== null) return yield* emit(halt)
             pruneSnapshots(snapshots)
+            if (screen) images.push({ url: screen.url, desktop: true })
             // Tool results are text-only on most providers, so screenshots follow as a user turn.
             if (images.length > 0) {
+              const heading =
+                images.length > 1
+                  ? `Images from this step, in the order they were taken${screen ? '; the last is the screen as it is now' : ''}:`
+                  : !screen
+                    ? images[0]!.desktop
+                      ? 'Close-up you asked for:'
+                      : 'Screenshot of the browser viewport you asked for:'
+                    : acted > 1
+                      ? `Screenshot after the last of your ${acted} actions this step (the screen as it is now):`
+                      : 'Screenshot after that step:'
               const shot: ChatMessage = {
                 role: 'user',
-                content: [
-                  { type: 'text', text: images.some((i) => i.desktop) ? 'Screenshot after that step:' : 'Screenshot of the browser viewport you asked for:' },
-                  ...images.map((i) => ({ type: 'image_url' as const, image_url: { url: i.url } }))
-                ]
+                content: [{ type: 'text', text: heading }, ...images.map((i) => ({ type: 'image_url' as const, image_url: { url: i.url } }))]
               }
               request.messages.push(shot)
               // Only the newest screenshot is worth its tokens; the one before becomes a note (the glance's too).
@@ -508,6 +539,8 @@ export class Chat extends Context.Service<
           Effect.ensuring(Effect.suspend(() => (usedBrowser ? browser.release : Effect.void))),
           Effect.ensuring(Effect.suspend(() => (usedComputer ? computer.end(assistant.id) : Effect.void))),
           Effect.ensuring(Effect.suspend(() => computer.hint(''))),
+          // A reply that never took control has no `end` to take its words off the cursor.
+          Effect.ensuring(Effect.suspend(() => (usedComputer ? Effect.void : computer.say('')))),
           // Text-only replies in a computer chat glanced at the screen too: don't leave its stream running.
           Effect.ensuring(Effect.suspend(() => (lookedAtScreen ? computer.replyEnded(assistant.id) : Effect.void))),
           Effect.onExit((exit) =>

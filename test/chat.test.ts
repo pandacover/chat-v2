@@ -729,6 +729,21 @@ describe('chat', () => {
     await t.runtime.dispose()
   })
 
+  test('computer use: a reply that only talks takes its words off the cursor when it ends', async () => {
+    const desktop = fakeDesktop()
+    // Slow enough that what it said reached the cursor before the reply ended.
+    const t = setup(() => Stream.make('It is 4.').pipe(Stream.concat(Stream.fromEffect(Effect.as(Effect.sleep('150 millis'), '')))), undefined, [], [], undefined, desktop)
+    await t.runtime.runPromise(Computer.use((c) => c.setMode(true)))
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { computerEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'what is 2+2', attachmentIds: [] })))
+    await t.waitForDone(1)
+    const said = desktop.overlay.filter((e) => e.type === 'say')
+    expect(said).toEqual([{ type: 'say', text: 'It is 4.' }, { type: 'say', text: '' }])
+    expect(desktop.chat).toEqual(['leave out', 'let in'])
+    await t.runtime.dispose()
+  })
+
   test('computer use: desktop and browser tools, control handed back, old screenshots dropped', async () => {
     const tool = (id: string, name: string, args: object): ChatDelta => ({ type: 'tool', index: 0, id, name, args: JSON.stringify(args) })
     const desktop = fakeDesktop()
@@ -825,6 +840,96 @@ describe('chat', () => {
     expect(desktop.covers).toEqual([])
     // A reply that never used the computer never took it over.
     expect(desktop.chat).toEqual([])
+    await t.runtime.dispose()
+  })
+
+  test('computer use: several actions in one step run in order, and only the screen after the last goes back', async () => {
+    const call = (index: number, id: string, name: string, args: object): ChatDelta => ({ type: 'tool', index, id, name, args: JSON.stringify(args) })
+    const desktop = fakeDesktop()
+    const t = setup(
+      (req) =>
+        req.messages.some((m) => m.role === 'tool')
+          ? Stream.make('Done.')
+          : Stream.make<Array<string | ChatDelta>>(
+              'Writing your note: **click** the page, type, then save.',
+              call(0, 'a', 'computer_click', { x: 100, y: 100, target: 'Page' }),
+              call(1, 'b', 'computer_type', { text: 'hello' }),
+              call(2, 'c', 'computer_key', { keys: 'Ctrl+S' })
+            ),
+      undefined,
+      [],
+      [],
+      undefined,
+      desktop
+    )
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { computerEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'write hello and save', attachmentIds: [] })))
+    await t.waitForDone(1)
+
+    // Computer runs may send several calls in a turn; they ran one after another.
+    expect(t.requests[0]!.parallel_tool_calls).toBe(true)
+    expect(desktop.input).toEqual(['click 1 150,150 left', 'text hello', 'keys 17,83'])
+    const next = t.requests[1]!.messages
+    const results = next.filter((m) => m.role === 'tool').map((m) => String(m.content))
+    expect(results).toHaveLength(3)
+    // The first two say they're done, and that the screen after the last is the one that follows.
+    expect(results[0]).toBe('Done. The screenshot after your last action in this turn follows instead of this one.')
+    expect(results[1]).toBe(results[0])
+    expect(results[2]).toContain('The screenshot after this action follows as an image.')
+    const shot = next.at(-1)!
+    expect(shot.role).toBe('user')
+    const parts = shot.content as Array<{ type: string; text?: string }>
+    expect(parts[0]!.text).toBe('Screenshot after the last of your 3 actions this step (the screen as it is now):')
+    expect(parts.filter((p) => p.type === 'image_url')).toHaveLength(1)
+    // The cursor carried what it said, as plain words, and let go of them when the reply ended.
+    const said = desktop.overlay.filter((e) => e.type === 'say').map((e) => (e as { text: string }).text)
+    expect(said).toContain('Writing your note: click the page, type, then save.')
+    expect(said.at(-1)).toBe('')
+    await t.runtime.dispose()
+  })
+
+  test('computer use: an action the screen changed under is held back, with the rest of its step', async () => {
+    const call = (index: number, id: string, name: string, args: object): ChatDelta => ({ type: 'tool', index, id, name, args: JSON.stringify(args) })
+    const desktop = fakeDesktop()
+    // Clicking File opens its menu, a window of its own, over where Save As would be guessed.
+    const click = desktop.ports.driver!.click
+    desktop.ports.driver!.click = async (...args) => {
+      await click(...args)
+      if (desktop.input.length === 1) desktop.state.windows = [win({ hwnd: 5, title: '', cls: '#32768', x: 0, y: 20, w: 300, h: 400 }), ...desktop.state.windows]
+    }
+    const t = setup(
+      (req) =>
+        req.messages.some((m) => m.role === 'tool')
+          ? Stream.make('The menu is open.')
+          : Stream.make<Array<string | ChatDelta>>(
+              call(0, 'a', 'computer_click', { x: 10, y: 10, target: 'File' }),
+              call(1, 'b', 'computer_click', { x: 20, y: 60, target: 'Save As' }),
+              call(2, 'c', 'computer_type', { text: 'notes' })
+            ),
+      undefined,
+      [],
+      [],
+      undefined,
+      desktop
+    )
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { computerEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'save as notes', attachmentIds: [] })))
+    await t.waitForDone(1)
+
+    // Only File was clicked: Save As would have been a guess at a menu the model never saw.
+    expect(desktop.input).toEqual(['click 1 15,15 left'])
+    const results = t.requests[1]!.messages.filter((m) => m.role === 'tool').map((m) => String(m.content))
+    expect(results[0]).toStartWith('Done.')
+    expect(results[1]).toStartWith('Not done: a menu came up at that point since the screenshot you planned this on')
+    expect(results[1]).toContain('Windows, front to back:')
+    expect(results[2]).toStartWith('Not run: the computer_click before this')
+    // One screenshot, of the screen with the menu open.
+    const images = t.requests[1]!.messages.flatMap((m) => (Array.isArray(m.content) ? m.content.filter((p) => p.type === 'image_url') : []))
+    expect(images).toHaveLength(1)
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    expect(view.path[1]!.message.content).toContain('"label":"Held back: the screen changed first"')
     await t.runtime.dispose()
   })
 

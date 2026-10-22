@@ -22,6 +22,7 @@ import {
   protectedChord,
   protectedReason,
   shotRect,
+  spoken,
   toOverlay,
   toPhysical,
   windowAt
@@ -34,10 +35,13 @@ import { CurrentStopwatch, timed } from '../timing'
 import { AppPaths } from './AppPaths'
 import { SettingsStore } from './SettingsStore'
 
-/** `blocked`: the guard refused, which ends the run's control. */
+/**
+ * `blocked`: the guard refused, which ends the run's control. `stale`: the screen changed under
+ * the action since the screenshot the model planned it on (see `thinking`), so it wasn't done.
+ */
 export class ComputerError extends Schema.TaggedError<ComputerError>()('ComputerError', {
   message: Schema.String,
-  kind: Schema.Literals(['failed', 'blocked'])
+  kind: Schema.Literals(['failed', 'blocked', 'stale'])
 }) {}
 
 /** What the model gets back after looking or acting. */
@@ -47,6 +51,8 @@ export interface Look {
   text: string
   /** After an action: false when the screen was still changing as the wait for it ran out. */
   settled?: boolean
+  /** The driver's word on how the action went, also at the start of `text` (see `noted`). */
+  note?: string
 }
 
 export interface Acted {
@@ -127,8 +133,17 @@ export interface ComputerApi {
    * A model call is deciding the next step: the sketch cursor waits where it is with a spinner and
    * THINKING_LABEL. The next action, a hint, or the reply ending (`end`, or `hint('')` when it
    * never took control) clears it. Never on while the screen is settling or being captured.
+   *
+   * The model decides on the newest screenshot, so that is the screen the actions it sends next
+   * were planned on: each of them, however many it sends at once, is checked against it, and one
+   * the screen has changed under fails as `stale` rather than land on something it hasn't seen.
    */
   readonly thinking: Effect.Effect<void>
+  /**
+   * What the assistant is saying in this step, as it streams (Markdown and all; see `spoken`),
+   * shown with the cursor. Empty takes it down; so does `end`.
+   */
+  readonly say: (text: string) => Effect.Effect<void>
   /** Gets the screen ready to look at (opens the stream), ahead of a reply. */
   readonly prewarm: Effect.Effect<void>
   /**
@@ -181,6 +196,9 @@ export const GLIDE_MS = 250
 
 /** What the sketch cursor says while the model decides what to do. */
 export const THINKING_LABEL = 'Deciding next step'
+
+/** What the assistant says reaches the overlay at most this often while it streams. */
+export const SAY_EVERY_MS = 80
 
 /** The longest an action waits for the screen to stop changing. */
 export const SETTLE_MAX_MS = 1500
@@ -279,6 +297,23 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
         let afterBegin = false
         /** When the overlay will have drawn the newest marks (performance.now()). */
         let marksDrawnAt = 0
+        /** The windows as the newest screenshot showed them (a glance's, without the chat). */
+        let shown: DesktopState | null = null
+        /**
+         * The windows in the screenshot the model is acting on (see `thinking`), and whether it has
+         * acted on the screen since: the actions it sent together are checked against them.
+         */
+        let planned: DesktopState | null = null
+        let actedSincePlan = false
+        /** What the assistant is saying (see `say`), and the send waiting to go out. */
+        let saying = ''
+        let sayTimer: ReturnType<typeof setTimeout> | null = null
+
+        function sendSay() {
+          if (sayTimer) clearTimeout(sayTimer)
+          sayTimer = null
+          overlay.send({ type: 'say', text: saying })
+        }
 
         /** Back to rest: the marks stay if there are any, else the cursor keeps the user company in computer mode. */
         const rest = () => {
@@ -288,7 +323,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
           overlay.send({ type: 'status', state: resting, label: resting === 'done' ? 'Done' : '' })
         }
 
-        const fail = (message: string, kind: 'failed' | 'blocked' = 'failed') => new ComputerError({ message, kind })
+        const fail = (message: string, kind: ComputerError['kind'] = 'failed') => new ComputerError({ message, kind })
         const attempt = <A>(what: string, f: () => Promise<A>) =>
           Effect.tryPromise({ try: f, catch: (cause) => fail(`${what}: ${errorMessage(cause)}`) })
         /** A call into the input helper that acts on the desktop. */
@@ -419,6 +454,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             const shot = yield* shoot({ w: f.shotW, h: f.shotH }, cover, undefined, opts?.withoutApp ? { ...fresh, withoutApp: true } : fresh)
             if (shot.w !== f.shotW || shot.h !== f.shotH) f = { ...f, shotW: shot.w, shotH: shot.h }
             frame = f
+            shown = s
             return { image: shot.dataUrl, frame: f, text: describe(s, f, hidden, reasonOf, opts?.active) } satisfies Look
           })
 
@@ -455,7 +491,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
           })
 
         /** The driver's word on how an action went goes first, before the screen it led to. */
-        const noted = (look: Look, note: string | null | void): Look => (note ? { ...look, text: `${note}\n${look.text}` } : look)
+        const noted = (look: Look, note: string | null | void): Look => (note ? { ...look, note, text: `${note}\n${look.text}` } : look)
 
         /**
          * How this system watches the screen for changes: by comparing `probe` thumbnails (Windows'
@@ -640,6 +676,11 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             return { d, f, s }
           })
 
+        /** An action is about to change the screen: marks drawn after it would be guesses. */
+        const acting = Effect.sync(() => {
+          actedSincePlan = true
+        })
+
         const glide = (f: Frame, x: number, y: number, label: string, action?: 'click' | 'double' | 'right' | 'drag' | 'scroll' | 'type') =>
           Effect.gen(function* () {
             const p = toOverlay(f, x, y)
@@ -651,6 +692,35 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
         /** The window a pointer action goes to; there must be one (the desktop counts). */
         const pointerTarget = (s: DesktopState, p: { x: number; y: number }) =>
           Effect.flatMap(targetAt(s, p), (w) => (w ? Effect.succeed(w) : Effect.fail(fail("There's no window there to act on."))))
+
+        const staleFail = (what: string) =>
+          fail(`Not done: ${what} since the screenshot you planned this on, so it would land on something you haven't seen. The screen as it is now follows; plan the next step from it.`, 'stale')
+        // #32768 is a Windows popup menu, which has no title.
+        const named = (w: WindowInfo) => (w.title.trim() ? `"${clip(w.title, 60)}" (${appName(w)})` : w.cls === '#32768' ? 'a menu' : `a window of ${appName(w)}`)
+
+        /**
+         * A pointer action lands where the model saw it would: on the window that was at `p` in
+         * the screenshot it planned on. A menu, dialog or window that came up there since (an
+         * earlier action in the same turn opened it, say) means the point was a guess.
+         */
+        const samePlace = (s: DesktopState, p: { x: number; y: number }) =>
+          Effect.suspend(() => {
+            if (!planned) return Effect.void
+            const was = windowAt(planned.windows, p.x, p.y)
+            const now = windowAt(s.windows, p.x, p.y)
+            if (!now || now.hwnd === was?.hwnd) return Effect.void
+            const isNew = !planned.windows.some((w) => w.hwnd === now.hwnd)
+            return Effect.fail(staleFail(`${named(now)} ${isNew ? 'came up' : 'came to the front'} at that point`))
+          })
+
+        /** Keys go where the model saw they would: not into a window that came up and took the keyboard since. */
+        const sameKeyboard = (s: DesktopState) =>
+          Effect.suspend(() => {
+            if (!planned) return Effect.void
+            const front = s.windows.find((w) => w.hwnd === s.foreground)
+            if (!front || front.clickThrough || planned.windows.some((w) => w.hwnd === front.hwnd)) return Effect.void
+            return Effect.fail(staleFail(`${named(front)} came up and has the keyboard`))
+          })
 
         /** The sketch cursor shows where keys go: it stays where it was left. */
         const showTyping = (f: Frame, label: string) =>
@@ -738,6 +808,8 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               }
               overlay.send({ type: 'mode', follow: mode })
               yield* status('Getting ready')
+              // What it said before it took control, while the chat was still up.
+              if (saying) sendSay()
               chatWindows.hide()
               yield* chatGone
             }),
@@ -751,6 +823,12 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               workWindow = null
               agentAt = null
               afterBegin = false
+              shown = planned = null
+              actedSincePlan = false
+              if (saying) {
+                saying = ''
+                sendSay()
+              }
               screen.release?.()
               rest()
               // With marks up, they are the answer: the chat comes back when the user is done reading.
@@ -793,11 +871,24 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             }),
 
           thinking: Effect.sync(() => {
+            planned = shown
+            actedSincePlan = false
             if (owner) overlay.send({ type: 'status', state: 'working', label: THINKING_LABEL, busy: true })
             else if (mode) overlay.send({ type: 'hint', label: THINKING_LABEL, busy: true })
             else return
             thinkingOn = true
           }),
+
+          say: (text) =>
+            Effect.sync(() => {
+              const next = spoken(text)
+              if (next === saying) return
+              saying = next
+              if (!owner && !mode) return
+              // Streamed text comes a few characters at a time: the overlay hears the latest every SAY_EVERY_MS.
+              if (next === '') return sendSay()
+              sayTimer ??= setTimeout(sendSay, SAY_EVERY_MS)
+            }),
 
           prewarm: Effect.sync(() => {
             if (driver && granted) screen.prepare?.()
@@ -920,6 +1011,8 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const { d, f, s } = yield* before(label)
               const p = yield* toScreen(f, x, y)
               const w = yield* pointerTarget(s, p)
+              yield* samePlace(s, p)
+              yield* acting
               yield* glide(f, x, y, label, button === 'right' ? 'right' : count > 1 ? 'double' : 'click')
               const borrow = yield* borrowPointer
               const note = yield* act('Clicking', () => d.click(w.hwnd, p.x, p.y, button, count, { borrow }))
@@ -932,6 +1025,8 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const { d, f, s } = yield* before(label)
               const p = yield* toScreen(f, x, y)
               const w = yield* pointerTarget(s, p)
+              yield* samePlace(s, p)
+              yield* acting
               yield* glide(f, x, y, label)
               yield* act('Pointing', () => d.hover(w.hwnd, p.x, p.y))
               return { look: yield* settleAndLook(100, 450), app: nameOf(w) }
@@ -944,6 +1039,9 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const b = yield* toScreen(f, to[0], to[1])
               const w = yield* pointerTarget(s, a)
               yield* targetAt(s, b)
+              yield* samePlace(s, a)
+              yield* samePlace(s, b)
+              yield* acting
               yield* glide(f, from[0], from[1], label)
               const p = toOverlay(f, to[0], to[1])
               overlay.send({ type: 'cursor', x: p.x, y: p.y, label, action: 'drag' })
@@ -960,6 +1058,8 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const { d, f, s } = yield* before(label)
               const p = yield* toScreen(f, x, y)
               const w = yield* pointerTarget(s, p)
+              yield* samePlace(s, p)
+              yield* acting
               yield* glide(f, x, y, label, 'scroll')
               const note = yield* act('Scrolling', () => d.wheel(w.hwnd, p.x, p.y, dx, dy))
               return { look: noted(yield* settleAndLook(120, 450), note), app: nameOf(w) }
@@ -968,7 +1068,9 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
           type: (text, label) =>
             Effect.gen(function* () {
               const { d, f, s } = yield* before(label)
+              yield* sameKeyboard(s)
               const w = yield* keyTarget(d, s)
+              yield* acting
               yield* showTyping(f, label)
               yield* act('Typing', () => d.text(text))
               return { look: yield* settleAndLook(100, 350), app: nameOf(w) }
@@ -980,7 +1082,9 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const chord = protectedChord(vks, ports.os)
               if (chord) return yield* Effect.fail(fail(`Blocked: ${chord}, which are protected. Don't look for another way in; ask the user.`, 'blocked'))
               const { d, f, s } = yield* before(label)
+              yield* sameKeyboard(s)
               const w = yield* keyTarget(d, s)
+              yield* acting
               yield* showTyping(f, label)
               yield* act('Pressing keys', () => d.keys(vks))
               return { look: yield* settleAndLook(150, 450), app: nameOf(w) }
@@ -1005,6 +1109,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const reason = protectedAppName(found.name, found.id, ctx.extra, ports.os)
               if (reason) return yield* Effect.fail(blocked(reason))
               const s0 = yield* readState
+              yield* acting
               yield* act('Opening the app', () => d.launch(found.id))
               // Wait for its window: a new foreground window, up to several seconds for big apps.
               // An app that was already in front only adds a window, if anything; give it a moment.
@@ -1041,6 +1146,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
                 if (reason) return yield* Effect.fail(blocked(reason))
                 return yield* Effect.fail(fail(`No open window titled like "${title}".`))
               }
+              yield* acting
               yield* act('Switching windows', () => d.focus(w.hwnd))
               workWindow = w.hwnd
               return { look: yield* settleAndLook(120, 500), app: appName(w) }
@@ -1053,8 +1159,10 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const choose = d.menu?.bind(d)
               if (!choose) return yield* Effect.fail(fail("Choosing menu commands by name only works on a Mac. Use the app's keyboard shortcuts or click the menu."))
               // The app it last worked in, brought forward and checked like keystrokes are.
+              yield* sameKeyboard(s)
               const w = yield* keyTarget(d, s)
               if (!w) return yield* Effect.fail(fail('No app is in front to choose a menu command in. Click in the app first.'))
+              yield* acting
               yield* showTyping(f, label)
               const note = yield* act('Choosing from the menu', () => choose(w.hwnd, path))
               return { look: noted(yield* settleAndLook(150, 500), note), app: nameOf(w) }
@@ -1063,6 +1171,8 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
           annotate: (input, label) =>
             Effect.gen(function* () {
               const f = yield* requireFrame
+              // Marks go on the screen the model saw; after it acted, they'd be placed by guesswork.
+              if (planned && actedSincePlan) return yield* Effect.fail(fail("Not drawn: you acted on the screen earlier in this turn, so what you'd mark may have moved. The screen as it is now follows; mark from it, in a turn of its own.", 'stale'))
               yield* status(label)
               const pt = (x: number, y: number) => toOverlay(f, x, y)
               const added: Mark[] = []

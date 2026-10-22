@@ -51,6 +51,8 @@ export interface ChatRequest {
   tools?: ToolDefinition[]
   /** `effort: 'none'` turns thinking off; thinking tokens count against `max_tokens`. */
   reasoning?: { effort: ReasoningEffort }
+  /** Several tool calls in one turn, run in order (computer use); off unless set. */
+  parallel_tool_calls?: boolean
 }
 
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high'
@@ -193,8 +195,8 @@ export class OpenRouter extends Context.Service<
               ...req,
               messages: withCacheBreakpoints(req.model, req.messages),
               stream: true,
-              // One action at a time keeps the browser's state predictable.
-              ...(req.tools?.length ? { tool_choice: 'auto', parallel_tool_calls: false } : {})
+              // One action at a time keeps the browser's state predictable, unless the run asks otherwise.
+              ...(req.tools?.length ? { tool_choice: 'auto', parallel_tool_calls: req.parallel_tool_calls ?? false } : {})
             })
             sw?.note('bytes', Buffer.byteLength(body))
             sw?.note('images', countImages(req.messages))

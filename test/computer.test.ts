@@ -11,6 +11,8 @@ import {
   protectedAppName,
   protectedChord,
   protectedReason,
+  SAY_MAX_CHARS,
+  spoken,
   subtract,
   toOverlay,
   toPhysical,
@@ -19,7 +21,7 @@ import {
 } from '../src/shared/computer'
 import { computerInstructions, computerTools, readMarks, runComputerTool } from '../src/main/computerTools'
 import { AppPaths } from '../src/main/services/AppPaths'
-import { ANNOTATE_MS, Computer, GLIDE_MS, OPEN_SETTLE_MAX_MS, SETTLE_MAX_MS, THINKING_LABEL, WAIT_MIN_MS, WAIT_QUIET_MS, WAIT_STILL_MS, screenChanged } from '../src/main/services/Computer'
+import { ANNOTATE_MS, Computer, GLIDE_MS, OPEN_SETTLE_MAX_MS, SAY_EVERY_MS, SETTLE_MAX_MS, THINKING_LABEL, WAIT_MIN_MS, WAIT_QUIET_MS, WAIT_STILL_MS, screenChanged } from '../src/main/services/Computer'
 import { SettingsStore } from '../src/main/services/SettingsStore'
 import { SELF_PID, fakeDesktop, still, win } from './fakeDesktop'
 
@@ -460,6 +462,96 @@ describe('computer service', () => {
     const out = await t.tool('computer_click', { x: 1400, y: 10, target: 'x' })
     expect(out.text).toContain('outside the screenshot, which is 1280×720')
     expect(t.desktop.input).toEqual([])
+  })
+})
+
+describe('actions sent together', () => {
+  test('they land when the screen is as the model saw it, each checked against that screenshot', async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    await t.run(Computer.use((c) => c.thinking))
+    for (const [name, args] of [
+      ['computer_click', { x: 100, y: 100, target: 'Page' }],
+      ['computer_type', { text: 'hi' }],
+      ['computer_scroll', { x: 100, y: 100, direction: 'down' }],
+      ['computer_key', { keys: 'Enter' }]
+    ] as const) {
+      const out = await t.tool(name, args)
+      expect(out.step.ok).toBe(true)
+      expect(out.brief).toStartWith('Done.')
+    }
+    expect(t.desktop.input).toHaveLength(4)
+  })
+
+  test('keys are held back from a window that came up and took the keyboard since the screenshot', async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    await t.run(Computer.use((c) => c.thinking))
+    // Ctrl+S brings up a Save dialog the model hasn't seen.
+    t.desktop.state.windows = [win({ hwnd: 8, title: 'Save As', cls: '#32770', x: 400, y: 200, w: 800, h: 500 }), ...t.desktop.state.windows]
+    t.desktop.state.foreground = 8
+    const typed = await t.tool('computer_type', { text: 'notes' })
+    expect(typed.text).toStartWith('Not done: "Save As" (notepad) came up and has the keyboard since the screenshot you planned this on')
+    expect(typed.image).toBeDefined()
+    expect(typed.halt).toBeUndefined()
+    expect(typed.step).toMatchObject({ label: 'Held back: the screen changed first', ok: false })
+    expect(t.desktop.input).toEqual([])
+    // Once the model has seen the dialog, typing goes into it.
+    await t.run(Computer.use((c) => c.thinking))
+    expect((await t.tool('computer_type', { text: 'notes' })).step.ok).toBe(true)
+    expect(t.desktop.input).toEqual(['text notes'])
+  })
+
+  test('a protected window is still refused, not just held back', async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    await t.run(Computer.use((c) => c.thinking))
+    t.desktop.state.windows = [win({ hwnd: 7, pid: 300, exe: 'SystemSettings.exe', title: 'Settings', x: 0, y: 0, w: 900, h: 700 }), ...t.desktop.state.windows]
+    const click = await t.tool('computer_click', { x: 100, y: 100, target: 'Bluetooth' })
+    expect(click.halt).toContain('Windows Settings is protected')
+  })
+
+  test('marks after an action in the same turn are held back: they would go where things were', async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    await t.run(Computer.use((c) => c.thinking))
+    await t.tool('computer_scroll', { x: 100, y: 100, direction: 'down' })
+    const mark = await t.tool('computer_annotate', { marks: [{ kind: 'circle', x: 100, y: 100, w: 40, h: 20, label: 'Export' }] })
+    expect(mark.text).toStartWith('Not drawn: you acted on the screen earlier in this turn')
+    expect(t.desktop.overlay.some((e) => e.type === 'marks')).toBe(false)
+    await t.run(Computer.use((c) => c.thinking))
+    expect((await t.tool('computer_annotate', { marks: [{ kind: 'circle', x: 100, y: 100, w: 40, h: 20, label: 'Export' }] })).step.ok).toBe(true)
+  })
+})
+
+describe('what the assistant says', () => {
+  test('the cursor gets plain words, and the end of a long reply', () => {
+    expect(spoken('Opening **Export** in `File` — see [the docs](https://x.y).')).toBe('Opening Export in File — see the docs.')
+    expect(spoken('## Steps\n1. Click *Save*\n- Pick a folder\n```js\ncode()\n```\nDone')).toBe('Steps Click Save Pick a folder Done')
+    const long = spoken(`${'word '.repeat(100)}the end`)
+    expect(long.startsWith('…word')).toBe(true)
+    expect(long.endsWith('the end')).toBe(true)
+    expect(long.length).toBeLessThanOrEqual(SAY_MAX_CHARS + 1)
+  })
+
+  test('reaches the overlay at most every SAY_EVERY_MS while it streams, and goes when the reply ends', async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    const said = () => t.desktop.overlay.filter((e) => e.type === 'say')
+    await t.run(Computer.use((c) => Effect.gen(function* () {
+      yield* c.say('Opening')
+      yield* c.say('Opening the')
+      yield* c.say('Opening the menu')
+    })))
+    expect(said()).toEqual([])
+    await new Promise((r) => setTimeout(r, SAY_EVERY_MS + 40))
+    expect(said()).toEqual([{ type: 'say', text: 'Opening the menu' }])
+    await t.run(Computer.use((c) => c.end('r')))
+    expect(said().at(-1)).toEqual({ type: 'say', text: '' })
   })
 })
 

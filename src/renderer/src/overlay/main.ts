@@ -94,6 +94,8 @@ let hint = ''
  * cursor waits where it is meanwhile. The next status, hint, glide or mark clears it.
  */
 let thinking: string | null = null
+/** What the assistant is saying, shown in the cursor's tag above what it's doing (see the `say` event). */
+let speech = ''
 
 const cursor = {
   x: -100,
@@ -252,11 +254,11 @@ const setStatus = (next: Exclude<State, 'off'>, label: string) => {
 }
 
 /** What a frame is drawn from, of what the events below may well leave as it was. */
-const drawnFrom = () => `${state}|${follow}|${driven}|${workLabel}|${hint}|${thinking}|${pointer ? `${pointer.x},${pointer.y}` : '-'}`
+const drawnFrom = () => `${state}|${follow}|${driven}|${workLabel}|${hint}|${thinking}|${speech}|${pointer ? `${pointer.x},${pointer.y}` : '-'}`
 
 bridge.onEvent((e) => {
   // The same status or hint again, or the mode as it was, draws nothing new: no frame for it.
-  const maybeSame = e.type === 'status' || e.type === 'hint' || e.type === 'mode' || e.type === 'pointer'
+  const maybeSame = e.type === 'status' || e.type === 'hint' || e.type === 'mode' || e.type === 'pointer' || e.type === 'say'
   const before = maybeSame ? drawnFrom() : ''
   // A busy status or hint brings up the spinner; whatever comes next takes it down.
   if (e.type === 'status' || e.type === 'hint') thinking = e.busy ? e.label : null
@@ -272,6 +274,7 @@ bridge.onEvent((e) => {
   else if (e.type === 'mode') follow = e.follow
   else if (e.type === 'frame') Object.assign(view, { dx: e.dx, dy: e.dy, w: e.w, h: e.h })
   else if (e.type === 'hint') hint = e.label
+  else if (e.type === 'say') speech = e.text
   else if (e.type === 'pointer') pointer = e.x === null ? null : { x: e.x, y: e.y }
   else if (e.type === 'status' && e.state !== 'off') setStatus(e.state, e.label)
   askForPointer()
@@ -399,9 +402,13 @@ interface Layout {
   lines: string[]
   w: number
   h: number
+  /** What the assistant is saying, above `lines` (the cursor's tag only). */
+  say?: string[]
 }
 
 const TAG = { size: 13, line: 17, padX: 10, padY: 6.5, maxW: 300 }
+/** What the assistant says: in its own words, so plainer than the step under it, and its latest lines only. */
+const SAY = { size: 13.5, line: 19, maxW: 360, lines: 4, gap: 5 }
 const layouts = new Map<string, Layout>()
 
 /** Wraps a tag's text to at most three lines, measured once per text. */
@@ -432,6 +439,55 @@ const layoutTag = (text: string): Layout => {
   const out = { lines, w: Math.ceil(textW + TAG.padX * 2), h: Math.ceil(lines.length * TAG.line + TAG.padY * 2) }
   layouts.set(text, out)
   return out
+}
+
+/** The latest speech, wrapped: one at a time, since it changes as it streams. */
+let sayLayout = { key: '', lines: [] as string[], w: 0 }
+
+/** Wraps what the assistant says to SAY.lines, keeping its end: that's what it is saying now. */
+const layoutSay = (text: string) => {
+  if (sayLayout.key === text) return sayLayout
+  ctx.font = `500 ${SAY.size}px ${font()}`
+  const room = SAY.maxW - TAG.padX * 2
+  const lines: string[] = []
+  let line = ''
+  for (const word of text.split(/\s+/)) {
+    const next = line ? `${line} ${word}` : word
+    if (ctx.measureText(next).width <= room || !line) line = next
+    else {
+      lines.push(line)
+      line = word
+    }
+  }
+  if (line) lines.push(line)
+  const kept = lines.slice(-SAY.lines)
+  if (lines.length > SAY.lines && !kept[0]!.startsWith('…')) {
+    // The ellipsis takes room at the start: words go from the front, so the line still runs into the next.
+    let first = kept[0]!
+    while (ctx.measureText(`…${first}`).width > room && first.includes(' ')) first = first.slice(first.indexOf(' ') + 1)
+    kept[0] = `…${first}`
+  }
+  for (let i = 0; i < kept.length; i++) {
+    while (ctx.measureText(kept[i]!).width > room && kept[i]!.length > 2) kept[i] = `${kept[i]!.slice(0, -2)}…`
+  }
+  const w = kept.length ? Math.max(...kept.map((l) => ctx.measureText(l).width)) : 0
+  sayLayout = { key: text, lines: kept, w }
+  return sayLayout
+}
+
+/** The cursor's tag: what the assistant says, if anything, over what it's doing (`action`, beside a spinner while `deciding`). */
+const cursorLayout = (said: string, action: string, deciding: boolean): Layout => {
+  const act = action ? layoutTag(action) : { lines: [], w: 0, h: 0 }
+  const actW = act.lines.length ? act.w + (deciding ? SPIN_W : 0) : 0
+  if (!said) return { ...act, w: actW }
+  const say = layoutSay(said)
+  const sayH = say.lines.length * SAY.line
+  return {
+    lines: act.lines,
+    say: say.lines,
+    w: Math.ceil(Math.max(actW, say.w + TAG.padX * 2)),
+    h: Math.ceil(TAG.padY * 2 + sayH + (act.lines.length ? SAY.gap + act.lines.length * TAG.line : 0))
+  }
 }
 
 /** Below the cursor's tip, a tag clears the arrowhead; alone, it sits close under its mark. */
@@ -493,13 +549,21 @@ const drawTag = (c: CanvasRenderingContext2D, rect: Rect, layout: Layout, alpha:
   c.beginPath()
   c.roundRect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1, 7.5)
   c.stroke()
-  if (spin !== undefined) drawSpinner(c, rect.x + TAG.padX + 5.5, rect.y + rect.h / 2, spin)
-  const tx = rect.x + TAG.padX + (spin !== undefined ? SPIN_W : 0)
-  c.font = `600 ${TAG.size}px ${font()}`
-  c.fillStyle = '#fafaf9'
   c.textAlign = 'left'
   c.textBaseline = 'middle'
-  layout.lines.forEach((l, i) => c.fillText(l, tx, rect.y + TAG.padY + TAG.line * (i + 0.5) + 0.5))
+  let top = rect.y + TAG.padY
+  if (layout.say?.length) {
+    c.font = `500 ${SAY.size}px ${font()}`
+    c.fillStyle = '#fafaf9'
+    layout.say.forEach((l, i) => c.fillText(l, rect.x + TAG.padX, top + SAY.line * (i + 0.5) + 0.5))
+    top += layout.say.length * SAY.line + SAY.gap
+  }
+  if (spin !== undefined && layout.lines.length) drawSpinner(c, rect.x + TAG.padX + 5.5, top + TAG.line / 2, spin)
+  const tx = rect.x + TAG.padX + (spin !== undefined ? SPIN_W : 0)
+  c.font = `600 ${TAG.size}px ${font()}`
+  // Under what it says, what it's doing is the smaller news.
+  c.fillStyle = layout.say?.length ? 'rgba(250,250,249,0.62)' : '#fafaf9'
+  layout.lines.forEach((l, i) => c.fillText(l, tx, top + TAG.line * (i + 0.5) + 0.5))
   c.restore()
 }
 
@@ -565,7 +629,7 @@ function fontsChanged() {
 }
 
 const paintTag = (layout: Layout, text: string, spin: number | undefined) => {
-  const key = `${text}|${layout.w}x${layout.h}|${spin ?? ''}`
+  const key = `${text}|${layout.say?.join('\n') ?? ''}|${layout.w}x${layout.h}|${spin ?? ''}`
   if (key === tagKey) return
   tagKey = key
   const w = layout.w + TAG_PAD * 2
@@ -800,12 +864,13 @@ const render = () => {
   place(arrow, cursor.x - ARROW_PAD, cursor.y - ARROW_PAD, cursor.alpha)
   const deciding = penTag === null && thinking !== null && (state === 'working' || !driven)
   const text = cursor.alpha > 0.01 ? (penTag ?? (deciding ? thinking : state === 'working' ? workLabel : !driven ? hint : '')) : ''
+  // What the assistant says goes with the cursor wherever it is, a mark it's drawing included.
+  const said = cursor.alpha > 0.01 ? speech : ''
   const spinning = !!text && deciding && !reduced
-  if (text) {
-    const base = layoutTag(text)
-    const layout = deciding ? { ...base, w: base.w + SPIN_W } : base
+  if (text || said) {
+    const layout = cursorLayout(said, text ?? '', deciding)
     const rect = placeTag(cursor, layout, chipRects)
-    paintTag(layout, text, deciding ? (spinning ? t : 0) : undefined)
+    paintTag(layout, text ?? '', deciding ? (spinning ? t : 0) : undefined)
     place(tagEl, rect.x - TAG_PAD, rect.y - TAG_PAD, cursor.alpha)
   } else place(tagEl, 0, 0, 0)
 

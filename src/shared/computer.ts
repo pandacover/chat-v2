@@ -351,6 +351,35 @@ export type OverlayEvent =
   | { type: 'pointer'; x: null; y: null }
   | { type: 'marks'; marks: Mark[] }
   | { type: 'clear' }
+  /**
+   * What the assistant is saying to the user, as it writes it (see `spoken`): shown in the
+   * cursor's tag above what it is doing, so a step it explains or teaches reads where it happens.
+   * Empty takes it down.
+   */
+  | { type: 'say'; text: string }
+
+/** The most of what the assistant says that the cursor carries: its last few lines' worth. */
+export const SAY_MAX_CHARS = 280
+
+/**
+ * Reply text as the cursor shows it: plain words, without Markdown, code or step lines, and only
+ * its end when it runs long (cut at a word, after an ellipsis), since that is what's being said now.
+ */
+export const spoken = (text: string): string => {
+  const plain = text
+    .replace(/```[\s\S]*?(```|$)/g, ' ')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/^\s{0,3}(#{1,6}|>|[-*+]|\d+[.)])\s+/gm, '')
+    .replace(/(\*\*|__|`)/g, '')
+    .replace(/(^|\W)[*_](\S[^*_]*?)[*_](?=\W|$)/g, '$1$2')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (plain.length <= SAY_MAX_CHARS) return plain
+  const tail = plain.slice(-SAY_MAX_CHARS)
+  const cut = tail.indexOf(' ')
+  return `…${cut >= 0 && cut < 40 ? tail.slice(cut + 1) : tail}`
+}
 
 /** Overlay → main. */
 export type OverlayCommand = 'stop' | 'show-chat' | 'clear'

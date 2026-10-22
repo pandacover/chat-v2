@@ -74,6 +74,11 @@ export interface ToolOutcome {
   text: string
   /** A screenshot the model asked to see (sent as a follow-up image message). */
   image?: string
+  /**
+   * The result without its screenshot, for when a later action in the same turn sends the screen
+   * after it instead (only the last of a turn's screenshots goes to the model).
+   */
+  brief?: string
   step: Step
   /** Ends the run with this line to the user (a refused action, or the user taking over). */
   halt?: string
