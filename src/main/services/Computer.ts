@@ -104,6 +104,8 @@ export interface ComputerPorts {
   overlay: OverlayPort
   chatWindows: ChatWindowsPort
   selfPid: number
+  /** How long the input helper may sit idle before it ends (HELPER_IDLE_MS; shorter in tests). */
+  helperIdleMs?: number
 }
 
 export interface ComputerApi {
@@ -259,6 +261,13 @@ export const ANNOTATE_MAX_MS = 8000
  */
 const BEGIN_MAX_MS = 400
 
+/**
+ * With computer mode off and no reply in control for this long, the input helper process ends (on
+ * Windows, a PowerShell process of about 25 MB). Computer mode coming on starts it again ahead of
+ * a reply; this only spares a quick toggle between chats the restart.
+ */
+export const HELPER_IDLE_MS = 60_000
+
 /** `open_app` waits at most this long, once the new window shows, for its content to stop changing. */
 export const OPEN_SETTLE_MAX_MS = 3000
 /** A starting app draws in bursts (a splash, then its window): it counts as loaded after this long still. */
@@ -334,6 +343,22 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
         let lookAfter = true
 
         const sendSay = () => overlay.send({ type: 'say', text: saying })
+
+        /** Ends the input helper once nothing could use it for a while (see HELPER_IDLE_MS). */
+        let helperIdle: ReturnType<typeof setTimeout> | null = null
+        const helperBusy = () => {
+          if (helperIdle) clearTimeout(helperIdle)
+          helperIdle = null
+        }
+        const helperRest = () => {
+          helperBusy()
+          if (!driver?.stop || mode || owner) return
+          helperIdle = setTimeout(() => {
+            helperIdle = null
+            if (!mode && !owner) driver.stop?.()
+          }, ports.helperIdleMs ?? HELPER_IDLE_MS)
+          helperIdle.unref?.()
+        }
 
         /** Back to rest: the marks stay if there are any, else the cursor keeps the user company in computer mode. */
         const rest = () => {
@@ -847,6 +872,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               screen.prepare?.()
               yield* checkScale
               owner = id
+              helperBusy()
               // And stays open until `end`, however long the model takes: a Mac hides the overlay
               // for a capture the stream can't take, which shows as a blink.
               screen.hold?.()
@@ -886,6 +912,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
                 sendSay()
               }
               screen.release?.()
+              helperRest()
               rest()
               // With marks up, they are the answer: the chat comes back when the user is done reading.
               if (resting !== 'done') chatWindows.show()
@@ -893,6 +920,8 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
 
           replyEnded: (id) =>
             Effect.sync(() => {
+              // A reply's glance starts the helper even where computer mode has gone off since.
+              helperRest()
               if (owner !== null || (glancedFor !== null && glancedFor !== id)) return
               glancedFor = null
               screen.release?.()
@@ -905,6 +934,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             Effect.sync(() => {
               if (!driver || on === mode) return
               mode = on
+              helperRest()
               grantedBefore()
               // Start the input helper now (about 0.6 s on Windows), not on the first action. On a
               // Mac, not before the permissions it needs are granted.
@@ -1308,6 +1338,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
         // and the screen stream (and the helper keeping it, on a Mac) ends for good.
         yield* Effect.addFinalizer(() =>
           Effect.sync(() => {
+            helperBusy()
             driver?.close()
             if (screen.close) screen.close()
             else screen.release?.()

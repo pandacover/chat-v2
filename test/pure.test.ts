@@ -8,6 +8,7 @@ import { classify } from '../src/main/services/Attachments'
 import { DROPPED_SNAPSHOT, STALE_SNAPSHOT_CHARS, cleanTitle, pruneSnapshots } from '../src/main/services/Chat'
 import type { ChatMessage } from '../src/main/services/OpenRouter'
 import { clipElements } from '../src/main/agent'
+import { AD_HOSTS, adUrlPatterns } from '../src/shared/blocklist'
 
 const feed = (deltas: string[]) => {
   const buf = makeLineBuffer()
@@ -93,6 +94,55 @@ describe('artifacts', () => {
     expect(blocks).toEqual([{ type: 'artifact', identifier: 'a', title: 'A', kind: 'html', content: '```html\n<div>', complete: false }])
     const fenced = parseContent('<artifact title="B">\n```html\n<b>x</b>\n```\n</artifact>')
     expect(fenced[0]).toMatchObject({ content: '<b>x</b>', identifier: 'artifact-1', complete: true })
+  })
+})
+
+describe('ad and tracker blocklist', () => {
+  /** Hosts pages need to load, sign in or prove they're human: none may be blocked. */
+  const NEEDED = [
+    'google.com',
+    'www.google.com',
+    'accounts.google.com',
+    'gstatic.com',
+    'googleapis.com',
+    'recaptcha.net',
+    'youtube.com',
+    'ytimg.com',
+    'yahoo.com',
+    'wikipedia.org',
+    'fandom.com',
+    'static.wikia.nocookie.net',
+    'reddit.com',
+    'github.com',
+    'duckduckgo.com',
+    'bing.com',
+    'amazon.com',
+    'cloudfront.net',
+    'cdn.jsdelivr.net',
+    'cdnjs.cloudflare.com',
+    'challenges.cloudflare.com',
+    'hcaptcha.com',
+    'cdn.cookielaw.org',
+    'consent.cookiebot.com',
+    'cmp.inmobi.com',
+    'js.stripe.com'
+  ]
+  const covers = (entry: string, host: string) => host === entry || host.endsWith(`.${entry}`)
+
+  test('lists bare host names, once each', () => {
+    for (const host of AD_HOSTS) expect(host).toMatch(/^[a-z0-9-]+(\.[a-z0-9-]+)+$/)
+    expect(new Set(AD_HOSTS).size).toBe(AD_HOSTS.length)
+  })
+
+  test("blocks the ad exchanges that filled a wiki page with iframes, never the hosts pages need", () => {
+    for (const host of ['securepubads.g.doubleclick.net', 's.amazon-adsystem.com', 'eus.rubiconproject.com', 'simage2.pubmatic.com', 'sync.inmobi.com', 'c2shb.pubgw.yahoo.com'])
+      expect(AD_HOSTS.some((e) => covers(e, host))).toBe(true)
+    for (const host of NEEDED) expect(AD_HOSTS.filter((e) => covers(e, host))).toEqual([])
+  })
+
+  test('each host becomes a pattern for it and its subdomains', () => {
+    expect(adUrlPatterns(['doubleclick.net'])).toEqual(['*://*.doubleclick.net/*'])
+    expect(adUrlPatterns()).toHaveLength(AD_HOSTS.length)
   })
 })
 

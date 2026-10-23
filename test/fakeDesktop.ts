@@ -71,6 +71,8 @@ export interface FakeDesktop {
   held: number
   /** Times the screen was closed for good (quitting). */
   closed: number
+  /** Times the input helper was ended for being idle. */
+  helperStops: number
 }
 
 /** A probe thumbnail of a screen of one grey level. */
@@ -106,6 +108,7 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'da
     released: 0,
     held: 0,
     closed: 0,
+    helperStops: 0,
     ports: null as unknown as ComputerPorts
   }
   const minimised: WindowInfo[] = []
@@ -133,6 +136,7 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'da
         d.state.windows = [w, ...d.state.windows]
         d.state.foreground = 99
       },
+      stop: () => void d.helperStops++,
       close: () => {}
     },
     // A 1920×1080 display at 100%: screenshots are 1280×720, so model pixels are ×1.5.

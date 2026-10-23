@@ -425,6 +425,40 @@ describe('computer service', () => {
     expect(desktop.probes).toBe(probes)
   })
 
+  test('the input helper ends once nothing could use it for a while, and never while a reply has control', async () => {
+    const desktop = fakeDesktop()
+    desktop.ports.helperIdleMs = 40
+    const t = service(desktop)
+    const idle = () => new Promise((r) => setTimeout(r, 100))
+    await t.run(Computer.use((c) => c.setMode(true)))
+    await t.run(Computer.use((c) => c.setMode(false)))
+    // Back on in time (another computer chat opened): it keeps running.
+    await t.run(Computer.use((c) => c.setMode(true)))
+    await idle()
+    expect(desktop.helperStops).toBe(0)
+    await t.run(Computer.use((c) => c.setMode(false)))
+    await idle()
+    expect(desktop.helperStops).toBe(1)
+    // A reply keeps it while it has control, computer mode or not, and lets it go after.
+    await t.run(Computer.use((c) => c.begin('r')))
+    await idle()
+    expect(desktop.helperStops).toBe(1)
+    await t.run(Computer.use((c) => c.end('r')))
+    await idle()
+    expect(desktop.helperStops).toBe(2)
+    // A reply that only glanced (it never took control) lets it go when it ends.
+    await t.run(Computer.use((c) => c.glance('g')))
+    await t.run(Computer.use((c) => c.replyEnded('g')))
+    await idle()
+    expect(desktop.helperStops).toBe(3)
+    // Quitting while it waits stops nothing more: the helper is closed with everything else.
+    await t.run(Computer.use((c) => c.setMode(true)))
+    await t.run(Computer.use((c) => c.setMode(false)))
+    await t.runtime.dispose()
+    await idle()
+    expect(desktop.helperStops).toBe(3)
+  })
+
   test('the screen stream opens when computer mode starts or the user writes in a computer chat (not on a Mac)', async () => {
     const t = service()
     await t.run(Computer.use((c) => c.setMode(true)))

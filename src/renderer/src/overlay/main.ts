@@ -63,10 +63,22 @@ const visible = (margin = 8) => ({
 })
 
 let dpr = 1
+/**
+ * The screen-wide canvas is full size only while something is drawn on it (marks, a trail,
+ * ripples, a drag), and empty otherwise. Most of computer mode it has nothing on it, the cursor
+ * following the pointer on canvases of its own, and full size it holds a buffer as big as the
+ * screen (8 MB at 1080p, 33 MB at 4K). Resizing clears it and resets the context.
+ */
+const fitCanvas = (inked: boolean) => {
+  const w = inked ? Math.round(innerWidth * dpr) : 0
+  const h = inked ? Math.round(innerHeight * dpr) : 0
+  if (canvas.width === w && canvas.height === h) return
+  canvas.width = w
+  canvas.height = h
+}
 const resize = () => {
   dpr = window.devicePixelRatio || 1
-  canvas.width = Math.round(innerWidth * dpr)
-  canvas.height = Math.round(innerHeight * dpr)
+  fitCanvas(canvas.width > 0)
   canvas.style.width = `${innerWidth}px`
   canvas.style.height = `${innerHeight}px`
   paintArrow()
@@ -691,6 +703,8 @@ const render = () => {
   const chips: Array<{ d: Drawn; alpha: number }> = []
 
   if (full) {
+    // Something to draw (marks, or a trail or ripple not yet faded): full size (see fitCanvas).
+    if (drawn.some((d) => d.fadeAt === null || t - d.fadeAt < 260) || trail.some((p) => t - p.t < 650) || ripples.some((p) => t - p.t < 520) || dragFrom) fitCanvas(true)
     // Display coordinates: the window may sit offset from the display's corner.
     ctx.setTransform(dpr, 0, 0, dpr, -view.dx * dpr, -view.dy * dpr)
     ctx.clearRect(view.dx, view.dy, innerWidth, innerHeight)
@@ -855,6 +869,8 @@ const render = () => {
       chipRects.push(rect)
       drawTag(ctx, rect, layout, alpha)
     }
+    // Nothing on it any more: the canvas lets its buffer go until something is (see fitCanvas).
+    if (!drawn.length && trail.length < 2 && !ripples.length && !(dragFrom && cursor.alpha > 0)) fitCanvas(false)
   } else if (trail.length || ripples.length || dragFrom || drawn.some((d) => d.fadeAt === null && d.ink.label && Math.abs(d.drop - chipDrop(d)) > 0.3)) {
     // The cursor came to (or left) a mark whose tag moves with it: the canvas changes next frame.
     sceneBusy = true

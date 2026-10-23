@@ -401,7 +401,7 @@ ${HELPER_SOURCE}
 /** Starts the helper on first use, and again if it dies. `scriptFile` is where the script is written. */
 export const windowsDriver = (scriptFile: string): Driver => {
   let apps: Array<{ name: string; id: string }> | null = null
-  const { request, close } = helperProcess(
+  const { request, stop, close } = helperProcess(
     () => {
       writeFileSync(scriptFile, HELPER_SCRIPT, 'utf8')
       return spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptFile], { windowsHide: true })
@@ -440,6 +440,7 @@ export const windowsDriver = (scriptFile: string): Driver => {
       const target = /^[a-z][\w+.-]*:\/\//i.test(id) ? id : `shell:AppsFolder\\${id}`
       spawn('explorer.exe', [target], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
     },
+    stop,
     close
   }
 }

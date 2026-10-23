@@ -96,6 +96,34 @@ describe('helper process', () => {
     expect(pids).toHaveLength(1)
   })
 
+  test('stopping ends the running helper, and the next request starts a new one', async () => {
+    const { spawnHelper, pids } = start()
+    const helper = helperProcess(spawnHelper, () => null, 'the helper')
+    expect((await helper.request('pid')).pid).toBe(pids[0])
+    helper.stop()
+    expect(await waitGone(pids[0]!)).toBe(true)
+    expect((await helper.request('pid')).pid).toBe(pids[1])
+    // Stopping with nothing running does nothing.
+    helper.stop()
+    helper.stop()
+    expect(await waitGone(pids[1]!)).toBe(true)
+    helper.close()
+    await expect(helper.request('echo')).rejects.toThrow('the helper was closed')
+    expect(pids).toHaveLength(2)
+  })
+
+  test('one stopped while starting is ended once it has, and that is not a failed start', async () => {
+    const { spawnHelper, pids } = start()
+    const helper = helperProcess(spawnHelper, () => null, 'the helper', { maxFailedStarts: 1, retryAfterMs: 60_000 })
+    const first = helper.request('pid')
+    helper.stop()
+    // The request already waiting on it is still answered, then it ends.
+    expect((await first).pid).toBe(pids[0])
+    expect(await waitGone(pids[0]!)).toBe(true)
+    expect((await helper.request('pid')).pid).toBe(pids[1])
+    helper.close()
+  })
+
   test('a request that gets no answer fails, the stuck helper is killed, and the next request starts a new one', async () => {
     const { spawnHelper, pids } = start({ IGNORE_EOF: '1' })
     const helper = helperProcess(spawnHelper, () => null, 'the helper', { requestTimeoutMs: 300 })

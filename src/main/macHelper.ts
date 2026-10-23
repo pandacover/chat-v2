@@ -714,7 +714,7 @@ export interface MacNativeInput {
  */
 export const macDriver = (scriptFile: string, display: () => { w: number; h: number; scale: number }, native?: MacNativeInput): Driver => {
   let apps: Array<{ name: string; id: string }> | null = null
-  const { request, close } = helperProcess(
+  const { request, stop, close } = helperProcess(
     () => {
       writeFileSync(scriptFile, MAC_HELPER_SCRIPT, 'utf8')
       return spawn('osascript', ['-l', 'JavaScript', scriptFile])
@@ -767,6 +767,7 @@ export const macDriver = (scriptFile: string, display: () => { w: number; h: num
     launch: async (id) => {
       spawn('open', [id], { detached: true, stdio: 'ignore' }).unref()
     },
+    stop,
     close
   }
 }

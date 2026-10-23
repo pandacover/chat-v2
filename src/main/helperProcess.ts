@@ -8,6 +8,11 @@ type Pending = { resolve: (value: Record<string, unknown>) => void; reject: (err
 
 export interface HelperProcess {
   request(...words: Array<string | number>): Promise<Record<string, unknown>>
+  /**
+   * Stops the running helper for now, so it holds no memory while nothing needs it: the next
+   * request starts a new one. One still starting is stopped once it has.
+   */
+  stop(): void
   /** Stops the helper for good: it is asked to exit, then killed, and never started again. */
   close(): void
 }
@@ -227,6 +232,16 @@ export const helperProcess = (
         })
         run.p.stdin.write(`${id} ${words.join(' ')}\n`)
       })
+    },
+    stop: () => {
+      const run = current
+      if (!run) return
+      current = null
+      // Stopped while starting, it would count as a start that failed; a failed start stops itself.
+      void run.ready.then(
+        () => stopChild(run.p),
+        () => undefined
+      )
     },
     close: () => {
       closed = true

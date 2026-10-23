@@ -37,5 +37,7 @@ export interface Driver {
   /** Installed apps, for opening one by name. */
   apps(): Promise<Array<{ name: string; id: string }>>
   launch(id: string): Promise<void>
+  /** Ends the helper process while computer use is idle; the next call starts it again. */
+  stop?(): void
   close(): void
 }

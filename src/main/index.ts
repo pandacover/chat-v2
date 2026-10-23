@@ -1,7 +1,8 @@
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
-import { BrowserWindow, app, autoUpdater as nativeUpdater, nativeTheme, safeStorage, screen, session, shell, webContents } from 'electron'
+import { BrowserWindow, type WebContents, WebContentsView, app, autoUpdater as nativeUpdater, nativeTheme, safeStorage, screen, session, shell, webContents } from 'electron'
 import { Effect, Layer, ManagedRuntime } from 'effect'
+import { adUrlPatterns } from '@shared/blocklist'
 import type { BrowserEvent, StreamEvent } from '@shared/types'
 import { type MainServices, pinWindow, registerIpc } from './ipc'
 import { killAllChildren, runningChildren, stopAllChildren, trackChild } from './helperProcess'
@@ -82,7 +83,56 @@ const emitBrowser = (event: BrowserEvent) => sendAll('browser:event', event)
 
 /** The built-in browser keeps its own cookies and storage, apart from the app. */
 const BROWSER_PARTITION = 'persist:browser'
-const isWebUrl = (url: string) => /^https?:///i.test(url)
+const isWebUrl = (url: string) => /^https?:\/\//i.test(url)
+
+const originOf = (url: string) => {
+  try {
+    return new URL(url).origin
+  } catch {
+    return null
+  }
+}
+
+/**
+ * A site's service worker outlives its page and keeps the page's renderer process going: one ran
+ * on for minutes after the browser had moved to another site, or closed, holding 70 to 130 MB.
+ * Unregistering doesn't end a running worker; DevTools can. This stops the built-in browser's
+ * workers through `via`'s DevTools: all of them, or all but those of the page now open (`keep`).
+ * A stopped worker starts again when its site needs it.
+ */
+const stopWorkers = async (via: WebContents, keep?: string | null) => {
+  const running = Object.entries(session.fromPartition(BROWSER_PARTITION).serviceWorkers.getAllRunning())
+  const ids = running.filter(([, worker]) => keep === undefined || originOf(worker.scope) !== keep).map(([id]) => id)
+  if (ids.length === 0) return
+  // Browser.ts works the page through the same DevTools session, and leaves it attached too.
+  if (!via.debugger.isAttached()) via.debugger.attach('1.3')
+  await via.debugger.sendCommand('ServiceWorker.enable')
+  try {
+    for (const versionId of ids) await via.debugger.sendCommand('ServiceWorker.stopWorker', { versionId })
+  } finally {
+    await via.debugger.sendCommand('ServiceWorker.disable')
+  }
+}
+
+/**
+ * Closing the browser panel takes its page's DevTools with it, so a hidden page in the browser's
+ * session stops the workers instead, a moment later: by then a window closing for good has started
+ * the app quitting, and there's nothing to stop.
+ */
+const stopWorkersAfterClose = () =>
+  setTimeout(() => {
+    if (quitting || Object.keys(session.fromPartition(BROWSER_PARTITION).serviceWorkers.getAllRunning()).length === 0) return
+    const view = new WebContentsView({ webPreferences: { partition: BROWSER_PARTITION, sandbox: true, contextIsolation: true } })
+    const page = view.webContents
+    void page
+      .loadURL('about:blank')
+      .then(() => stopWorkers(page))
+      .catch(() => undefined)
+      .finally(() => {
+        // Referring to the view here keeps it, and its page, alive until the job is done.
+        if (!view.webContents.isDestroyed()) page.close()
+      })
+  }, 1000)
 
 const makeRuntime = () => {
   const root = app.getPath('userData')
@@ -181,6 +231,9 @@ app.on('web-contents-created', (_event, contents) => {
     contents.on('will-navigate', (event, url) => {
       if (!isWebUrl(url)) event.preventDefault()
     })
+    // Leaving a site ends its service workers; closing the browser, all of them (see stopWorkers).
+    contents.on('did-navigate', (_event, url) => void stopWorkers(contents, originOf(url)).catch(() => undefined))
+    contents.once('destroyed', stopWorkersAfterClose)
     return
   }
   // Links open in the system browser; nothing navigates the app window away.
@@ -220,6 +273,10 @@ app.whenReady().then(async () => {
   const browserSession = session.fromPartition(BROWSER_PARTITION)
   browserSession.setPermissionRequestHandler((_wc, permission, callback) => callback(permission === 'clipboard-sanitized-write'))
   browserSession.setPermissionCheckHandler(() => false)
+  // Nor ads and trackers (see @shared/blocklist): an ad-heavy page ran a renderer process for each
+  // ad frame. Only requests to those hosts come here. Opening one as a page still works, so
+  // clicking an ad goes where it leads.
+  browserSession.webRequest.onBeforeRequest({ urls: adUrlPatterns() }, (details, callback) => callback({ cancel: details.resourceType !== 'mainFrame' }))
 
   registerIpc(rt, isQuitting)
   handleProtocols(rt, isQuitting)
