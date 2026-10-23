@@ -12,7 +12,7 @@ import { computerInstructions, computerTools, runComputerTool } from '../src/mai
 import type { ScreenChanges } from '../src/main/desktop'
 import { type MacCaptureDeps, macCaptureScreen } from '../src/main/macCapture'
 import { AppPaths } from '../src/main/services/AppPaths'
-import { Computer, GLIDE_MS, SETTLE_MAX_MS, SETTLE_QUIET_MS, WAIT_QUIET_MS, WAIT_STILL_MS } from '../src/main/services/Computer'
+import { Computer, GLIDE_MS, OPEN_QUIET_MS, SETTLE_MAX_MS, SETTLE_QUIET_MS, SETTLE_REACT_MS, WAIT_QUIET_MS } from '../src/main/services/Computer'
 import { SettingsStore } from '../src/main/services/SettingsStore'
 import { SELF_PID, fakeDesktop, win } from './fakeDesktop'
 
@@ -262,15 +262,21 @@ describe('mac computer service with the stream', () => {
     const settings = SettingsStore.layer({ encrypt: (s) => s, decrypt: (s) => s }).pipe(Layer.provide(paths))
     const runtime = ManagedRuntime.make(Computer.layer(desktop.ports).pipe(Layer.provide(Layer.mergeAll(settings, paths))))
     const run = <A, E>(eff: Effect.Effect<A, E, Computer>) => runtime.runPromise(eff)
-    const tool = (name: string, args: object = {}, watch?: boolean) =>
-      run(Computer.use((c) => runComputerTool(c, name, JSON.stringify(args), watch === undefined ? {} : { watch })))
+    const tool = (name: string, args: object = {}) => run(Computer.use((c) => runComputerTool(c, name, JSON.stringify(args))))
     return { desktop, run, tool }
   }
 
-  test('a click waits only until the stream says the screen is still, and the overlay is never hidden', async () => {
+  test('a click the app reacts to waits only until the stream says the screen is still, and the overlay is never hidden', async () => {
     const t = service()
     await t.run(Computer.use((c) => c.begin('r')))
     await t.tool('computer_screenshot')
+    const click = t.desktop.ports.driver!.click
+    t.desktop.ports.driver!.click = async (...a) => {
+      await click(...a)
+      // The button highlights as it's pressed, and that's all.
+      const at = performance.now()
+      t.desktop.screenChanges = () => ({ count: 1, stillMs: performance.now() - at })
+    }
     const started = performance.now()
     const out = await t.tool('computer_click', { x: 100, y: 100, target: 'File' })
     const took = performance.now() - started
@@ -281,6 +287,40 @@ describe('mac computer service with the stream', () => {
     expect(t.desktop.changeLooks).toBeGreaterThan(0)
     expect(t.desktop.hides).toBe(0)
     expect(t.desktop.watchedWhileSpinning).toBe(0)
+  })
+
+  test('a click nothing has reacted to yet gives the app SETTLE_REACT_MS to, and no more', async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    const click = t.desktop.ports.driver!.click
+    let clicked = 0
+    t.desktop.ports.driver!.click = async (...a) => {
+      await click(...a)
+      clicked = performance.now()
+    }
+    // Nothing ever changes: the screenshot comes once the app has had its chance.
+    await t.tool('computer_click', { x: 100, y: 100, target: 'Label' })
+    let took = performance.now() - clicked
+    expect(took).toBeGreaterThanOrEqual(SETTLE_REACT_MS - 5)
+    expect(took).toBeLessThan(SETTLE_REACT_MS + 150)
+
+    // A dialog that starts drawing 300 ms after the click, for 200 ms: the screenshot shows it drawn.
+    t.desktop.ports.driver!.click = async (...a) => {
+      await click(...a)
+      clicked = performance.now()
+      setTimeout(() => (t.desktop.screenChanges = changingFor(200)), 300)
+    }
+    await t.tool('computer_click', { x: 100, y: 100, target: 'Open' })
+    took = performance.now() - clicked
+    expect(took).toBeGreaterThanOrEqual(300 + 200 + SETTLE_QUIET_MS - 20)
+    expect(took).toBeLessThan(300 + 200 + SETTLE_QUIET_MS + 150)
+
+    // Typing shows as it happens: it doesn't wait for a reaction.
+    t.desktop.screenChanges = () => ({ count: 9, stillMs: 60_000 })
+    const typed = performance.now()
+    await t.tool('computer_type', { text: 'hi' })
+    expect(performance.now() - typed).toBeLessThan(SETTLE_REACT_MS)
   })
 
   test('a screen still changing after a click keeps it waiting until it has held still', async () => {
@@ -327,23 +367,37 @@ describe('mac computer service with the stream', () => {
     expect(out.text).toContain('the screen changed, then held still, so it is ready to act on.')
   })
 
-  test('computer_wait on a still screen ends after WAIT_STILL_MS', async () => {
+  test('computer_wait sees a change the moment it comes, however long it was given', async () => {
     const t = service()
     await t.run(Computer.use((c) => c.begin('r')))
-    const started = performance.now()
-    const out = await t.tool('computer_wait', { seconds: 10 })
-    expect(performance.now() - started).toBeGreaterThanOrEqual(WAIT_STILL_MS - 20)
-    expect(performance.now() - started).toBeLessThan(WAIT_STILL_MS + 400)
-    expect(out.text).toContain('nothing on the screen changed in that time.')
+    // A page that finishes loading 200 ms in, in one redraw.
+    const t0 = performance.now()
+    t.desktop.screenChanges = () => (performance.now() - t0 < 200 ? { count: 0, stillMs: 60_000 } : { count: 1, stillMs: performance.now() - t0 - 200 })
+    const out = await t.tool('computer_wait', { seconds: 30 })
+    const took = performance.now() - t0
+    expect(took).toBeGreaterThanOrEqual(200 + WAIT_QUIET_MS - 20)
+    expect(took).toBeLessThan(200 + WAIT_QUIET_MS + 150)
+    expect(out.text).toContain('the screen changed, then held still')
   })
 
-  test('a run that was told the screen cannot be watched waits the whole time, stream or not', async () => {
+  test('computer_wait on a still screen waits the time it was given: that is the most it should take', async () => {
     const t = service()
     await t.run(Computer.use((c) => c.begin('r')))
     const started = performance.now()
-    const out = await t.tool('computer_wait', { seconds: 1 }, false)
+    const out = await t.tool('computer_wait', { seconds: 1.5 })
+    expect(performance.now() - started).toBeGreaterThanOrEqual(1500 - 20)
+    expect(performance.now() - started).toBeLessThan(1500 + 300)
+    expect(out.text).toStartWith('Waited 1.5s, the most you gave: nothing on the screen changed in that time.')
+  })
+
+  test('with the stream down, a wait waits the whole time, and says so', async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    t.desktop.streamUp = false
+    const started = performance.now()
+    const out = await t.tool('computer_wait', { seconds: 1 })
     expect(performance.now() - started).toBeGreaterThanOrEqual(1000 - 5)
-    expect(out.text).toContain("the whole time: the screen can't be watched for changes here.")
+    expect(out.text).toContain("the whole time: the screen can't be watched for changes right now.")
   })
 
   test('opening an app waits for its window to finish drawing, past the fixed second', async () => {
@@ -359,7 +413,7 @@ describe('mac computer service with the stream', () => {
     }
     const out = await t.tool('computer_open_app', { name: 'davinci' })
     const took = performance.now() - shown
-    expect(took).toBeGreaterThanOrEqual(1500 + WAIT_QUIET_MS - 100)
+    expect(took).toBeGreaterThanOrEqual(1500 + OPEN_QUIET_MS - 100)
     expect(took).toBeLessThan(3000 + 300)
     expect(out.text).toContain('It is current')
   })
@@ -417,24 +471,24 @@ describe('mac computer service with the stream', () => {
     expect(out.text).toContain('the whole time')
   })
 
-  test('the run is told it can watch the screen only when the stream can come up, and never before the permissions are checked', async () => {
+  test('nothing opens the stream before the permissions are checked', async () => {
     const t = service()
     t.desktop.ports.permissions = async () => null
     // Nothing looks at the screen (or starts the helper) before the app's own permission check.
-    expect(await t.run(Computer.use((c) => c.canWatch))).toBe(false)
+    await t.run(Computer.use((c) => c.prewarm))
+    await t.run(Computer.use((c) => c.setMode(true)))
+    expect(await t.run(Computer.use((c) => c.glance('r')))).toBeNull()
     expect(t.desktop.prepared).toBe(0)
     await t.run(Computer.use((c) => c.begin('r')))
-    expect(await t.run(Computer.use((c) => c.canWatch))).toBe(true)
-    t.desktop.canStream = false
-    t.desktop.streamUp = false
-    expect(await t.run(Computer.use((c) => c.canWatch))).toBe(false)
+    expect(t.desktop.prepared).toBeGreaterThan(0)
   })
 
-  test('permissions granted in an earlier session let the first reply after launch watch the screen, and glance', async () => {
+  test('permissions granted in an earlier session let the first reply after launch glance, and the stream open early', async () => {
     const t = service()
     t.desktop.ports.permissions = async () => null
     t.desktop.ports.hasPermissions = () => true
-    expect(await t.run(Computer.use((c) => c.canWatch))).toBe(true)
+    await t.run(Computer.use((c) => c.setMode(true)))
+    expect(t.desktop.prepared).toBe(1)
     expect(await t.run(Computer.use((c) => c.glance('r')))).not.toBeNull()
   })
 
@@ -448,16 +502,64 @@ describe('mac computer service with the stream', () => {
 })
 
 describe('what the model is told about waiting on a Mac', () => {
-  const waitText = (watch?: boolean) => computerTools('darwin', watch === undefined ? {} : { watch }).find((t) => t.function.name === 'computer_wait')!.function.description
+  test('the same as on Windows: the time it gives is the most, and a change ends it', () => {
+    const waitText = (os: 'win32' | 'darwin') => computerTools(os).find((t) => t.function.name === 'computer_wait')!.function.description
+    expect(waitText('darwin')).toBe(waitText('win32'))
+    expect(waitText('darwin')).toContain('it returns as soon as the screen changes and settles')
+    expect(computerInstructions('darwin')).toContain('call computer_wait with the longest it should take: it returns as soon as the screen changes and settles')
+    expect(computerInstructions('darwin')).not.toContain('waits the whole time')
+  })
+})
 
-  test('with the stream it hears a long wait is cheap, as on Windows; without it, that it waits the whole time', () => {
-    expect(waitText(true)).toBe(computerTools('win32').find((t) => t.function.name === 'computer_wait')!.function.description)
-    expect(waitText(false)).toContain('it waits the whole time')
-    expect(waitText()).toContain('it waits the whole time')
-    expect(computerInstructions('darwin', { borrowPointer: true, watch: true })).toContain('it returns as soon as the screen is ready, so a long wait costs nothing')
-    expect(computerInstructions('darwin', { borrowPointer: true, watch: true })).not.toContain("can't tell when the screen is ready")
-    expect(computerInstructions('darwin', { borrowPointer: true, watch: false })).toContain("can't tell when the screen is ready")
-    // Windows is told the same either way.
-    expect(computerInstructions('win32', { borrowPointer: true, watch: false })).toBe(computerInstructions('win32', { borrowPointer: true, watch: true }))
+describe('the window list and typing from the capture helper', () => {
+  const children: ChildProcessWithoutNullStreams[] = []
+  afterEach(() => {
+    for (const c of children.splice(0)) c.kill()
+  })
+  const port = (flags: string[] = [], over: Partial<MacCaptureDeps> = {}) => {
+    const log = join(mkdtempSync(join(tmpdir(), 'chat-v2-sck-in-')), 'requests.log')
+    writeFileSync(log, '')
+    const warnings: string[] = []
+    const screen = macCaptureScreen({
+      spawnHelper: () => {
+        const child = spawn(process.execPath, [join(import.meta.dir, 'fakeCaptureHelper.ts'), '--log', log, ...flags])
+        children.push(child)
+        return child
+      },
+      display: () => ({ x: 0, y: 0, w: 2880, h: 1800, scale: 2 }),
+      displayId: () => 1,
+      cursor: () => ({ x: 0, y: 0 }),
+      fallback: async (size) => ({ dataUrl: 'data:image/jpeg;base64,SOURCES', w: size.w, h: size.h }),
+      hiddenWhile: (capture) => capture(),
+      pid: SELF_PID,
+      warn: (m) => warnings.push(m),
+      ...over
+    })
+    return { screen, warnings, requests: () => readFileSync(log, 'utf8').split('\n').filter(Boolean) }
+  }
+
+  test('answers without a stream: the windows as the input helper lists them, and typing', async () => {
+    const { screen, requests } = port()
+    const listed = await screen.input.windows()
+    expect(listed).toMatchObject({ foreground: 7, cursor: { x: 10, y: 20 } })
+    expect((listed!.windows as unknown[]).length).toBe(1)
+    expect(await screen.input.type('héllo\nworld')).toBe(true)
+    expect(requests()).toEqual(['windows', `type ${Buffer.from('héllo\nworld').toString('base64')}`])
+  })
+
+  test("an older helper that can't is asked three times, then left alone: the input helper does it", async () => {
+    const { screen, warnings, requests } = port(['--no-input'])
+    for (let i = 0; i < 5; i++) expect(await screen.input.windows()).toBeNull()
+    expect(await screen.input.type('x')).toBe(false)
+    expect(requests()).toEqual(['windows', 'windows', 'windows'])
+    expect(warnings).toEqual(["The capture helper's windows isn't used: unknown request windows"])
+  })
+
+  test('without the helper, or its permission, nothing is asked', async () => {
+    expect(await port([], { spawnHelper: null }).screen.input.windows()).toBeNull()
+    const denied = port(['--no-permission'])
+    expect(await denied.screen.input.windows()).toBeNull()
+    expect(await denied.screen.input.type('x')).toBe(false)
+    expect(denied.requests()).toEqual([])
   })
 })

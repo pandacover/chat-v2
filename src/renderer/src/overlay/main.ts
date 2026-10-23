@@ -491,7 +491,7 @@ const cursorLayout = (said: string, action: string, deciding: boolean): Layout =
 }
 
 /** Below the cursor's tip, a tag clears the arrowhead; alone, it sits close under its mark. */
-const TAIL = 30
+const TAIL = 24
 const SNUG = 10
 
 /** Where a tag hangs: `drop` under a point, kept on screen and clear of tags already placed. */
@@ -609,7 +609,7 @@ const arrowCtx = arrow.getContext('2d')!
 const tagCtx = tagEl.getContext('2d')!
 /** Room around the arrowhead and a tag for their outline and shadow. */
 const ARROW_PAD = 9
-const ARROW_BOX = { w: 18 + ARROW_PAD * 2, h: 22 + ARROW_PAD * 2 }
+const ARROW_BOX = { w: 12 + ARROW_PAD * 2, h: 15 + ARROW_PAD * 2 }
 const TAG_PAD = 20
 
 function paintArrow() {

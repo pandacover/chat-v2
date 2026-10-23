@@ -11,6 +11,7 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import type { DisplayInfo, ScreenChanges, ScreenPort } from './desktop'
 import { type HelperProcess, helperProcess } from './helperProcess'
+import type { MacNativeInput } from './macHelper'
 
 export interface MacCaptureDeps {
   /** Starts the helper; null where there is none (it wasn't built). */
@@ -49,10 +50,15 @@ export const MAC_PREWARM_IDLE_MS = 10_000
 export const WATCHABLE_WAIT_MS = 3000
 /** A stream that failed this many times stays off; getSources still works. */
 const MAX_FAILURES = 3
+/** The window list or typing failing this many times in a row goes back to the input helper for good. */
+const MAX_INPUT_FAILURES = 3
+
+/** The capture helper's screen, and the window list and typing it also does (see MacNativeInput). */
+export type MacCapturePort = ScreenPort & { input: MacNativeInput }
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
-export const macCaptureScreen = (deps: MacCaptureDeps): ScreenPort => {
+export const macCaptureScreen = (deps: MacCaptureDeps): MacCapturePort => {
   let helper: HelperProcess | null = null
   /** Why the helper can't be used at all (not built, an old macOS, no permission): for good. */
   let unusable: string | null = deps.spawnHelper ? null : 'the capture helper was not built'
@@ -184,6 +190,24 @@ export const macCaptureScreen = (deps: MacCaptureDeps): ScreenPort => {
 
   const live = () => streaming !== null && streaming === displayKey()
 
+  /**
+   * A window list or typing request, which needs no stream (the helper answers it on its own
+   * queue, so a stream starting doesn't hold it up). Null when the helper can't: the input helper
+   * does it then.
+   */
+  let inputFailures = 0
+  const input = async (...words: Array<string | number>) => {
+    if (unusable || inputFailures >= MAX_INPUT_FAILURES) return null
+    try {
+      const r = await getHelper().request(...words)
+      inputFailures = 0
+      return r
+    } catch (e) {
+      if (++inputFailures >= MAX_INPUT_FAILURES) deps.warn?.(`The capture helper's ${String(words[0])} isn't used: ${message(e)}`)
+      return null
+    }
+  }
+
   return {
     display: deps.display,
     cursor: deps.cursor,
@@ -239,6 +263,11 @@ export const macCaptureScreen = (deps: MacCaptureDeps): ScreenPort => {
     },
 
     watchable: () => upSoon(),
+
+    input: {
+      windows: () => input('windows'),
+      type: async (text) => (await input('type', Buffer.from(text, 'utf8').toString('base64'))) !== null
+    },
 
     prepare: () => void use(deps.prewarmIdleMs ?? MAC_PREWARM_IDLE_MS),
     hold: () => {

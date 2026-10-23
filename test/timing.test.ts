@@ -8,14 +8,14 @@ import { AppPaths } from '../src/main/services/AppPaths'
 import { Attachments } from '../src/main/services/Attachments'
 import { Browser, type BrowserApi } from '../src/main/services/Browser'
 import { Broadcaster, Chat, DROPPED_SCREENSHOT } from '../src/main/services/Chat'
-import { Computer, GLIDE_MS } from '../src/main/services/Computer'
+import { Computer, GLIDE_MS, WAIT_QUIET_MS } from '../src/main/services/Computer'
 import { Db } from '../src/main/services/Db'
 import { OpenRouter } from '../src/main/services/OpenRouter'
 import { AUTO_ROUTER, CONFIG_VERSION, DEFAULT_MODEL, SettingsStore } from '../src/main/services/SettingsStore'
 import { mergeReasoning, parseSseLine } from '../src/main/sse'
 import { withCacheBreakpoints } from '../src/main/services/OpenRouter'
 import { type ActionRecord, type CallRecord, type ReplyRecord, type TimingRecord, timingTable } from '../src/main/timing'
-import { fakeDesktop } from './fakeDesktop'
+import { fakeDesktop, still } from './fakeDesktop'
 
 // These run the real OpenRouter layer against a stubbed fetch that streams scripted SSE, so the
 // network phases are timed the way they are in the app. Nothing leaves the machine.
@@ -226,15 +226,18 @@ describe('timing', () => {
       [...opening(), toolCall('a', 'computer_wait', { seconds: 10 }), usage(900, 20)],
       [...opening(), text('Done.'), usage(1900, 5)]
     ])
-    const t = setup()
+    const desktop = fakeDesktop()
+    // What it waits for comes after about half a second: the screen changes, then holds still.
+    let looks = 0
+    desktop.look = () => still(looks++ < 6 ? 0 : 200)
+    const t = setup(desktop)
     await t.send('Wait for it', true)
     const rs = await t.records()
     const wait = actions(rs).find((a) => a.tool === 'computer_wait')!
-    // The fake screen never changes, so the wait ends after 2 s of stillness.
     expect(Object.keys(wait.phases).sort()).toEqual(['capture', 'capture.cover', 'capture.encode', 'capture.hide', 'capture.sources', 'readState', 'wait'])
-    expect(wait.phases.wait).toBeGreaterThanOrEqual(2000 - 5)
-    expect(wait.phases.wait).toBeLessThan(2600)
-    expect(wait.totalMs).toBeLessThan(3000)
+    expect(wait.phases.wait).toBeGreaterThanOrEqual(400 + WAIT_QUIET_MS - 5)
+    expect(wait.phases.wait).toBeLessThan(1500)
+    expect(wait.totalMs).toBeLessThan(2000)
     await t.runtime.dispose()
   })
 

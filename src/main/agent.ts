@@ -80,6 +80,8 @@ export interface ToolOutcome {
    */
   brief?: string
   step: Step
+  /** The steps it took, shown in its place where it took several (computer_batch). */
+  steps?: Step[]
   /** Ends the run with this line to the user (a refused action, or the user taking over). */
   halt?: string
   /** A page snapshot, which the next action makes stale (see pruning in Chat.ts). */

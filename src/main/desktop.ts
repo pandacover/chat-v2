@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { BrowserWindow, app, desktopCapturer, ipcMain, nativeImage, screen, systemPreferences } from 'electron'
 import type { OverlayCommand, OverlayEvent, Rect } from '@shared/computer'
 import { macCaptureScreen } from './macCapture'
+import type { MacNativeInput } from './macHelper'
 
 export interface DisplayInfo {
   /** The primary display in physical pixels. */
@@ -306,7 +307,7 @@ const macCaptureHelper = () =>
  * closed as the Windows stream is. Without the helper it captures with getSources, hiding the
  * overlay for each capture. CHAT_V2_CAPTURE=sources turns the stream off, to compare.
  */
-export const macScreen = (overlay: OverlayPort): ScreenPort => {
+export const macScreen = (overlay: OverlayPort): ScreenPort & { input?: MacNativeInput } => {
   if (process.env.CHAT_V2_CAPTURE === 'sources') return sourcesScreen
   const path = macCaptureHelper()
   return macCaptureScreen({

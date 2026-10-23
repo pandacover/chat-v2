@@ -1,6 +1,7 @@
 // Computer-use tools offered to the model, and how their calls run against the Computer service.
-import { Effect } from 'effect'
+import { Effect, Option } from 'effect'
 import { type DesktopOs, MARK_COLORS, type MarkColor } from '@shared/computer'
+import type { Step } from '@shared/steps'
 import type { ToolOutcome } from './agent'
 import type { Acted, ComputerApi, ComputerError, Look, MarkInput, WaitEnd } from './services/Computer'
 import type { ToolDefinition } from './services/OpenRouter'
@@ -8,17 +9,17 @@ import type { ToolDefinition } from './services/OpenRouter'
 /** Desktop work takes more steps than browsing: every click is its own round trip. */
 export const MAX_COMPUTER_STEPS = 60
 
-/**
- * What the model is told about computer use, for the system it runs on. `watch`: whether this run
- * can tell when the screen is ready (see Computer.canWatch); Windows always can.
- */
-export const computerInstructions = (os: DesktopOs, opts: { borrowPointer: boolean; watch?: boolean } = { borrowPointer: true }) => `Computer mode is on: you can see and use the user's computer (the primary display) with the computer_* tools, and the user expects you to. They watch a sketched cursor make each move; it isn't in your screenshots.${os === 'win32' ? " The user's own mouse pointer can be; it isn't yours, so pay it no attention." : ''}
+/** Most actions one computer_batch runs. */
+export const MAX_BATCH = 12
+
+/** What the model is told about computer use, for the system it runs on. */
+export const computerInstructions = (os: DesktopOs, opts: { borrowPointer: boolean } = { borrowPointer: true }) => `Computer mode is on: you can see and use the user's computer (the primary display) with the computer_* tools, and the user expects you to. They watch a sketched cursor make each move; it isn't in your screenshots.${os === 'win32' ? " The user's own mouse pointer can be; it isn't yours, so pay it no attention." : ''}
 - Your pointer is your own: clicks and scrolls go straight to the app under the point, and the user's mouse stays theirs (they may be using it while you work). ${opts.borrowPointer ? "Drags are the exception: apps only follow a drag from the real mouse, so computer_drag borrows the user's pointer for under a second and puts it back." : "Drags are delivered the same way, and many apps ignore them; if a drag changes nothing, find another way (menus, shortcuts, typing a value) or ask the user to drag."} Some apps ignore clicks delivered this way, games especially. If a click changes nothing in the next screenshot, don't click again: use the keyboard (Tab, arrow keys, Enter, Escape, the app's shortcuts). Keys and typing go to the app you last clicked in, which comes to the front first.
 - Do the work yourself, start to finish, in this reply. When the user gives a task, carry it out with the cursor. When they ask how to do something on their computer ("how do I change the camera in Brawlhalla?"), go there yourself: open the app, click through the menus, and stop at the setting with it marked, then explain the path. Don't describe steps you could take, and don't stop to ask whether to go on; only ask when the request is unclear or the next step is hard to undo. If they asked for a particular value, set it.
 - The user's message comes with the screen as it is now, so start working from it. If it has no screenshot it says why, and you still don't start with computer_screenshot: your first action's result includes a screenshot, taken after this chat minimises. Start with computer_open_app or computer_focus_window if the app you need is in the window list or installed; only otherwise call computer_screenshot.
-- Your actions return a screenshot and the list of windows, taken once the screen has stopped changing: that is the screen after your last action, so don't call computer_screenshot to check it. When something needs time to finish (an app starting, a page or file loading, a render), call computer_wait: ${os === 'darwin' && !opts.watch ? "on this Mac it can't tell when the screen is ready and waits the whole time, so give about as long as it should take" : 'give the longest it could take, since it returns as soon as the screen is ready, so a long wait costs nothing'}. Call computer_screenshot only when the screen may have changed on its own since the last one (a video playing). Give coordinates in screenshot pixels, aimed at the centre of what you mean.
-- Send several actions in one turn when you can see in your screenshot where each of them goes. They run in order, each once the screen has settled after the one before, and you get the screen after the last. Good runs: click a field, type, press Enter; click several things already on screen (the fields and checkboxes of a form); a series of shortcuts; computer_wait between two actions when the first needs time (it ends as soon as the screen is ready). End the turn at the first action whose result you need to see: one that opens a menu, list, dialog, app or page, or moves things around. Never aim at something you only expect to appear: a menu that isn't open in your screenshot has no items to click yet, and guessing where they'll be is how clicks land on the wrong thing. An action whose target changed since your screenshot (a window came up over it) isn't done, nor is anything after it; you get the screen as it is and go on from there.
-- The user reads what you write beside your cursor as you write it. Before each action or run of actions, say in a short sentence what you are doing and why, as you would to someone watching over your shoulder ("Opening the export settings to change the format"). When you are showing the user how to do something, say what to look at and why it matters, so they can do it themselves next time.
+- Your actions return a screenshot and the list of windows, taken once the screen has stopped changing: that is the screen after your last action, so don't call computer_screenshot to check it. When something needs time to finish (an app starting, a page or file loading, a render), call computer_wait with the longest it should take: it returns as soon as the screen changes and settles, so you see the result the moment it's there, and waits that long only if nothing changes. Call computer_screenshot only when the screen may have changed on its own since the last one (a video playing). Give coordinates in screenshot pixels, aimed at the centre of what you mean.
+- When you know the next few steps, send them as one computer_batch rather than one action a turn: every turn costs seconds, and a batch runs straight through. You know them when every point you click is in your screenshot (the fields and checkboxes of a form; a field, then the button beside it), or when they are keys, typing and commands whose effect you know from the app (${os === 'darwin' ? 'Cmd+S, the file name, Return; Cmd+L, a web address, Return; computer_open_app, then Cmd+N and the text' : 'Ctrl+S, the file name, Enter; Ctrl+L, a web address, Enter; computer_open_app, then Ctrl+N and the text'}). The actions run in order, each once the screen has settled after the one before, and you get the screen after the last. Put a wait in the batch where an action needs time (it ends as soon as the screen is ready). Clicks, drags and scrolls must aim at what you can see in your screenshot, never at something you only expect to appear (a menu that isn't open has no items to click yet), so end the batch at the action that opens the menu, list, dialog, app or page you then need to click in. A batch stops at the first action that fails, or whose target changed since your screenshot (a window came up over it, or another app took the keyboard); you get the screen as it is and go on from there.
+- The user watches your cursor. Every action, and computer_batch, takes \`say\`: one short sentence shown beside the cursor while it works, saying what you are doing and why, as you would to someone watching over your shoulder ("Opening the export settings to change the format"). Give it on the first action of every turn, in plain words (no Markdown), and don't just repeat the action ("Clicking Export"). When you are showing the user how to do something, use it to say what to look at and why it matters, so they can do it themselves next time. Your reply's text goes to the chat, not to the cursor.
 - Work from the screen first. Most tasks in an app you can see come down to looking and doing: check what's there, find the panel, list, button or item you need, and use it, checking the screenshot after each turn. For example, to put a transition between two clips in a video editor: see whether the clips are already on the timeline (if not, bring them in from the media library), find the transitions list on screen, and drag the one asked for onto the cut. Use computer_zoom to read small labels and icons rather than guessing, and zoom in before clicking a small or crowded target you can't make out.
 - Look things up (browser_search, then browser_read one or two good sources, like the official manual or a wiki) only when the screen isn't enough: you've looked around (menus, tabs, panels, scrolling) and can't find what you need, the task depends on knowledge the screen won't give you (exact values to tune, a technique, an effect you'd have to build), or something you tried didn't work and you don't know why. Never research before you've looked at the screen, and don't research what a saved tip already covers. A search results page alone is not research.
 - Prefer keyboard shortcuts and computer_open_app / computer_focus_window to hunting with the mouse when you know them.
@@ -46,27 +47,67 @@ const num = { type: 'number' }
 const label = { type: 'string', description: 'What you are pointing at, in a few words (shown to the user), e.g. "Export button"' }
 const color = { type: 'string', enum: [...MARK_COLORS], description: 'Default red' }
 const pair = { type: 'array', items: num, minItems: 2, maxItems: 2 }
+/** What the cursor says to the user while the action runs (see Computer.say). */
+const say = { type: 'string', description: 'One short sentence for the user, shown beside your cursor while this runs: what you are doing and why. Plain words, no Markdown.' }
+const button = { type: 'string', enum: ['left', 'right', 'middle'] }
+const clicks = { type: 'integer', minimum: 1, maximum: 3, description: '2 for a double-click' }
+const direction = { type: 'string', enum: ['up', 'down', 'left', 'right'] }
+const amount = { type: 'integer', minimum: 1, maximum: 30, description: 'Wheel notches, default 5' }
+const seconds = { type: 'number', description: 'The most to wait, up to 30' }
+const menuPath = { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 6 }
 
 /** On a Mac only: menus belong to the window server and can't be clicked, but can be chosen by name. */
 const MENU_TOOL = tool(
   'computer_menu',
   'Choose a command from the menu bar of the app you are working in, by its path, e.g. ["File", "Export", "Render"] or ["Timeline", "Add Transition"]. If a name is wrong, the error lists what that menu has.',
-  obj({ path: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 6 } }, ['path'])
+  obj({ path: menuPath, say }, ['path'])
 )
 
-/** Ends early where the screen can be watched (a stream is up); otherwise it waits the whole time. */
-const waitTool = (os: DesktopOs, watch: boolean) =>
-  tool(
-    'computer_wait',
-    os === 'darwin' && !watch
-      ? 'Wait for something on screen to finish (an app starting, a page loading, a render), then see the screen. On this Mac it waits the whole time, so give about as long as it should take.'
-      : 'Wait for something on screen to finish (an app starting, a page loading, a render), then see the screen. `seconds` is the most it waits: it returns as soon as the screen has changed and settled (or after 2 seconds of nothing changing), so a generous maximum costs nothing.',
-    obj({ seconds: { type: 'number', description: 'The most to wait, up to 30' } }, ['seconds'])
-  )
+/** What a batch can run, by its tool's name without `computer_` (and `menu`, on a Mac). */
+const BATCHABLE = ['click', 'move', 'drag', 'scroll', 'type', 'key', 'open_app', 'focus_window', 'wait']
 
-/** The computer tools for the system it runs on; `watch` as for computerInstructions. */
-export const computerTools = (os: DesktopOs, opts: { watch?: boolean } = {}): ToolDefinition[] =>
-  os === 'darwin' ? [...COMPUTER_TOOLS.map((t) => (t.function.name === 'computer_wait' ? waitTool(os, opts.watch === true) : t)), MENU_TOOL] : COMPUTER_TOOLS
+const batchTool = (os: DesktopOs) => {
+  const actions = os === 'darwin' ? [...BATCHABLE, 'menu'] : BATCHABLE
+  return tool(
+    'computer_batch',
+    `Run several actions in order, in one turn, when you already know them: points you can see in your screenshot, or keys, typing and commands whose effect you know. Each runs once the screen has settled after the one before; the batch stops at the first that fails or whose target changed since your screenshot, and you get the screen after the last one that ran. Each action takes the fields of its own tool (computer_${actions.join(', computer_')}), e.g. [{"action":"click","x":410,"y":220,"target":"Name field"},{"action":"type","text":"Ada"},{"action":"key","keys":"Tab"},{"action":"type","text":"Lovelace"},{"action":"key","keys":"Enter"}].`,
+    obj(
+      {
+        say,
+        actions: {
+          type: 'array',
+          minItems: 1,
+          maxItems: MAX_BATCH,
+          items: obj(
+            {
+              action: { type: 'string', enum: actions },
+              x: num,
+              y: num,
+              target: label,
+              button,
+              clicks,
+              from: pair,
+              to: pair,
+              direction,
+              amount,
+              text: { type: 'string', description: 'For type' },
+              keys: { type: 'string', description: 'For key' },
+              name: { type: 'string', description: 'For open_app' },
+              title: { type: 'string', description: 'For focus_window' },
+              ...(os === 'darwin' ? { path: menuPath } : {}),
+              seconds
+            },
+            ['action']
+          )
+        }
+      },
+      ['actions']
+    )
+  )
+}
+
+/** The computer tools for the system it runs on. */
+export const computerTools = (os: DesktopOs): ToolDefinition[] => [...COMPUTER_TOOLS, ...(os === 'darwin' ? [MENU_TOOL] : []), batchTool(os)]
 
 export const COMPUTER_TOOLS: ToolDefinition[] = [
   tool(
@@ -82,31 +123,31 @@ export const COMPUTER_TOOLS: ToolDefinition[] = [
   tool(
     'computer_click',
     'Click at a point in screenshot pixels.',
-    obj({ x: num, y: num, target: label, button: { type: 'string', enum: ['left', 'right', 'middle'] }, clicks: { type: 'integer', minimum: 1, maximum: 3, description: '2 for a double-click' } }, ['x', 'y', 'target'])
+    obj({ x: num, y: num, target: label, button, clicks, say }, ['x', 'y', 'target'])
   ),
   tool(
     'computer_move',
     "Point your cursor at something without clicking, to show the user where it is. Hover effects (tooltips, menus that open on hover) may not appear, since the user's mouse is elsewhere.",
-    obj({ x: num, y: num, target: label }, ['x', 'y', 'target'])
+    obj({ x: num, y: num, target: label, say }, ['x', 'y', 'target'])
   ),
   tool(
     'computer_drag',
     'Drag with the left button held, from one point to another: a clip onto a timeline, a transition onto a cut, a file into a folder.',
-    obj({ from: pair, to: pair, target: label }, ['from', 'to', 'target'])
+    obj({ from: pair, to: pair, target: label, say }, ['from', 'to', 'target'])
   ),
   tool(
     'computer_scroll',
     'Scroll with the mouse wheel over a point.',
-    obj({ x: num, y: num, direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] }, amount: { type: 'integer', minimum: 1, maximum: 30, description: 'Wheel notches, default 5' } }, ['x', 'y', 'direction'])
+    obj({ x: num, y: num, direction, amount, say }, ['x', 'y', 'direction'])
   ),
-  tool('computer_type', 'Type text into whatever has keyboard focus. Click the field first. "\\n" presses Enter.', obj({ text: { type: 'string' } }, ['text'])),
+  tool('computer_type', 'Type text into whatever has keyboard focus. Click the field first. "\\n" presses Enter.', obj({ text: { type: 'string' }, say }, ['text'])),
   tool(
     'computer_key',
     'Press a key or chord, e.g. Enter, Escape, Tab, Ctrl+S, Alt+Tab, Ctrl+Shift+N, F5 (on a Mac, Cmd+S, Cmd+Shift+N). Shortcuts into protected places (the Windows key, Spotlight) are blocked.',
-    obj({ keys: { type: 'string' } }, ['keys'])
+    obj({ keys: { type: 'string' }, say }, ['keys'])
   ),
-  tool('computer_open_app', 'Open an installed app by name, e.g. "DaVinci Resolve".', obj({ name: { type: 'string' } }, ['name'])),
-  tool('computer_focus_window', 'Bring an open window to the front by part of its title.', obj({ title: { type: 'string' } }, ['title'])),
+  tool('computer_open_app', 'Open an installed app by name, e.g. "DaVinci Resolve".', obj({ name: { type: 'string' }, say }, ['name'])),
+  tool('computer_focus_window', 'Bring an open window to the front by part of its title.', obj({ title: { type: 'string' }, say }, ['title'])),
   tool(
     'computer_annotate',
     'Draw hand-drawn marks on the screen for the user: circle, box, underline or highlight a region (x, y, w, h), an arrow (from, to), a freehand path (points), or text at a point. Coordinates in screenshot pixels. Add a short label to name what a mark shows.',
@@ -132,13 +173,18 @@ export const COMPUTER_TOOLS: ToolDefinition[] = [
             },
             ['kind']
           )
-        }
+        },
+        say
       },
       ['marks']
     )
   ),
   tool('computer_clear_annotations', 'Remove the marks you drew.', obj({})),
-  waitTool('win32', true),
+  tool(
+    'computer_wait',
+    'Wait for something on screen to finish (an app starting, a page loading, a render), then see the screen. `seconds` is the most it waits: it returns as soon as the screen changes and settles, and waits that long only if nothing changes, so give the longest it should take.',
+    obj({ seconds, say }, ['seconds'])
+  ),
   tool('computer_save_tip', 'Remember something non-obvious about an app for next time (where a setting lives, a shortcut, a gotcha).', obj({ app: { type: 'string', description: 'The app\'s name as it appears in its window title, e.g. "DaVinci Resolve"' }, tip: { type: 'string' } }, ['app', 'tip']))
 ]
 
@@ -191,27 +237,39 @@ const waitedText = (took: string, end: WaitEnd) =>
   end === 'settled'
     ? `Waited ${took}: the screen changed, then held still, so it is ready to act on.`
     : end === 'still'
-      ? `Waited ${took}: nothing on the screen changed in that time.`
+      ? `Waited ${took}, the most you gave: nothing on the screen changed in that time.`
       : end === 'changing'
         ? `Waited ${took}, the most you gave: the screen was still changing when this screenshot was taken (something loading or moving). Wait again if you need it finished.`
-        : `Waited ${took}, the whole time: the screen can't be watched for changes here.`
+        : `Waited ${took}, the whole time: the screen can't be watched for changes right now.`
 
 /**
  * Runs one computer tool call. Refusals and take-overs end the run (`halt`); other failures go back
- * to the model. `watch: false` holds computer_wait to the whole time, as the run was told.
+ * to the model. What it says for the user (`say`) goes on the cursor before it acts.
  */
-export const runComputerTool = (computer: ComputerApi, name: string, rawArgs: string, opts: { watch?: boolean } = {}): Effect.Effect<ToolOutcome> => {
+export const runComputerTool = (computer: ComputerApi, name: string, rawArgs: string): Effect.Effect<ToolOutcome> => {
   let args: Record<string, any> = {}
   try {
     args = rawArgs.trim() ? JSON.parse(rawArgs) : {}
   } catch {
     return Effect.succeed({ text: `Error: arguments were not valid JSON: ${clip(rawArgs, 200)}`, step: { tool: name, label: `Could not read ${name} arguments`, ok: false } })
   }
+  const said = typeof args.say === 'string' ? args.say.trim() : ''
+  const outcome = name === 'computer_batch' ? runBatch(computer, args.actions) : runOne(computer, name, args)
+  return said ? Effect.andThen(computer.say(said), outcome) : outcome
+}
+
+/** Says `look` was taken: an action in the middle of a batch settles but doesn't look (see Computer.lookAfter). */
+const looked = (look: Look) => look.image !== ''
+
+const runOne = (computer: ComputerApi, name: string, args: Record<string, any>): Effect.Effect<ToolOutcome> => {
   const target = clip(String(args.target ?? '').trim(), 50)
   const quoted = target ? `“${target}”` : ''
 
   const acted = (label: (app: string) => string, effect: Effect.Effect<Acted, ComputerError>) =>
-    Effect.map(effect, ({ look, app }) => ({ text: describeActed(look), image: look.image, brief: briefActed(look), step: { tool: name, label: label(app), ok: true } }) satisfies ToolOutcome)
+    Effect.map(effect, ({ look, app }) => {
+      const step = { tool: name, label: label(app), ok: true }
+      return (looked(look) ? { text: describeActed(look), image: look.image, brief: briefActed(look), step } : { text: look.note ?? 'Done.', step }) satisfies ToolOutcome
+    })
 
   const run: Effect.Effect<ToolOutcome, ComputerError> = (() => {
     switch (name) {
@@ -276,9 +334,11 @@ export const runComputerTool = (computer: ComputerApi, name: string, rawArgs: st
         return Effect.as(computer.clearMarks, { text: 'Cleared the marks.', step: { tool: name, label: 'Cleared the marks', ok: true } })
       case 'computer_wait': {
         const seconds = Math.min(30, Math.max(0.5, Number(args.seconds) || 1))
-        return Effect.map(computer.wait(seconds * 1000, opts.watch === false ? { watch: false } : undefined), ({ look, ms, end }) => {
+        return Effect.map(computer.wait(seconds * 1000), ({ look, ms, end }) => {
           const took = `${Number((ms / 1000).toFixed(1))}s`
-          return { text: `${waitedText(took, end)}\n${describeLook(look)}`, image: look.image, brief: `${waitedText(took, end)}\n${briefActed(look)}`, step: { tool: name, label: `Waited ${took}`, ok: true } }
+          const step = { tool: name, label: `Waited ${took}`, ok: true }
+          if (!looked(look)) return { text: waitedText(took, end), step }
+          return { text: `${waitedText(took, end)}\n${describeLook(look)}`, image: look.image, brief: `${waitedText(took, end)}\n${briefActed(look)}`, step }
         })
       }
       case 'computer_save_tip':
@@ -315,6 +375,66 @@ export const runComputerTool = (computer: ComputerApi, name: string, rawArgs: st
     )
   )
 }
+
+/**
+ * computer_batch: its actions one after another, as if each were its own call, stopping at the
+ * first that doesn't go as planned (it failed, or the screen changed under it). Only the last one
+ * looks at the screen once it has settled; one that stops the batch early looks instead.
+ */
+const runBatch = (computer: ComputerApi, raw: unknown): Effect.Effect<ToolOutcome> =>
+  Effect.gen(function* () {
+    const given = (Array.isArray(raw) ? raw : []).filter((a): a is Record<string, unknown> => !!a && typeof a === 'object')
+    const items = given.slice(0, MAX_BATCH)
+    if (items.length === 0) return { text: 'Error: give the actions to run, e.g. [{"action":"key","keys":"Tab"}].', step: { tool: 'computer_batch', label: 'Could not run the actions', ok: false } }
+    const left = given.length - items.length
+    const steps: Step[] = []
+    const lines: string[] = []
+    let last: ToolOutcome | null = null
+    let stoppedAt: number | null = null
+    for (const [i, item] of items.entries()) {
+      const { action, ...rest } = item
+      const kind = String(action ?? '')
+      // A menu by name is only offered on a Mac; the service refuses it elsewhere.
+      if (!BATCHABLE.includes(kind) && kind !== 'menu') {
+        lines.push(`${i + 1}. "${kind}" can't go in a batch (it takes ${BATCHABLE.join(', ')}, and menu on a Mac).`)
+        steps.push({ tool: 'computer_batch', label: `Could not run “${clip(kind, 30)}” in a batch`, ok: false })
+        stoppedAt = i
+        break
+      }
+      const final = i === items.length - 1
+      const out: ToolOutcome = yield* computer.lookAfter(final).pipe(
+        Effect.andThen(runOne(computer, `computer_${kind}`, rest)),
+        Effect.ensuring(computer.lookAfter(true))
+      )
+      steps.push(out.step)
+      last = out
+      // A refusal ends the run: the rest isn't done, and the user hears why.
+      if (out.halt) return { ...out, steps }
+      if (!out.step.ok) {
+        lines.push(`${i + 1}. ${out.step.label}${out.step.detail ? `: ${out.step.detail}` : ''}`)
+        if (!final) stoppedAt = i
+        break
+      }
+      lines.push(`${i + 1}. ${out.step.label}.${out.image ? '' : out.text === 'Done.' ? '' : ` ${out.text.split('\n')[0]}`}`)
+    }
+    if (stoppedAt !== null && stoppedAt < items.length - 1) lines.push(`Not run: ${stoppedAt + 2 === items.length ? `action ${items.length}` : `actions ${stoppedAt + 2} to ${items.length}`}, since the batch stops at the first action that doesn't go as planned. Plan them again from the screen below.`)
+    const ran = steps.filter((s) => s.ok).length
+    const step: Step = { tool: 'computer_batch', label: `Did ${ran} of ${items.length} actions`, ok: stoppedAt === null && steps.every((s) => s.ok) }
+    // The screen after the last action that ran: its own look, or a fresh one where it had none.
+    let screen = last?.image ? { image: last.image, text: last.text } : null
+    if (!screen) {
+      const look = yield* Effect.option(computer.look('Looking at the screen'))
+      if (Option.isSome(look)) screen = { image: look.value.image, text: describeLook(look.value) }
+    }
+    if (left > 0) lines.push(`Not run: the last ${left === 1 ? 'action you sent' : `${left} actions you sent`}, since a batch takes at most ${MAX_BATCH}.`)
+    const head = `Ran ${ran} of ${items.length} actions:\n${lines.join('\n')}`
+    return {
+      text: screen ? `${head}\n${screen.text}` : head,
+      ...(screen ? { image: screen.image, brief: `${head}\nThe screenshot after your last action in this turn follows instead of this one.` } : {}),
+      step,
+      steps
+    } satisfies ToolOutcome
+  })
 
 const staleStep = (tool: string, message: string) => ({
   tool,

@@ -92,19 +92,25 @@ const makeRuntime = () => {
   const base = Layer.mergeAll(db, settings, paths)
   const mac = process.platform === 'darwin'
   const overlay = electronOverlay(headless)
+  // On a Mac the capture helper also lists the windows and types, faster than the input helper.
+  const macCapture = mac ? macScreen(overlay) : null
   const computer = Computer.layer({
     driver:
       process.platform === 'win32'
         ? windowsDriver(join(root, 'computer-helper.ps1'))
         : mac
-          ? macDriver(join(root, 'computer-helper.js'), () => {
-              const d = screen.getPrimaryDisplay()
-              return { w: d.size.width, h: d.size.height, scale: d.scaleFactor }
-            })
+          ? macDriver(
+              join(root, 'computer-helper.js'),
+              () => {
+                const d = screen.getPrimaryDisplay()
+                return { w: d.size.width, h: d.size.height, scale: d.scaleFactor }
+              },
+              macCapture?.input
+            )
           : null,
     os: mac ? 'darwin' : 'win32',
     ...(mac ? { permissions: macPermissions, hasPermissions: macHasPermissions } : {}),
-    screen: mac ? macScreen(overlay) : electronScreen,
+    screen: macCapture ?? electronScreen,
     overlay,
     chatWindows: electronChatWindows(headless),
     selfPid: process.pid

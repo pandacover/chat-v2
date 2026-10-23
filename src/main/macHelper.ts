@@ -52,15 +52,18 @@ function unwrapList(ref) {
   return Array.isArray(list) ? list : []
 }
 
+// Kept between requests: asking AppKit for each app's bundle id took a bridge call per app on
+// every look. Keyed by the app's name too, so a process id reused by another app asks again.
 var bundles = {}
-function bundleOf(pid) {
-  if (bundles.hasOwnProperty(pid)) return bundles[pid]
+function bundleOf(pid, owner) {
+  var key = pid + '|' + owner
+  if (bundles.hasOwnProperty(key)) return bundles[key]
   var id = ''
   try {
     var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid)
     if (app && !app.isNil() && app.bundleIdentifier && !app.bundleIdentifier.isNil()) id = app.bundleIdentifier.js
   } catch (e) {}
-  bundles[pid] = id
+  bundles[key] = id
   return id
 }
 
@@ -82,7 +85,6 @@ function windowById(win) {
 }
 
 function state() {
-  bundles = {}
   var front = frontPid()
   var raw = windowList()
   at('reading ' + raw.length + ' windows')
@@ -96,7 +98,7 @@ function state() {
     var layer = w.kCGWindowLayer || 0
     var pid = w.kCGWindowOwnerPID || 0
     var info = {
-      hwnd: w.kCGWindowNumber, pid: pid, exe: w.kCGWindowOwnerName || '', bundle: bundleOf(pid),
+      hwnd: w.kCGWindowNumber, pid: pid, exe: w.kCGWindowOwnerName || '', bundle: bundleOf(pid, w.kCGWindowOwnerName || ''),
       title: w.kCGWindowName || '', cls: 'layer ' + layer, layer: layer,
       x: b.X, y: b.Y, w: b.Width, h: b.Height, clickThrough: false
     }
@@ -245,10 +247,16 @@ function coarse(el) {
   return !role || role === 'AXWindow' || role === 'AXApplication' || (role === 'AXGroup' && axActions(el).length === 0 && !axString(el, 'AXTitle'))
 }
 
+// Apps asked for their full tree already: they keep it, so they aren't waited on again.
+var enhanced = {}
 function axHit(pid, x, y) {
   var el = axAt(pid, x, y)
   if (el && !coarse(el)) return el
-  // Ask Chromium apps for their tree, and give them a moment to build it.
+  if (enhanced[pid]) return el
+  // Ask Chromium apps for their tree, and give them a moment to build it, once per app: after
+  // that a coarse answer is a surface the app draws itself (a canvas), and waiting again cost
+  // every click there 0.3 s.
+  enhanced[pid] = true
   try { $.AXUIElementSetAttributeValue(axApp(pid), $('AXEnhancedUserInterface'), $.NSNumber.numberWithBool(true)) } catch (e) {}
   delay(0.3)
   return axAt(pid, x, y) || el
@@ -447,9 +455,12 @@ function borrowClick(win, x, y, which, count) {
 function click(win, x, y, which, count, borrow) {
   var pid = windowById(win).kCGWindowOwnerPID
   var done = null
-  try { done = axClick(pid, x, y, which, count) } catch (e) { at('accessibility refused: ' + ((e && e.message) || e)) }
+  var refused = false
+  try { done = axClick(pid, x, y, which, count) } catch (e) { refused = true; at('accessibility refused: ' + ((e && e.message) || e)) }
   if (done) return done
-  if (which === 'left' && count === 1) {
+  // System Events presses through Accessibility too, so it only helps where the bridge refused the
+  // call; where Accessibility found nothing to press, asking it again took up to a second.
+  if (refused && which === 'left' && count === 1) {
     try { done = systemEventsClick(pid, x, y) } catch (e) { at('System Events refused: ' + ((e && e.message) || e)) }
     if (done) return done
   }
@@ -685,10 +696,23 @@ const listApps = () => {
 }
 
 /**
- * Starts the helper on first use, and again if it dies. `scriptFile` is where the script is
- * written; `display` is the primary display in points, with its scale (pixels per point).
+ * The window list and typing, done natively by the screen capture helper (see MacInput in
+ * macCapture.ts) where it runs: through this helper's Objective-C bridge, listing the windows took
+ * a good part of every action, and text went to System Events a few characters at a time.
  */
-export const macDriver = (scriptFile: string, display: () => { w: number; h: number; scale: number }): Driver => {
+export interface MacNativeInput {
+  /** What `state` answers, in points; null when the native helper can't say. */
+  windows(): Promise<Record<string, unknown> | null>
+  /** Types `text` into the app in front; false when the native helper couldn't. */
+  type(text: string): Promise<boolean>
+}
+
+/**
+ * Starts the helper on first use, and again if it dies. `scriptFile` is where the script is
+ * written; `display` is the primary display in points, with its scale (pixels per point). With
+ * `native`, the window list and typing go there first, and to this helper only when it can't.
+ */
+export const macDriver = (scriptFile: string, display: () => { w: number; h: number; scale: number }, native?: MacNativeInput): Driver => {
   let apps: Array<{ name: string; id: string }> | null = null
   const { request, close } = helperProcess(
     () => {
@@ -709,7 +733,7 @@ export const macDriver = (scriptFile: string, display: () => { w: number; h: num
 
   return {
     state: async () => {
-      const r = await request('state')
+      const r = (await native?.windows()) ?? (await request('state'))
       const d = display()
       const windows = (r.windows as Array<WindowInfo & { layer?: number }>).map((w) => {
         const { layer: _, ...rest } = w
@@ -723,7 +747,10 @@ export const macDriver = (scriptFile: string, display: () => { w: number; h: num
     drag: async (win, from, to, opts) => note(await request('drag', win, pt(from.x), pt(from.y), pt(to.x), pt(to.y), opts?.borrow ? 1 : 0)),
     // A wheel notch is three lines, as on Windows.
     wheel: async (win, x, y, dx, dy) => note(await request('wheel', win, pt(x), pt(y), Math.round(dx * 3), Math.round(dy * 3))),
-    text: async (text) => void (await request('text', Buffer.from(text, 'utf8').toString('base64'))),
+    text: async (text) => {
+      if (await native?.type(text)) return
+      await request('text', Buffer.from(text, 'utf8').toString('base64'))
+    },
     keys: async (vks) => {
       const { code, flags, mods } = macChord(vks)
       await request('keys', code, flags, mods.length ? mods.join(',') : '-')

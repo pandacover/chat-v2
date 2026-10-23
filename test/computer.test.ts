@@ -19,9 +19,9 @@ import {
   toShot,
   windowAt
 } from '../src/shared/computer'
-import { computerInstructions, computerTools, readMarks, runComputerTool } from '../src/main/computerTools'
+import { MAX_BATCH, computerInstructions, computerTools, readMarks, runComputerTool } from '../src/main/computerTools'
 import { AppPaths } from '../src/main/services/AppPaths'
-import { ANNOTATE_MS, Computer, GLIDE_MS, OPEN_SETTLE_MAX_MS, SAY_EVERY_MS, SETTLE_MAX_MS, THINKING_LABEL, WAIT_MIN_MS, WAIT_QUIET_MS, WAIT_STILL_MS, screenChanged } from '../src/main/services/Computer'
+import { ANNOTATE_MS, Computer, GLIDE_MS, OPEN_QUIET_MS, OPEN_SETTLE_MAX_MS, SETTLE_MAX_MS, THINKING_LABEL, WAIT_QUIET_MS, screenChanged } from '../src/main/services/Computer'
 import { SettingsStore } from '../src/main/services/SettingsStore'
 import { SELF_PID, fakeDesktop, still, win } from './fakeDesktop'
 
@@ -484,16 +484,16 @@ describe('actions sent together', () => {
     expect(t.desktop.input).toHaveLength(4)
   })
 
-  test('keys are held back from a window that came up and took the keyboard since the screenshot', async () => {
+  test('keys are held back from a window of another app that came up and took the keyboard since the screenshot', async () => {
     const t = service()
     await t.run(Computer.use((c) => c.begin('r')))
     await t.tool('computer_screenshot')
     await t.run(Computer.use((c) => c.thinking))
-    // Ctrl+S brings up a Save dialog the model hasn't seen.
-    t.desktop.state.windows = [win({ hwnd: 8, title: 'Save As', cls: '#32770', x: 400, y: 200, w: 800, h: 500 }), ...t.desktop.state.windows]
+    // Another app pops up a dialog the model hasn't seen.
+    t.desktop.state.windows = [win({ hwnd: 8, pid: 300, exe: 'updater.exe', title: 'Update ready', cls: '#32770', x: 400, y: 200, w: 800, h: 500 }), ...t.desktop.state.windows]
     t.desktop.state.foreground = 8
     const typed = await t.tool('computer_type', { text: 'notes' })
-    expect(typed.text).toStartWith('Not done: "Save As" (notepad) came up and has the keyboard since the screenshot you planned this on')
+    expect(typed.text).toStartWith('Not done: "Update ready" (updater) came up and has the keyboard since the screenshot you planned this on')
     expect(typed.image).toBeDefined()
     expect(typed.halt).toBeUndefined()
     expect(typed.step).toMatchObject({ label: 'Held back: the screen changed first', ok: false })
@@ -503,6 +503,44 @@ describe('actions sent together', () => {
     expect((await t.tool('computer_type', { text: 'notes' })).step.ok).toBe(true)
     expect(t.desktop.input).toEqual(['text notes'])
   })
+
+  test("keys the model knows bring up a dialog of the app it's in go into it (Ctrl+S, the name, Enter)", async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    await t.run(Computer.use((c) => c.thinking))
+    const keys = t.desktop.ports.driver!.keys
+    t.desktop.ports.driver!.keys = async (vks) => {
+      await keys(vks)
+      // Notepad's Save As dialog takes the keyboard.
+      t.desktop.state.windows = [win({ hwnd: 8, title: 'Save As', cls: '#32770', x: 400, y: 200, w: 800, h: 500 }), ...t.desktop.state.windows]
+      t.desktop.state.foreground = 8
+    }
+    const out = await t.tool('computer_batch', {
+      actions: [
+        { action: 'key', keys: 'Ctrl+S' },
+        { action: 'type', text: 'notes.txt' },
+        { action: 'key', keys: 'Enter' }
+      ]
+    })
+    expect(out.step).toEqual({ tool: 'computer_batch', label: 'Did 3 of 3 actions', ok: true })
+    expect(t.desktop.input).toEqual(['keys 17,83', 'text notes.txt', 'keys 13'])
+  })
+
+  test('so do keys into an app the model opened in the same batch', async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    await t.run(Computer.use((c) => c.thinking))
+    const out = await t.tool('computer_batch', {
+      actions: [
+        { action: 'open_app', name: 'davinci' },
+        { action: 'key', keys: 'Ctrl+N' }
+      ]
+    })
+    expect(out.step.ok).toBe(true)
+    expect(t.desktop.input).toEqual(['launch resolve', 'keys 17,78'])
+  }, 15_000)
 
   test('a protected window is still refused, not just held back', async () => {
     const t = service()
@@ -528,7 +566,121 @@ describe('actions sent together', () => {
   })
 })
 
+describe('a batch of actions', () => {
+  test('runs them in order, looks only after the last, and lists each step', async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    await t.run(Computer.use((c) => c.thinking))
+    const shots = t.desktop.covers.length
+    const out = await t.tool('computer_batch', {
+      say: 'Filling in the name and sending it',
+      actions: [
+        { action: 'click', x: 100, y: 100, target: 'Name field' },
+        { action: 'type', text: 'Ada' },
+        { action: 'key', keys: 'Enter' }
+      ]
+    })
+    expect(t.desktop.input).toEqual(['click 1 150,150 left', 'text Ada', 'keys 13'])
+    // One screenshot, after the last action: none in between.
+    expect(t.desktop.covers.length).toBe(shots + 1)
+    expect(out.image).toBe('data:image/jpeg;base64,SHOT')
+    expect(out.text).toStartWith('Ran 3 of 3 actions:\n1. Clicked “Name field” in Notepad.\n2. Typed “Ada” in Notepad.\n3. Pressed Enter in Notepad.\n')
+    expect(out.text).toContain('The screenshot after this action follows as an image.')
+    expect(out.brief).toContain('The screenshot after your last action in this turn follows instead of this one.')
+    expect(out.step).toEqual({ tool: 'computer_batch', label: 'Did 3 of 3 actions', ok: true })
+    expect(out.steps!.map((s) => s.label)).toEqual(['Clicked “Name field” in Notepad', 'Typed “Ada” in Notepad', 'Pressed Enter in Notepad'])
+    // What it says goes on the cursor before the first move.
+    const said = t.desktop.overlay.findIndex((e) => e.type === 'say' && e.text === 'Filling in the name and sending it')
+    expect(said).toBeGreaterThanOrEqual(0)
+    expect(said).toBeLessThan(t.desktop.overlay.findIndex((e) => e.type === 'cursor'))
+  })
+
+  test('stops at the first action that fails, and looks at the screen as it is', async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    await t.run(Computer.use((c) => c.thinking))
+    const out = await t.tool('computer_batch', {
+      actions: [
+        { action: 'key', keys: 'Tab' },
+        { action: 'click', x: 5000, y: 100, target: 'Off the screen' },
+        { action: 'type', text: 'never typed' },
+        { action: 'key', keys: 'Enter' }
+      ]
+    })
+    expect(t.desktop.input).toEqual(['keys 9'])
+    expect(out.step).toEqual({ tool: 'computer_batch', label: 'Did 1 of 4 actions', ok: false })
+    expect(out.text).toContain('2. click failed: (5000, 100) is outside the screenshot')
+    expect(out.text).toContain('Not run: actions 3 to 4, since the batch stops at the first action that doesn\'t go as planned.')
+    expect(out.image).toBe('data:image/jpeg;base64,SHOT')
+    expect(out.halt).toBeUndefined()
+  })
+
+  test('a click where a window has come up since the screenshot is held back, with the rest', async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    await t.run(Computer.use((c) => c.thinking))
+    const keys = t.desktop.ports.driver!.keys
+    t.desktop.ports.driver!.keys = async (vks) => {
+      await keys(vks)
+      t.desktop.state.windows = [win({ hwnd: 8, title: 'Find', cls: '#32770', x: 0, y: 0, w: 900, h: 600 }), ...t.desktop.state.windows]
+    }
+    const out = await t.tool('computer_batch', {
+      actions: [
+        { action: 'key', keys: 'Ctrl+F' },
+        { action: 'click', x: 100, y: 100, target: 'Where the menu will be' },
+        { action: 'key', keys: 'Enter' }
+      ]
+    })
+    expect(t.desktop.input).toEqual(['keys 17,70'])
+    expect(out.steps!.at(-1)).toMatchObject({ label: 'Held back: the screen changed first', ok: false })
+    expect(out.text).toContain('Not run: action 3')
+  })
+
+  test('a protected app ends the run, as a single action would', async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    const out = await t.tool('computer_batch', { actions: [{ action: 'key', keys: 'Tab' }, { action: 'key', keys: 'Win+R' }] })
+    expect(out.halt).toContain('protected')
+    expect(out.steps).toHaveLength(2)
+  })
+
+  test("refuses what can't go in a batch, and an empty one", async () => {
+    const t = service()
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    const out = await t.tool('computer_batch', { actions: [{ action: 'annotate' }, { action: 'key', keys: 'Tab' }] })
+    expect(out.text).toContain('1. "annotate" can\'t go in a batch')
+    expect(t.desktop.input).toEqual([])
+    expect((await t.tool('computer_batch', { actions: [] })).step.ok).toBe(false)
+    const long = Array.from({ length: MAX_BATCH + 3 }, () => ({ action: 'key', keys: 'Tab' }))
+    const capped = await t.tool('computer_batch', { actions: long })
+    expect(capped.steps).toHaveLength(MAX_BATCH)
+    expect(capped.text).toContain(`Not run: the last 3 actions you sent, since a batch takes at most ${MAX_BATCH}.`)
+  })
+
+  test('the model is offered it on both systems, menus by name only on a Mac', () => {
+    const batch = (os: 'win32' | 'darwin') => computerTools(os).find((t) => t.function.name === 'computer_batch')!.function.parameters as any
+    expect(batch('win32').properties.actions.items.properties.action.enum).not.toContain('menu')
+    expect(batch('darwin').properties.actions.items.properties.action.enum).toContain('menu')
+    expect(computerInstructions('darwin')).toContain('Cmd+S, the file name, Return')
+    expect(computerInstructions('win32')).toContain('send them as one computer_batch')
+  })
+})
+
 describe('what the assistant says', () => {
+  test('every action can say what it is doing; the instructions ask for it', () => {
+    for (const t of computerTools('darwin')) {
+      if (['computer_screenshot', 'computer_zoom', 'computer_clear_annotations', 'computer_save_tip'].includes(t.function.name)) continue
+      expect((t.function.parameters as any).properties.say).toBeDefined()
+    }
+    expect(computerInstructions('win32')).toContain('takes `say`')
+    expect(computerInstructions('win32')).toContain("Your reply's text goes to the chat, not to the cursor.")
+  })
+
   test('the cursor gets plain words, and the end of a long reply', () => {
     expect(spoken('Opening **Export** in `File` — see [the docs](https://x.y).')).toBe('Opening Export in File — see the docs.')
     expect(spoken('## Steps\n1. Click *Save*\n- Pick a folder\n```js\ncode()\n```\nDone')).toBe('Steps Click Save Pick a folder Done')
@@ -538,18 +690,17 @@ describe('what the assistant says', () => {
     expect(long.length).toBeLessThanOrEqual(SAY_MAX_CHARS + 1)
   })
 
-  test('reaches the overlay at most every SAY_EVERY_MS while it streams, and goes when the reply ends', async () => {
+  test("an action's say reaches the overlay at once, stays until the next, and goes when the reply ends", async () => {
     const t = service()
     await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
     const said = () => t.desktop.overlay.filter((e) => e.type === 'say')
-    await t.run(Computer.use((c) => Effect.gen(function* () {
-      yield* c.say('Opening')
-      yield* c.say('Opening the')
-      yield* c.say('Opening the menu')
-    })))
-    expect(said()).toEqual([])
-    await new Promise((r) => setTimeout(r, SAY_EVERY_MS + 40))
-    expect(said()).toEqual([{ type: 'say', text: 'Opening the menu' }])
+    await t.tool('computer_click', { x: 100, y: 100, target: 'File', say: 'Opening the **File** menu to find Export' })
+    expect(said()).toEqual([{ type: 'say', text: 'Opening the File menu to find Export' }])
+    // An action without one leaves it be; the same words again send nothing.
+    await t.tool('computer_key', { keys: 'Down' })
+    await t.tool('computer_key', { keys: 'Down', say: 'Opening the File menu to find Export' })
+    expect(said()).toHaveLength(1)
     await t.run(Computer.use((c) => c.end('r')))
     expect(said().at(-1)).toEqual({ type: 'say', text: '' })
   })
@@ -654,7 +805,7 @@ describe('settling', () => {
     expect(out.step.label).toBe('Opened DaVinci Resolve')
     // Past the blank pause (which the old two-still-looks rule took for done) and the drawing,
     // then half a second of stillness.
-    expect(took).toBeGreaterThanOrEqual(8 * 80 + WAIT_QUIET_MS)
+    expect(took).toBeGreaterThanOrEqual(8 * 80 + OPEN_QUIET_MS)
     expect(took).toBeLessThan(OPEN_SETTLE_MAX_MS)
     expect(out.text).toContain('It is current: it was taken once the screen stopped changing.')
   })
@@ -885,30 +1036,29 @@ describe('computer_wait', () => {
   test('ends soon after the screen changes and holds still, not at the most it was given', async () => {
     // Still for three looks, changing for four (an app's window drawing), then still.
     const { out, ms } = await waiting((n) => still(n < 3 ? 0 : n < 7 ? 40 * n : 220))
-    // The last change shows at the 8th look (about 560 ms), then 500 ms of stillness.
+    // The last change shows at the 8th look (about 560 ms), then WAIT_QUIET_MS of stillness.
     expect(ms).toBeGreaterThanOrEqual(560 + WAIT_QUIET_MS - 20)
-    expect(ms).toBeLessThan(1700)
-    expect(out.text).toStartWith('Waited 1')
+    expect(ms).toBeLessThan(560 + WAIT_QUIET_MS + 250)
+    expect(out.text).toStartWith('Waited ')
     expect(out.text).toContain('the screen changed, then held still, so it is ready to act on.')
     expect(out.text).toContain('The screenshot follows as an image.')
     expect(out.image).toBe('data:image/jpeg;base64,SHOT')
-    expect(out.step.label).toMatch(/^Waited 1(\.\d)?s$/)
+    expect(out.step.label).toMatch(/^Waited \d(\.\d)?s$/)
   })
 
-  test('a change during the first half second still counts, and it never ends before that minimum', async () => {
-    const { out, ms } = await waiting((n) => still(n === 0 ? 0 : n === 1 ? 100 : 200))
-    expect(ms).toBeGreaterThanOrEqual(WAIT_MIN_MS + 80)
-    expect(ms).toBeLessThan(1100)
+  test('a change at once ends it as soon as the screen holds still: there is no minimum', async () => {
+    const { out, ms } = await waiting((n) => still(n === 0 ? 0 : 200))
+    expect(ms).toBeGreaterThanOrEqual(80 + WAIT_QUIET_MS - 20)
+    expect(ms).toBeLessThan(80 + WAIT_QUIET_MS + 200)
     expect(out.text).toContain('the screen changed, then held still')
   })
 
-  test('a screen that never changes ends the wait after 2 seconds, so a still loading screen gets a chance', async () => {
-    const { out, ms } = await waiting(() => still())
-    expect(ms).toBeGreaterThanOrEqual(WAIT_STILL_MS - 5)
-    expect(ms).toBeLessThan(WAIT_STILL_MS + 600)
-    expect(out.text).toStartWith('Waited 2')
-    expect(out.text).toContain('nothing on the screen changed in that time')
-    expect(out.step.label).toMatch(/^Waited 2(\.\d)?s$/)
+  test('a screen that never changes waits the time it was given: the model said that is the most it should take', async () => {
+    const { out, ms } = await waiting(() => still(), 1.5)
+    expect(ms).toBeGreaterThanOrEqual(1500 - 5)
+    expect(ms).toBeLessThan(1500 + 300)
+    expect(out.text).toStartWith('Waited 1.5s, the most you gave: nothing on the screen changed in that time.')
+    expect(out.step.label).toBe('Waited 1.5s')
   })
 
   test("the user's pointer moving across a still screen doesn't count as a change", async () => {
@@ -918,9 +1068,8 @@ describe('computer_wait', () => {
       const sig = still(90)
       for (let i = 0; i < 2; i++) sig[(n * 7 + i) % sig.length] = 250
       return sig
-    })
-    expect(ms).toBeGreaterThanOrEqual(WAIT_STILL_MS - 5)
-    expect(ms).toBeLessThan(WAIT_STILL_MS + 600)
+    }, 1)
+    expect(ms).toBeGreaterThanOrEqual(1000 - 5)
     expect(out.text).toContain('nothing on the screen changed')
   })
 
@@ -936,16 +1085,14 @@ describe('computer_wait', () => {
     const { out, ms, desktop } = await waiting(() => still(), 1, 'darwin')
     expect(ms).toBeGreaterThanOrEqual(1000 - 5)
     expect(desktop.probes).toBe(0)
-    expect(out.text).toStartWith("Waited 1s, the whole time: the screen can't be watched for changes here.\n")
+    expect(out.text).toStartWith("Waited 1s, the whole time: the screen can't be watched for changes right now.\n")
     expect(out.step.label).toBe('Waited 1s')
   })
 
-  test('tells the model a long wait is cheap on Windows, and not on a Mac', () => {
-    const desc = (os: 'win32' | 'darwin') => computerTools(os).find((t) => t.function.name === 'computer_wait')!.function.description
-    expect(desc('win32')).toContain('a generous maximum costs nothing')
-    expect(desc('darwin')).toContain('it waits the whole time')
-    expect(computerInstructions('win32')).toContain('it returns as soon as the screen is ready, so a long wait costs nothing')
-    expect(computerInstructions('darwin')).toContain("can't tell when the screen is ready")
+  test('tells the model its time is the most it waits, and a change ends it', () => {
+    const desc = computerTools('win32').find((t) => t.function.name === 'computer_wait')!.function.description
+    expect(desc).toContain('`seconds` is the most it waits: it returns as soon as the screen changes and settles')
+    expect(computerInstructions('win32')).toContain('call computer_wait with the longest it should take')
     // With no screenshot to start from, acting comes first.
     expect(computerInstructions('win32')).toContain("you still don't start with computer_screenshot")
   })

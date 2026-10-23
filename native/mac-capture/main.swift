@@ -3,6 +3,8 @@
 // the stream's own frame reports say when the screen changed, so actions wait only until it holds
 // still. The app drives it over stdin and stdout (see src/main/macCapture.ts), one request per
 // line, `<id> <op> <args...>`, and one JSON reply per line, after a first {"ready":true,...} line.
+// Replies carry the request's id and may come out of order: the window list and typing (see
+// below) run on their own queue, beside the stream.
 //
 // It never asks for Screen Recording itself: the app asks first (macPermissions in desktop.ts),
 // and without the permission this helper reports so and touches nothing that would prompt.
@@ -10,6 +12,7 @@
 // `--selftest` prints the OS version and what is available, without capturing, and exits.
 
 import AppKit
+import ApplicationServices
 import CoreGraphics
 import CoreMedia
 import CoreVideo
@@ -358,6 +361,116 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
   }
 }
 
+// MARK: - Windows and typing
+
+// The window list and typed text for computer use. The app's input helper (an osascript process,
+// src/main/macHelper.ts) does them too, slowly, through its Objective-C bridge: listing the windows
+// there took a good part of every action, and text went through System Events a few characters
+// at a time. They run on their own queue, so a stream starting or a screenshot being encoded
+// never holds them up.
+
+let inputQueue = DispatchQueue(label: "chat-v2-capture.input")
+
+/** The app in front, as AppKit says: read on the main thread, whose run loop keeps it current. */
+func frontPid() -> pid_t {
+  var pid: pid_t = 0
+  DispatchQueue.main.sync { pid = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0 }
+  return pid
+}
+
+/** Bundle ids by process and app name (a process id reused by another app is asked again). Only touched on inputQueue. */
+var bundleIds: [String: String] = [:]
+
+func bundleOf(_ pid: pid_t, _ owner: String) -> String {
+  let key = "\(pid)|\(owner)"
+  if let id = bundleIds[key] { return id }
+  let id = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? ""
+  bundleIds[key] = id
+  return id
+}
+
+/**
+ * The windows on screen, front to back, without the desktop, with the app in front and the
+ * pointer: what the input helper's `state` answers, in the same points (counted from the top left
+ * of the main display) and the same fields.
+ */
+func windowsNow() throws -> [String: Any] {
+  let front = frontPid()
+  guard let raw = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+    throw Failure("the window list couldn't be read")
+  }
+  var windows: [[String: Any]] = []
+  var foreground = 0
+  for w in raw {
+    if windows.count >= 80 { break }
+    guard
+      let bounds = w[kCGWindowBounds as String] as? NSDictionary,
+      let r = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+      r.width >= 2, r.height >= 2
+    else { continue }
+    if let alpha = (w[kCGWindowAlpha as String] as? NSNumber)?.doubleValue, alpha <= 0 { continue }
+    let layer = (w[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
+    let pid = pid_t((w[kCGWindowOwnerPID as String] as? NSNumber)?.intValue ?? 0)
+    let id = (w[kCGWindowNumber as String] as? NSNumber)?.intValue ?? 0
+    let owner = w[kCGWindowOwnerName as String] as? String ?? ""
+    if foreground == 0 && pid == front && layer == 0 { foreground = id }
+    windows.append([
+      "hwnd": id, "pid": Int(pid), "exe": owner, "bundle": bundleOf(pid, owner),
+      "title": w[kCGWindowName as String] as? String ?? "", "cls": "layer \(layer)", "layer": layer,
+      "x": Double(r.minX), "y": Double(r.minY), "w": Double(r.width), "h": Double(r.height), "clickThrough": false,
+    ])
+  }
+  // CoreGraphics counts down from the top of the main display, as the window bounds do.
+  let p = CGEvent(source: nil)?.location ?? .zero
+  return ["cursor": ["x": Double(p.x), "y": Double(p.y)], "foreground": foreground, "windows": windows]
+}
+
+/** One key down or up, with no modifiers whatever the user is holding. */
+func postKey(_ source: CGEventSource?, _ code: CGKeyCode, _ down: Bool, _ chars: [UniChar]? = nil) throws {
+  guard let e = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) else { throw Failure("couldn't make a key event") }
+  e.flags = []
+  if let chars { e.keyboardSetUnicodeString(stringLength: chars.count, unicodeString: chars) }
+  e.post(tap: .cghidEventTap)
+}
+
+/**
+ * Types `text` into the app in front: each character as a key press that carries it, so any
+ * layout and any character works, and a newline as Return. One character an event, a moment
+ * apart: some apps take only the first character of an event that carries several.
+ */
+func typeText(_ text: String) throws {
+  guard AXIsProcessTrusted() else { throw Failure("no Accessibility permission to type with") }
+  let source = CGEventSource(stateID: .hidSystemState)
+  for ch in text.replacingOccurrences(of: "\r", with: "") {
+    if ch == "\n" {
+      try postKey(source, 36, true)
+      try postKey(source, 36, false)
+    } else {
+      let units = Array(String(ch).utf16)
+      try postKey(source, 0, true, units)
+      try postKey(source, 0, false, units)
+    }
+    usleep(2000)
+  }
+}
+
+func handleInput(_ op: String, _ args: [String]) throws -> [String: Any] {
+  switch op {
+  case "windows":
+    return try windowsNow()
+  case "type":
+    guard let b64 = args.first, let data = Data(base64Encoded: b64), let text = String(data: data, encoding: .utf8) else {
+      throw Failure("type needs base64 UTF-8 text")
+    }
+    try typeText(text)
+    return [:]
+  default:
+    throw Failure("unknown request \(op)")
+  }
+}
+
+let INPUT_OPS: Set<String> = ["windows", "type"]
+
 // MARK: - Requests
 
 func number(_ s: String?) throws -> Double {
@@ -411,22 +524,32 @@ _ = CGMainDisplayID()
 let permission = CGPreflightScreenCaptureAccess()
 send(["ready": true, "os": osVersion(), "arch": arch, "sck": sckAvailable(), "permission": permission, "display": mainDisplay()])
 
+/** Runs a request and sends its reply, or what went wrong. */
+func respond(_ id: Int, _ work: () throws -> [String: Any]) {
+  do {
+    var reply = try work()
+    reply["id"] = id
+    reply["ok"] = true
+    send(reply)
+  } catch let f as Failure {
+    send(["id": id, "ok": false, "error": f.message])
+  } catch {
+    send(["id": id, "ok": false, "error": error.localizedDescription])
+  }
+}
+
 Thread {
   if #available(macOS 12.3, *), permission {
     let capture = Capture()
     while let line = readLine() {
       let words = line.split(separator: " ").map(String.init)
       guard words.count >= 2, let id = Int(words[0]) else { continue }
-      do {
-        var reply = try handle(capture, words[1], Array(words.dropFirst(2)))
-        reply["id"] = id
-        reply["ok"] = true
-        send(reply)
-      } catch let f as Failure {
-        send(["id": id, "ok": false, "error": f.message])
-      } catch {
-        send(["id": id, "ok": false, "error": error.localizedDescription])
+      let args = Array(words.dropFirst(2))
+      if INPUT_OPS.contains(words[1]) {
+        inputQueue.async { respond(id) { try handleInput(words[1], args) } }
+        continue
       }
+      respond(id) { try handle(capture, words[1], args) }
     }
     capture.stop()
   } else {

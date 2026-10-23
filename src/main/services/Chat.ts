@@ -81,6 +81,16 @@ export const cleanTitle = (reply: string): string | null => {
 
 type ChatError = DbError | NotFound | InvalidInput
 
+/** Whether a computer call's arguments carry something to say beside the cursor (see runComputerTool). */
+const saysSomething = (rawArgs: string) => {
+  try {
+    const say = (JSON.parse(rawArgs || '{}') as { say?: unknown }).say
+    return typeof say === 'string' && say.trim() !== ''
+  } catch {
+    return false
+  }
+}
+
 /** What the sketch cursor says while a computer-use reply works in the browser. */
 const browserHint = (name: string, rawArgs: string) => {
   let args: Record<string, unknown> = {}
@@ -178,14 +188,9 @@ export class Chat extends Context.Service<
       })
 
       /** Builds the OpenRouter request from the lineage that ends at `parentId`. */
-      /**
-       * The request for a reply, and `watch`: whether its computer_wait can end once the screen is
-       * ready (Computer.canWatch), settled once here, before the model is told.
-       */
       const buildRequest = Effect.fn('Chat.buildRequest')(function* (assistant: Message, partial: string | null) {
         const settings = yield* settingsStore.get
         const session = yield* db.require('Session', (d) => d.getSession(assistant.sessionId))
-        const watch = usesComputer(session) ? yield* computer.canWatch : false
         const history = yield* db.use((d) => d.lineage(assistant.parentId!))
         const stored = yield* db.use((d) => d.storedAttachmentsFor(history.map((m) => m.id)))
         const boards = yield* db.use((d) => d.boardsFor(history.map((m) => m.id)))
@@ -210,7 +215,7 @@ export class Chat extends Context.Service<
           settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : '',
           settings.artifactsEnabled ? MOODBOARD_INSTRUCTIONS : '',
           // Computer use brings the browser along, for looking up how unfamiliar apps work.
-          usesComputer(session) ? computerInstructions(process.platform === 'darwin' ? 'darwin' : 'win32', { borrowPointer: settings.computerBorrowPointer, watch }) : '',
+          usesComputer(session) ? computerInstructions(process.platform === 'darwin' ? 'darwin' : 'win32', { borrowPointer: settings.computerBorrowPointer }) : '',
           session.browserEnabled || usesComputer(session) ? BROWSER_INSTRUCTIONS : '',
           profileBlock(facts)
         ]
@@ -238,9 +243,9 @@ export class Chat extends Context.Service<
           messages,
           temperature: settings.temperature,
           ...(hasPdf ? { plugins: [{ id: 'file-parser', pdf: { engine: settings.pdfEngine } }] } : {}),
-          ...(usesComputer(session) ? { tools: [...computerTools(process.platform === 'darwin' ? 'darwin' : 'win32', { watch }), ...BROWSER_TOOLS] } : session.browserEnabled ? { tools: BROWSER_TOOLS } : {})
+          ...(usesComputer(session) ? { tools: [...computerTools(process.platform === 'darwin' ? 'darwin' : 'win32'), ...BROWSER_TOOLS] } : session.browserEnabled ? { tools: BROWSER_TOOLS } : {})
         } satisfies ChatRequest as ChatRequest
-        return { request, watch }
+        return request
       })
 
       const finish = (
@@ -350,7 +355,7 @@ export class Chat extends Context.Service<
         }
 
         return Effect.gen(function* () {
-          const { request, watch } = yield* buildRequest(assistant, partial)
+          const request = yield* buildRequest(assistant, partial)
           const chatModel = request.model
           replyModel = chatModel
           const settings = yield* settingsStore.get.pipe(Effect.orElseSucceed(() => null))
@@ -418,8 +423,7 @@ export class Chat extends Context.Service<
                   }
                   if (delta.type === 'text') {
                     text += delta.text
-                    // The cursor carries what the assistant says, as it says it.
-                    return Effect.forEach(buffer.push(delta.text), emit, { discard: true }).pipe(Effect.andThen(computerRun ? computer.say(text) : Effect.void))
+                    return Effect.forEach(buffer.push(delta.text), emit, { discard: true })
                   }
                   const call = calls.get(delta.index) ?? { id: '', name: '', args: '' }
                   if (delta.id) call.id = delta.id
@@ -439,8 +443,9 @@ export class Chat extends Context.Service<
               })
             )
             if (calls.size === 0 || !request.tools) return
-            // Acting without a word this step: what it said for an earlier one no longer fits.
-            if (computerRun && !text.trim()) yield* computer.say('')
+            // The cursor says what each action's `say` does (see runComputerTool). A step that gives
+            // none acts without a word: what the cursor said for an earlier step no longer fits.
+            if (computerRun && ![...calls.values()].some((c) => c.name.startsWith('computer_') && saysSomething(c.args))) yield* computer.say('')
             if (step >= maxSteps) {
               yield* endLine
               yield* emit(`Stopped after ${maxSteps} steps. Ask me to keep going if you want me to continue.`)
@@ -491,10 +496,10 @@ export class Chat extends Context.Service<
               if (!desktop) usedBrowser = true
               if (!desktop && computerRun) yield* computer.hint(browserHint(call.function.name, call.function.arguments))
               let outcome = desktop
-                ? yield* runComputerTool(computer, call.function.name, call.function.arguments, { watch }).pipe(timer.action(step, call.function.name))
+                ? yield* runComputerTool(computer, call.function.name, call.function.arguments).pipe(timer.action(step, call.function.name))
                 : yield* runTool(browser, refs, call.function.name, call.function.arguments).pipe(timer.action(step, call.function.name))
               if (outcome.attach) outcome = yield* attachToReply(assistant.id, outcome)
-              yield* emit(stepLine(outcome.step))
+              for (const s of outcome.steps ?? [outcome.step]) yield* emit(stepLine(s))
               const result: ChatMessage = { role: 'tool', tool_call_id: call.id, content: outcome.text }
               request.messages.push(result)
               if (outcome.snapshot) snapshots.push(result)

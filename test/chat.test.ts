@@ -729,7 +729,7 @@ describe('chat', () => {
     await t.runtime.dispose()
   })
 
-  test('computer use: a reply that only talks takes its words off the cursor when it ends', async () => {
+  test('computer use: what a reply says goes to the chat, not the cursor', async () => {
     const desktop = fakeDesktop()
     // Slow enough that what it said reached the cursor before the reply ended.
     const t = setup(() => Stream.make('It is 4.').pipe(Stream.concat(Stream.fromEffect(Effect.as(Effect.sleep('150 millis'), '')))), undefined, [], [], undefined, desktop)
@@ -738,8 +738,7 @@ describe('chat', () => {
     await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { computerEnabled: true }))))
     await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'what is 2+2', attachmentIds: [] })))
     await t.waitForDone(1)
-    const said = desktop.overlay.filter((e) => e.type === 'say')
-    expect(said).toEqual([{ type: 'say', text: 'It is 4.' }, { type: 'say', text: '' }])
+    expect(desktop.overlay.filter((e) => e.type === 'say')).toEqual([])
     expect(desktop.chat).toEqual(['leave out', 'let in'])
     await t.runtime.dispose()
   })
@@ -851,8 +850,8 @@ describe('chat', () => {
         req.messages.some((m) => m.role === 'tool')
           ? Stream.make('Done.')
           : Stream.make<Array<string | ChatDelta>>(
-              'Writing your note: **click** the page, type, then save.',
-              call(0, 'a', 'computer_click', { x: 100, y: 100, target: 'Page' }),
+              'I will write the note and save it.',
+              call(0, 'a', 'computer_click', { x: 100, y: 100, target: 'Page', say: 'Writing your note: **click** the page, type, then save.' }),
               call(1, 'b', 'computer_type', { text: 'hello' }),
               call(2, 'c', 'computer_key', { keys: 'Ctrl+S' })
             ),
@@ -882,10 +881,53 @@ describe('chat', () => {
     const parts = shot.content as Array<{ type: string; text?: string }>
     expect(parts[0]!.text).toBe('Screenshot after the last of your 3 actions this step (the screen as it is now):')
     expect(parts.filter((p) => p.type === 'image_url')).toHaveLength(1)
-    // The cursor carried what it said, as plain words, and let go of them when the reply ended.
+    // The cursor carried what the first action said, as plain words (not the reply's text), and let
+    // go of them when the reply ended.
     const said = desktop.overlay.filter((e) => e.type === 'say').map((e) => (e as { text: string }).text)
-    expect(said).toContain('Writing your note: click the page, type, then save.')
-    expect(said.at(-1)).toBe('')
+    expect(said).toEqual(['Writing your note: click the page, type, then save.', ''])
+    await t.runtime.dispose()
+  })
+
+  test('computer use: a batch shows each of its steps in the reply, and one screenshot goes back', async () => {
+    const desktop = fakeDesktop()
+    const t = setup(
+      (req) =>
+        req.messages.some((m) => m.role === 'tool')
+          ? Stream.make('Saved.')
+          : Stream.make<Array<string | ChatDelta>>({
+              type: 'tool',
+              index: 0,
+              id: 'b',
+              name: 'computer_batch',
+              args: JSON.stringify({
+                say: 'Typing your note and saving it',
+                actions: [
+                  { action: 'click', x: 100, y: 100, target: 'Page' },
+                  { action: 'type', text: 'hello' },
+                  { action: 'key', keys: 'Ctrl+S' }
+                ]
+              })
+            }),
+      undefined,
+      [],
+      [],
+      undefined,
+      desktop
+    )
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { computerEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'write hello and save', attachmentIds: [] })))
+    await t.waitForDone(1)
+
+    expect(desktop.input).toEqual(['click 1 150,150 left', 'text hello', 'keys 17,83'])
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    const content = view.path[1]!.message.content
+    for (const label of ['Clicked “Page” in Notepad', 'Typed “hello” in Notepad', 'Pressed Ctrl+S in Notepad']) expect(content).toContain(`"label":"${label}"`)
+    const next = t.requests[1]!.messages
+    expect(String(next.find((m) => m.role === 'tool')!.content)).toStartWith('Ran 3 of 3 actions:')
+    const shot = next.at(-1)!.content as Array<{ type: string; text?: string }>
+    expect(shot.filter((p) => p.type === 'image_url')).toHaveLength(1)
+    expect(desktop.overlay.filter((e) => e.type === 'say').map((e) => (e as { text: string }).text)).toEqual(['Typing your note and saving it', ''])
     await t.runtime.dispose()
   })
 

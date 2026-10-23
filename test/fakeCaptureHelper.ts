@@ -6,6 +6,7 @@
 //   --old-os         ScreenCaptureKit isn't available
 //   --no-app         the app isn't listed by ScreenCaptureKit, so only its windows are left out
 //   --die-on-grab    it exits on its first grab, as a crash would
+//   --no-input       it can't list the windows or type (an older helper)
 import { appendFileSync } from 'node:fs'
 
 const args = process.argv.slice(2)
@@ -33,6 +34,12 @@ const handle = (line: string) => {
     case 'changes':
       if (!streaming) return fail("the stream isn't running")
       return ok({ count: ++looks, stillMs: 42, frames: looks, area: 0.01 })
+    case 'windows':
+      if (flag('--no-input')) return fail('unknown request windows')
+      return ok({ cursor: { x: 10, y: 20 }, foreground: 7, windows: [{ hwnd: 7, pid: 100, exe: 'TextEdit', bundle: 'com.apple.TextEdit', title: 'Untitled', cls: 'layer 0', layer: 0, x: 0, y: 25, w: 800, h: 600, clickThrough: false }] })
+    case 'type':
+      if (flag('--no-input')) return fail('unknown request type')
+      return ok()
     case 'grab':
       if (flag('--die-on-grab')) process.exit(3)
       if (!streaming) return fail("the stream isn't running")

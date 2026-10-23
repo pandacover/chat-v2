@@ -173,10 +173,13 @@ export const ink = (mark: Mark, screen: { w: number; h: number }): Inked => {
   return { id: mark.id, color: mark.color, strokes, ...(label ? { label } : {}), rest: { x: keepIn(rest.x, screen.w), y: keepIn(rest.y, screen.h) } }
 }
 
-/** The assistant's pointer: an arrowhead with its tip at 0,0 and a notch in its back. */
+/**
+ * The assistant's pointer: a small arrowhead with its tip at 0,0, even on both sides of its axis
+ * (13 long, 12 across the back, notched 3.5 deep), turned 28° from upright as a pointer leans.
+ */
 export const POINTER: Pt[] = [
   { x: 0, y: 0 },
-  { x: 4, y: 21 },
-  { x: 8.6, y: 13.4 },
-  { x: 17.5, y: 12.2 }
+  { x: 0.8, y: 14.3 },
+  { x: 4.5, y: 8.4 },
+  { x: 11.4, y: 8.7 }
 ]

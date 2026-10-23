@@ -71,9 +71,9 @@ export interface Glance {
 }
 
 /**
- * How a `wait` ended: the screen changed and then held still (`settled`), never changed (`still`),
- * was still changing when the time ran out (`changing`), or wasn't watched (`unknown`: the stream
- * isn't up, or the run was told it waits the whole time), in which case it waited the whole time.
+ * How a `wait` ended: the screen changed and then held still (`settled`), never changed in the
+ * time it was given (`still`), was still changing when the time ran out (`changing`), or wasn't
+ * watched (`unknown`: a Mac whose stream isn't up), in which case it waited the whole time.
  */
 export type WaitEnd = 'settled' | 'still' | 'changing' | 'unknown'
 
@@ -140,25 +140,26 @@ export interface ComputerApi {
    */
   readonly thinking: Effect.Effect<void>
   /**
-   * What the assistant is saying in this step, as it streams (Markdown and all; see `spoken`),
-   * shown with the cursor. Empty takes it down; so does `end`.
+   * What the assistant tells the user it is doing, shown with the cursor: the `say` of the action
+   * about to run (plain words; Markdown is taken out, see `spoken`). It stays until the next one;
+   * empty takes it down, and so does `end`.
    */
   readonly say: (text: string) => Effect.Effect<void>
+  /**
+   * Whether actions look at the screen once it has settled (on unless told otherwise). A batch
+   * turns it off for all but its last action: the screenshots in between would go unseen. Off, an
+   * action's look has no image and no text, only its frame and the driver's note.
+   */
+  readonly lookAfter: (on: boolean) => Effect.Effect<void>
   /** Gets the screen ready to look at (opens the stream), ahead of a reply. */
   readonly prewarm: Effect.Effect<void>
-  /**
-   * Whether `wait` can end as soon as the screen is ready, for a run about to start: Windows' stream
-   * can always be watched; a Mac's once its ScreenCaptureKit stream is up (this waits a moment for
-   * it). The model is told what this says, and the run's waits are held to it (`wait`'s `watch`).
-   */
-  readonly canWatch: Effect.Effect<boolean>
   readonly look: (label: string) => Effect.Effect<Look, ComputerError>
   /**
-   * Waits up to `maxMs` for something on screen to finish, then looks: it ends early once the
-   * screen has changed and held still, or has stayed still a while (see WAIT_* below). With
-   * `watch: false` (the run was told the screen can't be watched) it waits the whole time.
+   * Waits up to `maxMs` for something on screen to finish, then looks: it ends as soon as the
+   * screen has changed and held still for WAIT_QUIET_MS, and waits the whole time only if nothing
+   * changes (or the screen can't be watched just now: a Mac whose stream isn't up).
    */
-  readonly wait: (maxMs: number, opts?: { watch?: boolean }) => Effect.Effect<Waited, ComputerError>
+  readonly wait: (maxMs: number) => Effect.Effect<Waited, ComputerError>
   /**
    * The screen as a reply starts, before it has control: no overlay status, and the chat window
    * stays where it is. It is left out of the capture (Windows, or a Mac's stream), so the
@@ -197,9 +198,6 @@ export const GLIDE_MS = 250
 /** What the sketch cursor says while the model decides what to do. */
 export const THINKING_LABEL = 'Deciding next step'
 
-/** What the assistant says reaches the overlay at most this often while it streams. */
-export const SAY_EVERY_MS = 80
-
 /** The longest an action waits for the screen to stop changing. */
 export const SETTLE_MAX_MS = 1500
 /** How often it looks while it waits; the screen counts as settled after two looks in a row show no change. */
@@ -209,6 +207,14 @@ const SETTLE_STEP_MS = 80
  * has been this long since the action: the two looks' worth, without waiting to take them.
  */
 export const SETTLE_QUIET_MS = 2 * SETTLE_STEP_MS
+/**
+ * Where the stream counts the screen's changes (macOS), a click, keys or a menu command that
+ * hasn't changed anything yet gets up to this long, from when it was done, for the app to react,
+ * so the screenshot isn't of the screen before it did. A change ends that wait as soon as it shows.
+ */
+export const SETTLE_REACT_MS = 450
+/** How often a stream that reports its changes (macOS) is asked while waiting: the answers are cheap. */
+const REPORT_POLL_MS = 40
 
 /**
  * Whether two `probe` thumbnails show a different screen: more than a few pixels changed by more
@@ -221,12 +227,11 @@ export const screenChanged = (a: Uint8Array, b: Uint8Array) => {
   return false
 }
 
-/** `wait` always waits this long first, so what the last action set off has a moment to start. */
-export const WAIT_MIN_MS = 500
-/** Once the screen has changed, it counts as ready after holding still this long. */
-export const WAIT_QUIET_MS = 500
-/** A screen that never changes counts as ready after this long, so a still loading screen gets a chance. */
-export const WAIT_STILL_MS = 2000
+/**
+ * Once the screen has changed, `wait` counts it ready after holding still this long: long enough
+ * that a page or window drawing in bursts is finished, short enough that the model sees it at once.
+ */
+export const WAIT_QUIET_MS = 250
 
 /** Past this share of the screen, a glance shows the chat's own grey window more than anything else. */
 const GLANCE_MAX_COVERED = 0.5
@@ -256,6 +261,8 @@ const BEGIN_MAX_MS = 400
 
 /** `open_app` waits at most this long, once the new window shows, for its content to stop changing. */
 export const OPEN_SETTLE_MAX_MS = 3000
+/** A starting app draws in bursts (a splash, then its window): it counts as loaded after this long still. */
+export const OPEN_QUIET_MS = 500
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s)
 
@@ -289,6 +296,13 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
         let glancedFor: string | null = null
         /** macOS has granted what computer use needs, so looking before `begin` won't prompt. */
         let granted = !ports.permissions
+        /**
+         * Granted in an earlier session counts, so the first reply after launch can glance and its
+         * stream open early too. Checking asks nothing.
+         */
+        const grantedBefore = () => {
+          if (!granted && ports.hasPermissions?.()) granted = true
+        }
         /** What the overlay shows while no reply has control. */
         let resting: 'off' | 'idle' | 'done' = 'off'
         /** The cursor shows the thinking spinner (see `thinking`). */
@@ -305,15 +319,21 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
          */
         let planned: DesktopState | null = null
         let actedSincePlan = false
-        /** What the assistant is saying (see `say`), and the send waiting to go out. */
+        /**
+         * Apps whose windows may take the keyboard without holding keys back (see `sameKeyboard`):
+         * the one in front in the screenshot the model planned on, the one it worked in, and any it
+         * clicked, opened or switched to since. A dialog of one of them is what the model expects
+         * when it sends keys it knows (Cmd+S, the name, Return).
+         */
+        let expectedApps = new Set<number>()
+        /** The stream's report before the action now running (see `acting`), to tell whether the screen has reacted. */
+        let baseline: unknown = null
+        /** What the assistant is saying (see `say`). */
         let saying = ''
-        let sayTimer: ReturnType<typeof setTimeout> | null = null
+        /** Actions look at the screen once it has settled (see `lookAfter`). */
+        let lookAfter = true
 
-        function sendSay() {
-          if (sayTimer) clearTimeout(sayTimer)
-          sayTimer = null
-          overlay.send({ type: 'say', text: saying })
-        }
+        const sendSay = () => overlay.send({ type: 'say', text: saying })
 
         /** Back to rest: the marks stay if there are any, else the cursor keeps the user company in computer mode. */
         const rest = () => {
@@ -521,16 +541,19 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
         /**
          * Waits for the screen to react to an action and stop changing: at least `min` ms, then
          * until two looks in a row (SETTLE_STEP_MS apart) match, at most SETTLE_MAX_MS. Says
-         * whether it settled. A stream that says how long the screen has been still (macOS) ends
-         * it as soon as that's SETTLE_QUIET_MS since the action. Where the screen can't be watched
-         * (the stream isn't up), it waits `fixed` ms instead.
+         * whether it settled. A stream that reports its changes (macOS) ends it as soon as the
+         * screen has been still for SETTLE_QUIET_MS since the action, once the action has changed
+         * something (against `baseline`, taken before it) or `react` ms have gone by without. Where
+         * the screen can't be watched (the stream isn't up), it waits `fixed` ms instead.
          */
-        const settle = (min: number, fixed: number) =>
+        const settle = (min: number, fixed: number, react = 0) =>
           Effect.gen(function* () {
             calm()
             afterBegin = false
             const w = watcher()
             const t = performance.now()
+            const from = baseline
+            baseline = null
             yield* sleep(w ? min : fixed)
             let prev = w ? yield* w.peek : null
             if (!w || !prev) {
@@ -539,33 +562,37 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             }
             let still = 0
             while (performance.now() - t < SETTLE_MAX_MS) {
-              // Still since the action at the earliest: a quiet screen before it proves nothing.
-              const quiet = w.stillMs ? Math.min(w.stillMs(prev), performance.now() - t) : 0
-              if (w.stillMs && quiet >= SETTLE_QUIET_MS) return true
-              yield* sleep(w.stillMs ? Math.max(10, Math.min(SETTLE_STEP_MS, SETTLE_QUIET_MS - quiet)) : SETTLE_STEP_MS)
+              if (w.stillMs) {
+                // Still since the action at the earliest: a quiet screen before it proves nothing.
+                const quiet = Math.min(w.stillMs(prev), performance.now() - t)
+                const reacted = from === null || w.changed(from, prev)
+                if (quiet >= SETTLE_QUIET_MS && (reacted || performance.now() - t >= react)) return true
+                // Quiet but nothing yet: look again soon for the app's reaction.
+                yield* sleep(quiet >= SETTLE_QUIET_MS ? REPORT_POLL_MS : Math.max(10, Math.min(SETTLE_STEP_MS, SETTLE_QUIET_MS - quiet)))
+              } else yield* sleep(SETTLE_STEP_MS)
               const next = yield* w.peek
               if (!next) return true
               still = w.changed(prev, next) ? 0 : still + 1
-              if (still >= 2) return true
+              if (!w.stillMs && still >= 2) return true
               prev = next
             }
             return false
           }).pipe(timed('settle'))
 
         /**
-         * `computer_wait`: up to `maxMs` for the screen to be ready, probed as `settle` probes it.
-         * After WAIT_MIN_MS, it ends once the screen has changed and then held still for
-         * WAIT_QUIET_MS, or has not changed at all for WAIT_STILL_MS. Where the screen can't be
-         * watched, or `whole` says not to, it waits the whole time. Says how long it waited and how
-         * it ended. `opts` change those times (see `openApp`), and `changed` counts the screen as
-         * changed from the start.
+         * `computer_wait`: up to `maxMs` for the screen to be ready, watched as `settle` watches
+         * it. It ends as soon as the screen has changed and then held still for `quiet` ms
+         * (WAIT_QUIET_MS), and otherwise waits the whole time, unless the screen staying still for
+         * `still` ms counts as ready too (see `openApp`). Never before `min` ms. Where the screen
+         * can't be watched it waits the whole time. Says how long it waited and how it ended;
+         * `changed` counts the screen as changed from the start.
          */
-        const waitForScreen = (maxMs: number, opts: { min?: number; quiet?: number; still?: number; changed?: boolean; whole?: boolean } = {}) =>
+        const waitForScreen = (maxMs: number, opts: { min?: number; quiet?: number; still?: number; changed?: boolean } = {}) =>
           Effect.gen(function* () {
             calm()
             afterBegin = false
-            const { min = WAIT_MIN_MS, quiet: quietMs = WAIT_QUIET_MS, still: stillMs = WAIT_STILL_MS } = opts
-            const w = opts.whole ? null : watcher()
+            const { min = 0, quiet: quietMs = WAIT_QUIET_MS, still: stillMs = Number.POSITIVE_INFINITY } = opts
+            const w = watcher()
             const t = performance.now()
             const elapsed = () => performance.now() - t
             if (!w) {
@@ -578,8 +605,11 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             let prev = base
             let since = performance.now()
             let changed = opts.changed === true
+            // A stream that reports its changes is asked often: a change is known at its next answer.
+            const step = w.stillMs ? REPORT_POLL_MS : SETTLE_STEP_MS
+            const quietNow = () => (w.stillMs && prev && changed ? Math.min(w.stillMs(prev), performance.now() - since) : performance.now() - since)
             while (elapsed() < maxMs) {
-              yield* sleep(Math.min(SETTLE_STEP_MS, maxMs - elapsed()))
+              yield* sleep(Math.min(step, maxMs - elapsed()))
               const next = yield* peek()
               if (!next) continue
               if (!prev || !base) {
@@ -593,20 +623,27 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
                 since = performance.now()
               }
               prev = next
-              const quiet = performance.now() - since
-              if (elapsed() >= WAIT_MIN_MS && quiet >= (changed ? WAIT_QUIET_MS : WAIT_STILL_MS)) {
+              if (elapsed() >= min && quietNow() >= (changed ? quietMs : stillMs)) {
                 return { ms: elapsed(), end: changed ? 'settled' : 'still' } as const
               }
             }
-            const end: WaitEnd = !base ? 'unknown' : changed && performance.now() - since < WAIT_QUIET_MS ? 'changing' : changed ? 'settled' : 'still'
+            const end: WaitEnd = !base ? 'unknown' : changed && quietNow() < quietMs ? 'changing' : changed ? 'settled' : 'still'
             return { ms: elapsed(), end }
           }).pipe(timed('wait'))
 
+        /**
+         * The screen after an action, once it has settled: a look, unless a batch said not to
+         * (`lookAfter`), when there's only the frame it acted in.
+         */
+        const lookNow = Effect.suspend(() =>
+          lookAfter ? Effect.flatMap(readState, (s) => capture(s)) : Effect.succeed({ image: '', frame: frame ?? makeFrame(screen.display()), text: '' } satisfies Look)
+        )
+
         /** Waits for the screen to settle (see `settle`), then looks again. */
-        const settleAndLook = (min: number, fixed: number) =>
+        const settleAndLook = (min: number, fixed: number, react = 0) =>
           Effect.gen(function* () {
-            const settled = yield* settle(min, fixed)
-            return { ...(yield* capture(yield* readState)), settled } satisfies Look
+            const settled = yield* settle(min, fixed, react)
+            return { ...(yield* lookNow), settled } satisfies Look
           })
 
         // --- Acting --------------------------------------------------------------------------------
@@ -676,9 +713,15 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             return { d, f, s }
           })
 
-        /** An action is about to change the screen: marks drawn after it would be guesses. */
-        const acting = Effect.sync(() => {
+        /**
+         * An action is about to change the screen: marks drawn after it would be guesses. A stream
+         * that reports its changes (macOS) says where it stands now, so `settle` can tell whether
+         * the app has reacted yet.
+         */
+        const acting = Effect.gen(function* () {
           actedSincePlan = true
+          const w = watcher()
+          baseline = w?.stillMs ? yield* w.peek : null
         })
 
         const glide = (f: Frame, x: number, y: number, label: string, action?: 'click' | 'double' | 'right' | 'drag' | 'scroll' | 'type') =>
@@ -713,14 +756,24 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             return Effect.fail(staleFail(`${named(now)} ${isNew ? 'came up' : 'came to the front'} at that point`))
           })
 
-        /** Keys go where the model saw they would: not into a window that came up and took the keyboard since. */
+        /**
+         * Keys go where the model expects them to: not into a window of another app that came up
+         * and took the keyboard since its screenshot (an alert, an app that opened itself). A
+         * window of an app it is working in may: keys it sent from knowing the app (Cmd+S, the
+         * name, Return) are meant for the dialog they bring up.
+         */
         const sameKeyboard = (s: DesktopState) =>
           Effect.suspend(() => {
             if (!planned) return Effect.void
             const front = s.windows.find((w) => w.hwnd === s.foreground)
-            if (!front || front.clickThrough || planned.windows.some((w) => w.hwnd === front.hwnd)) return Effect.void
+            if (!front || front.clickThrough || expectedApps.has(front.pid) || planned.windows.some((w) => w.hwnd === front.hwnd)) return Effect.void
             return Effect.fail(staleFail(`${named(front)} came up and has the keyboard`))
           })
+
+        /** The model has put an app in front itself (clicked in it, opened it, switched to it): its windows may take keys. */
+        const expect = (w: WindowInfo | null) => {
+          if (w) expectedApps.add(w.pid)
+        }
 
         /** The sketch cursor shows where keys go: it stays where it was left. */
         const showTyping = (f: Frame, label: string) =>
@@ -773,7 +826,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
         const settleOpened = (launched: boolean) =>
           Effect.gen(function* () {
             if (!launched || !watchingNow()) return yield* settle(250, launched ? 1000 : 600)
-            const { end } = yield* waitForScreen(OPEN_SETTLE_MAX_MS, { min: 300, still: 1200 })
+            const { end } = yield* waitForScreen(OPEN_SETTLE_MAX_MS, { min: 300, quiet: OPEN_QUIET_MS, still: 1200 })
             return end !== 'changing'
           })
 
@@ -825,6 +878,9 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               afterBegin = false
               shown = planned = null
               actedSincePlan = false
+              expectedApps = new Set()
+              baseline = null
+              lookAfter = true
               if (saying) {
                 saying = ''
                 sendSay()
@@ -849,6 +905,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             Effect.sync(() => {
               if (!driver || on === mode) return
               mode = on
+              grantedBefore()
               // Start the input helper now (about 0.6 s on Windows), not on the first action. On a
               // Mac, not before the permissions it needs are granted.
               if (on && granted) void driver.state().catch(() => undefined)
@@ -873,6 +930,12 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
           thinking: Effect.sync(() => {
             planned = shown
             actedSincePlan = false
+            // The app in front in that screenshot, and the one it works in, may take its keys.
+            expectedApps = new Set()
+            if (shown) {
+              const s = shown
+              for (const w of s.windows) if (w.hwnd === s.foreground || w.hwnd === workWindow) expectedApps.add(w.pid)
+            }
             if (owner) overlay.send({ type: 'status', state: 'working', label: THINKING_LABEL, busy: true })
             else if (mode) overlay.send({ type: 'hint', label: THINKING_LABEL, busy: true })
             else return
@@ -884,39 +947,32 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const next = spoken(text)
               if (next === saying) return
               saying = next
-              if (!owner && !mode) return
-              // Streamed text comes a few characters at a time: the overlay hears the latest every SAY_EVERY_MS.
-              if (next === '') return sendSay()
-              sayTimer ??= setTimeout(sendSay, SAY_EVERY_MS)
+              if (owner || mode) sendSay()
+            }),
+
+          lookAfter: (on) =>
+            Effect.sync(() => {
+              lookAfter = on
             }),
 
           prewarm: Effect.sync(() => {
+            grantedBefore()
             if (driver && granted) screen.prepare?.()
-          }),
-
-          canWatch: Effect.suspend(() => {
-            if (!driver) return Effect.succeed(false)
-            if (screen.probe) return Effect.succeed(true)
-            // A Mac: its stream only opens once the permissions it needs are granted. Granted in an
-            // earlier session counts, so the first reply after launch can watch too (checking asks nothing).
-            if (!granted && ports.hasPermissions?.()) granted = true
-            const watchable = screen.watchable?.bind(screen)
-            if (!watchable || !granted) return Effect.succeed(false)
-            return Effect.promise(() => watchable().catch(() => false))
           }),
 
           look,
 
-          wait: (maxMs, opts) =>
+          wait: (maxMs) =>
             Effect.gen(function* () {
               yield* needDriver
               yield* status('Waiting for the screen')
-              const { ms, end } = yield* waitForScreen(maxMs, { whole: opts?.watch === false })
-              return { look: yield* capture(yield* readState), ms, end } satisfies Waited
+              const { ms, end } = yield* waitForScreen(maxMs)
+              return { look: yield* lookNow, ms, end } satisfies Waited
             }),
 
           glance: (id) =>
             Effect.gen(function* () {
+              grantedBefore()
               if (!driver || !granted || (owner && owner !== id)) return null
               screen.prepare?.()
               const ctx = yield* guard
@@ -1017,7 +1073,8 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const borrow = yield* borrowPointer
               const note = yield* act('Clicking', () => d.click(w.hwnd, p.x, p.y, button, count, { borrow }))
               workWindow = w.hwnd
-              return { look: noted(yield* settleAndLook(150, 550), note), app: nameOf(w) }
+              expect(w)
+              return { look: noted(yield* settleAndLook(150, 550, SETTLE_REACT_MS), note), app: nameOf(w) }
             }),
 
           move: (x, y, label) =>
@@ -1050,7 +1107,8 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const borrow = yield* borrowPointer
               const note = yield* act('Dragging', () => d.drag(w.hwnd, a, b, { borrow }))
               workWindow = w.hwnd
-              return { look: noted(yield* settleAndLook(150, 500), note), app: nameOf(w) }
+              expect(w)
+              return { look: noted(yield* settleAndLook(150, 500, SETTLE_REACT_MS), note), app: nameOf(w) }
             }),
 
           scroll: (x, y, dx, dy, label) =>
@@ -1062,7 +1120,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               yield* acting
               yield* glide(f, x, y, label, 'scroll')
               const note = yield* act('Scrolling', () => d.wheel(w.hwnd, p.x, p.y, dx, dy))
-              return { look: noted(yield* settleAndLook(120, 450), note), app: nameOf(w) }
+              return { look: noted(yield* settleAndLook(120, 450, SETTLE_REACT_MS), note), app: nameOf(w) }
             }),
 
           type: (text, label) =>
@@ -1087,7 +1145,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               yield* acting
               yield* showTyping(f, label)
               yield* act('Pressing keys', () => d.keys(vks))
-              return { look: yield* settleAndLook(150, 450), app: nameOf(w) }
+              return { look: yield* settleAndLook(150, 450, SETTLE_REACT_MS), app: nameOf(w) }
             }),
 
           openApp: (name) =>
@@ -1126,10 +1184,11 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               }
               const fg = s.windows.find((w) => w.hwnd === s.foreground) ?? null
               if (fg && s.foreground !== s0.foreground) workWindow = fg.hwnd
+              expect(fg)
               // A window in front that wasn't there before: the app is starting, or opened a new window.
               const launched = fg !== null && !before.has(fg.hwnd)
               const settled = yield* settleOpened(launched)
-              return { look: { ...(yield* capture(yield* readState)), settled }, app: fg ? appName(fg) : found.name }
+              return { look: { ...(yield* lookNow), settled }, app: fg ? appName(fg) : found.name }
             }),
 
           focusWindow: (title) =>
@@ -1149,7 +1208,8 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               yield* acting
               yield* act('Switching windows', () => d.focus(w.hwnd))
               workWindow = w.hwnd
-              return { look: yield* settleAndLook(120, 500), app: appName(w) }
+              expect(w)
+              return { look: yield* settleAndLook(120, 500, SETTLE_REACT_MS), app: appName(w) }
             }),
 
           menu: (path) =>
@@ -1165,7 +1225,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               yield* acting
               yield* showTyping(f, label)
               const note = yield* act('Choosing from the menu', () => choose(w.hwnd, path))
-              return { look: noted(yield* settleAndLook(150, 500), note), app: nameOf(w) }
+              return { look: noted(yield* settleAndLook(150, 500, SETTLE_REACT_MS), note), app: nameOf(w) }
             }),
 
           annotate: (input, label) =>
