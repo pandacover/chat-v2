@@ -65,7 +65,7 @@ jobs:
       - name: Cache the capture helper
         id: helper
         if: runner.os == 'macOS'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: native/mac-capture/out
           key: mac-capture-${{ steps.xcode.outputs.version }}-${{ hashFiles('native/mac-capture/main.swift', 'scripts/build-mac-capture.ts') }}
