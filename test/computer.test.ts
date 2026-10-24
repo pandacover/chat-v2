@@ -1064,15 +1064,21 @@ describe('computer_wait', () => {
     desktop.probes = 0
     const started = performance.now()
     const out = await t.tool('computer_wait', { seconds })
-    return { out, ms: performance.now() - started, desktop }
+    return { out, ms: performance.now() - started, started, desktop }
   }
 
   test('ends soon after the screen changes and holds still, not at the most it was given', async () => {
-    // Still for three looks, changing for four (an app's window drawing), then still.
-    const { out, ms } = await waiting((n) => still(n < 3 ? 0 : n < 7 ? 40 * n : 220))
-    // The last change shows at the 8th look (about 560 ms), then WAIT_QUIET_MS of stillness.
-    expect(ms).toBeGreaterThanOrEqual(560 + WAIT_QUIET_MS - 20)
-    expect(ms).toBeLessThan(560 + WAIT_QUIET_MS + 250)
+    // Still for three looks, changing for four (an app's window drawing), then still: 240 to 220
+    // is too small a step to count. Timed from the last change's look, since a CI runner's timers
+    // can run several percent fast, and every look then comes early.
+    let lastChange = 0
+    const { out, ms, started } = await waiting((n) => {
+      if (n === 6) lastChange = performance.now()
+      return still(n < 3 ? 0 : n < 7 ? 40 * n : 220)
+    })
+    const quiet = started + ms - lastChange
+    expect(quiet).toBeGreaterThanOrEqual(WAIT_QUIET_MS)
+    expect(quiet).toBeLessThan(WAIT_QUIET_MS + 250)
     expect(out.text).toStartWith('Waited ')
     expect(out.text).toContain('the screen changed, then held still, so it is ready to act on.')
     expect(out.text).toContain('The screenshot follows as an image.')

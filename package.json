@@ -1,7 +1,7 @@
 {
   "name": "chat-v2",
   "version": "0.1.0",
-  "description": "Desktop chatbot: OpenRouter chat, ElevenLabs STT, branching sessions, artifacts",
+  "description": "Desktop AI chat app for any OpenRouter model, with voice input, branching chats, artifacts, a built-in browser, and computer use",
   "main": "./out/main/index.js",
   "author": "pandacover",
   "license": "MIT",
