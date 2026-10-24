@@ -59,7 +59,7 @@ On macOS, computer use needs Accessibility and Screen Recording permission. Linu
 
 Each push to `main` runs `.github/workflows/release.yml`. It builds a Windows installer and macOS builds for Apple silicon and Intel, then publishes them as a [GitHub release](https://github.com/pandacover/chat-v2/releases). Installed apps check for updates on launch and every 30 minutes.
 
-CI signs macOS builds with a self-signed certificate (`build/chat-v2-signing.cer`) and does not notarize them. The first open of a downloaded DMG needs **Open Anyway** in Privacy & Security settings. The `MAC_CERT_P12` and `MAC_CERT_PASSWORD` secrets hold the private key. Keep a backup of both. A new certificate resets every user's macOS permissions and stops installed apps from updating.
+The release workflow signs macOS builds with a self-signed certificate (`build/chat-v2-signing.cer`) and does not notarize them. The first open of a downloaded DMG needs **Open Anyway** in Privacy & Security settings. The `MAC_CERT_P12` and `MAC_CERT_PASSWORD` secrets hold the private key. Keep a backup of both. A new certificate resets every user's macOS permissions and stops installed apps from updating.
 
 ## Code layout
 
