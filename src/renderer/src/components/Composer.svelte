@@ -20,7 +20,9 @@
     browserEnabled = false,
     onbrowser,
     computerEnabled = false,
-    oncomputer
+    oncomputer,
+    researchEnabled = false,
+    onresearch
   }: {
     placeholder?: string
     model: string
@@ -31,6 +33,8 @@
     onbrowser: () => void
     computerEnabled?: boolean
     oncomputer: () => void
+    researchEnabled?: boolean
+    onresearch: () => void
   } = $props()
 
   let text = $state('')
@@ -362,6 +366,20 @@
       onclick={onbrowser}
     >
       <Icon name="globe" size={14} /><span class="hidden @sm:inline">Browser</span>
+    </button>
+    <button
+      class="flex h-7 items-center gap-1.5 rounded-full px-[7px] text-[12.5px] transition-colors {researchEnabled
+        ? 'bg-fg text-bg'
+        : 'text-fg-2 hover:bg-hover hover:text-fg'}"
+      role="switch"
+      aria-checked={researchEnabled}
+      aria-label="Research"
+      use:tip={researchEnabled
+        ? 'Replies research the web on the Claude API and write a cited report'
+        : 'Research replies in depth on the Claude API, with web search'}
+      onclick={onresearch}
+    >
+      <Icon name="search" size={14} /><span class="hidden @sm:inline">Research</span>
     </button>
     {#if window.api.computer.supported}
       <button

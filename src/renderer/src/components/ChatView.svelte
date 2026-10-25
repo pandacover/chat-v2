@@ -93,6 +93,14 @@
     else app.toast('The assistant can now see your screen and work in your apps in this chat, with its own cursor: your mouse stays yours. Settings, passwords and terminals stay off limits. Press Stop to take over.', 'info')
   }
 
+  const toggleResearch = async () => {
+    const next = !app.chat.researchEnabled
+    await app.updateSession({ researchEnabled: next })
+    if (!next) return
+    if (app.settings && !app.settings.hasAnthropicKey) app.toast('Research runs on the Claude API. Add your Claude API key in Settings.')
+    else app.toast('Replies in this chat now research the web and write a cited report. Each one takes a few minutes and costs about $0.50 to $3.', 'info')
+  }
+
   const openPrompt = () => {
     promptDraft = app.chat.systemPrompt ?? app.settings?.settings.systemPrompt ?? ''
     promptOpen = true
@@ -191,6 +199,8 @@
         onbrowser={toggleBrowser}
         computerEnabled={app.chat.computerEnabled}
         oncomputer={toggleComputer}
+        researchEnabled={app.chat.researchEnabled}
+        onresearch={toggleResearch}
       />
     </div>
 

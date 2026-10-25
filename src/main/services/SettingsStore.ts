@@ -40,11 +40,16 @@ export const DEFAULT_SETTINGS: Settings = {
   computerBorrowPointer: true,
   // Each step is a small decision on a fresh screenshot; deep thinking mostly adds waiting.
   computerReasoningEffort: 'low',
-  computerModel: ''
+  computerModel: '',
+  // Research replies run on the Claude API with its web search; a report is usually $0.50 to $3.
+  researchModel: 'claude/claude-opus-5-5',
+  researchEffort: 'high',
+  researchMaxSearches: 30
 }
 
 const PDF_ENGINES: ReadonlyArray<Settings['pdfEngine']> = ['cloudflare-ai', 'mistral-ocr', 'native']
 const EFFORTS: ReadonlyArray<Settings['computerReasoningEffort']> = ['minimal', 'low', 'medium', 'high']
+const RESEARCH_EFFORTS: ReadonlyArray<Settings['researchEffort']> = ['low', 'medium', 'high', 'xhigh', 'max']
 
 /** Merges whatever is in config.json over the defaults, ignoring values of the wrong type. */
 export const normalizeSettings = (raw: unknown): Settings => {
@@ -53,6 +58,8 @@ export const normalizeSettings = (raw: unknown): Settings => {
   const temperature = typeof input.temperature === 'number' ? Math.min(2, Math.max(0, input.temperature)) : undefined
   const pdfEngine = PDF_ENGINES.find((e) => e === input.pdfEngine)
   const effort = EFFORTS.find((e) => e === input.computerReasoningEffort)
+  const researchEffort = RESEARCH_EFFORTS.find((e) => e === input.researchEffort)
+  const searches = typeof input.researchMaxSearches === 'number' && Number.isFinite(input.researchMaxSearches) ? Math.round(input.researchMaxSearches) : undefined
   return {
     defaultModel: str('defaultModel', DEFAULT_SETTINGS.defaultModel).trim() || DEFAULT_SETTINGS.defaultModel,
     systemPrompt: str('systemPrompt', DEFAULT_SETTINGS.systemPrompt),
@@ -72,7 +79,10 @@ export const normalizeSettings = (raw: unknown): Settings => {
       : DEFAULT_SETTINGS.computerProtected,
     computerBorrowPointer: typeof input.computerBorrowPointer === 'boolean' ? input.computerBorrowPointer : DEFAULT_SETTINGS.computerBorrowPointer,
     computerReasoningEffort: effort ?? DEFAULT_SETTINGS.computerReasoningEffort,
-    computerModel: str('computerModel', DEFAULT_SETTINGS.computerModel).trim()
+    computerModel: str('computerModel', DEFAULT_SETTINGS.computerModel).trim(),
+    researchModel: str('researchModel', DEFAULT_SETTINGS.researchModel).trim() || DEFAULT_SETTINGS.researchModel,
+    researchEffort: researchEffort ?? DEFAULT_SETTINGS.researchEffort,
+    researchMaxSearches: searches === undefined ? DEFAULT_SETTINGS.researchMaxSearches : Math.min(200, Math.max(1, searches))
   }
 }
 
@@ -82,10 +92,11 @@ export interface SecretCipher {
   decrypt(cipher: string): string
 }
 
-export type KeyName = 'openrouter' | 'elevenlabs'
+export type KeyName = 'openrouter' | 'elevenlabs' | 'anthropic'
 
-const ENV_KEYS: Record<KeyName, string> = { openrouter: 'OPENROUTER_API_KEY', elevenlabs: 'ELEVENLABS_API_KEY' }
-const LABELS: Record<KeyName, string> = { openrouter: 'OpenRouter', elevenlabs: 'ElevenLabs' }
+const KEY_NAMES: ReadonlyArray<KeyName> = ['openrouter', 'elevenlabs', 'anthropic']
+const ENV_KEYS: Record<KeyName, string> = { openrouter: 'OPENROUTER_API_KEY', elevenlabs: 'ELEVENLABS_API_KEY', anthropic: 'ANTHROPIC_API_KEY' }
+const LABELS: Record<KeyName, string> = { openrouter: 'OpenRouter', elevenlabs: 'ElevenLabs', anthropic: 'Claude API' }
 
 const writeAtomic = (file: string, data: string) => {
   writeFileSync(`${file}.tmp`, data, 'utf8')
@@ -154,7 +165,7 @@ export class SettingsStore extends Context.Service<
           if (!existsSync(paths.secretsFile)) return {}
           const raw = JSON.parse(readFileSync(paths.secretsFile, 'utf8')) as Record<string, unknown>
           const out: Partial<Record<KeyName, string>> = {}
-          for (const name of ['openrouter', 'elevenlabs'] as const) {
+          for (const name of KEY_NAMES) {
             const value = raw[name]
             if (typeof value === 'string' && value) out[name] = cipher.decrypt(value)
           }
@@ -171,6 +182,7 @@ export class SettingsStore extends Context.Service<
             settings,
             hasOpenRouterKey: resolveKey(secrets, 'openrouter') !== '',
             hasElevenLabsKey: resolveKey(secrets, 'elevenlabs') !== '',
+            hasAnthropicKey: resolveKey(secrets, 'anthropic') !== '',
             configPath: paths.configFile
           } satisfies SettingsView
         })
@@ -183,11 +195,12 @@ export class SettingsStore extends Context.Service<
               writeAtomic(paths.configFile, configText(next))
             )
           }
-          if (patch.openRouterKey !== undefined || patch.elevenLabsKey !== undefined) {
+          if (patch.openRouterKey !== undefined || patch.elevenLabsKey !== undefined || patch.anthropicKey !== undefined) {
             const secrets = yield* readSecrets
             const next: Partial<Record<KeyName, string>> = { ...secrets }
             if (patch.openRouterKey !== undefined) next.openrouter = patch.openRouterKey.trim()
             if (patch.elevenLabsKey !== undefined) next.elevenlabs = patch.elevenLabsKey.trim()
+            if (patch.anthropicKey !== undefined) next.anthropic = patch.anthropicKey.trim()
             yield* attempt('Could not write secrets.json', () => {
               const encrypted: Record<string, string> = {}
               for (const [k, v] of Object.entries(next)) if (v) encrypted[k] = cipher.encrypt(v)

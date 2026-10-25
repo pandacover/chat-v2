@@ -51,7 +51,10 @@ export const splitSteps = (content: string): Segment[] => {
 /** Whether a run of steps drove the desktop (computer_* tools) or only the browser. */
 export const isDesktopRun = (steps: Step[]) => steps.some((s) => s.tool.startsWith('computer_'))
 
-const usedWhat = (steps: Step[]) => (isDesktopRun(steps) ? 'Used the computer' : 'Used the browser')
+/** Whether a run of steps was research on the Claude API (its web search, page reads and notes). */
+export const isResearchRun = (steps: Step[]) => !isDesktopRun(steps) && steps.some((s) => s.tool === 'web_search' || s.tool === 'web_fetch' || s.tool === 'research_note')
+
+const usedWhat = (steps: Step[]) => (isDesktopRun(steps) ? 'Used the computer' : isResearchRun(steps) ? 'Researched the web' : 'Used the browser')
 
 /** History sent back to a model: step lines become one plain-language summary per run. */
 export const summarizeSteps = (content: string): string =>

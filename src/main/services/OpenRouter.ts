@@ -1,5 +1,6 @@
 import { Context, Effect, Layer, Stream } from 'effect'
 import type { ModelInfo, Usage } from '@shared/types'
+import { CLAUDE_MODELS, claudeClient, isClaudeModel, streamClaude } from '../claude'
 import { type ConfigError, type MissingApiKey, ProviderError, errorMessage } from '../errors'
 import { type ReasoningDetail, parseSseLine } from '../sse'
 import { CurrentStopwatch } from '../timing'
@@ -53,6 +54,8 @@ export interface ChatRequest {
   reasoning?: { effort: ReasoningEffort }
   /** Several tool calls in one turn, run in order (computer use); off unless set. */
   parallel_tool_calls?: boolean
+  /** A research reply: the Claude API's web search and web fetch (Claude models only, see claude.ts). */
+  research?: boolean
 }
 
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high'
@@ -168,8 +171,12 @@ const describeFailure = (status: number, body: string): string => {
 export class OpenRouter extends Context.Service<
   OpenRouter,
   {
-    /** Streams a chat completion. Interrupting the stream aborts the request. */
+    /**
+     * Streams a chat completion. Interrupting the stream aborts the request. `claude/` models go
+     * to the Claude API instead (see claude.ts), so every caller can use them.
+     */
     readonly streamChat: (req: ChatRequest) => Stream.Stream<ChatDelta, ProviderError | MissingApiKey | ConfigError>
+    /** The Claude API's models when there is a key for it, then OpenRouter's. */
     readonly listModels: Effect.Effect<ModelInfo[], ProviderError>
     readonly listImageModels: Effect.Effect<ModelInfo[], ProviderError>
     /** Generates one image with the images endpoint. */
@@ -181,8 +188,26 @@ export class OpenRouter extends Context.Service<
     Effect.gen(function* () {
       const settings = yield* SettingsStore
 
-      const streamChat = (req: ChatRequest) =>
+      const streamClaudeChat = (req: ChatRequest) =>
         Stream.unwrap(
+          Effect.gen(function* () {
+            const key = yield* settings.apiKey('anthropic')
+            const config = yield* settings.get
+            const controller = yield* Effect.acquireRelease(
+              Effect.sync(() => new AbortController()),
+              (c) => Effect.sync(() => c.abort())
+            )
+            const research = req.research ? { effort: config.researchEffort, maxSearches: config.researchMaxSearches } : null
+            return streamClaude(claudeClient(key), req, research, controller.signal)
+          })
+        )
+
+      const streamChat = (req: ChatRequest): Stream.Stream<ChatDelta, ProviderError | MissingApiKey | ConfigError> =>
+        isClaudeModel(req.model)
+          ? streamClaudeChat(req)
+          : req.research
+            ? Stream.fail(providerError(undefined, `Research runs on a Claude API model, not ${req.model}. Pick one under Settings → Research.`))
+            : Stream.unwrap(
           Effect.gen(function* () {
             const key = yield* settings.apiKey('openrouter')
             // A reply times its calls (see timing.ts); other requests carry no stopwatch.
@@ -282,9 +307,19 @@ export class OpenRouter extends Context.Service<
           .sort((a, b) => a.name.localeCompare(b.name))
       })
       // Only successful lookups are cached, so a failed fetch is retried next time.
-      const listModels = Effect.suspend(() =>
+      const openRouterModels = Effect.suspend(() =>
         modelCache ? Effect.succeed(modelCache) : fetchModels.pipe(Effect.tap((m) => Effect.sync(() => (modelCache = m))))
       )
+      // Claude's models are listed once there is a key for them; they still show if OpenRouter can't be reached.
+      const listModels = Effect.gen(function* () {
+        const hasKey = yield* settings.apiKey('anthropic').pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false)
+        )
+        const claude = hasKey ? CLAUDE_MODELS : []
+        const rest = yield* openRouterModels.pipe(Effect.catch((e) => (claude.length > 0 ? Effect.succeed<ModelInfo[]>([]) : Effect.fail(e))))
+        return [...claude, ...rest]
+      })
 
       let imageCache: { models: ModelInfo[]; params: Map<string, ImageModelParams> } | null = null
       const fetchImageModels = Effect.gen(function* () {

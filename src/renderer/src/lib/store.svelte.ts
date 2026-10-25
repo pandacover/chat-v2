@@ -127,7 +127,8 @@ class AppState {
     model: this.view ? this.view.session.model : (this.fresh.model ?? null),
     systemPrompt: this.view ? this.view.session.systemPrompt : (this.fresh.systemPrompt ?? null),
     browserEnabled: this.view ? this.view.session.browserEnabled : (this.fresh.browserEnabled ?? false),
-    computerEnabled: this.view ? this.view.session.computerEnabled : (this.fresh.computerEnabled ?? false)
+    computerEnabled: this.view ? this.view.session.computerEnabled : (this.fresh.computerEnabled ?? false),
+    researchEnabled: this.view ? this.view.session.researchEnabled : (this.fresh.researchEnabled ?? false)
   })
 
   hasArtifact = $derived(this.artifact !== null && this.artifactVersions.length > 0)
