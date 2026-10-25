@@ -58,7 +58,7 @@ On macOS, computer use needs Accessibility and Screen Recording permission. Linu
 
 ## Research
 
-Turn on **Research** in the composer. Each reply in that chat searches the web, reads the pages that matter, and writes a report with numbered links to its sources and a source list at the end. The searches and reads show as steps while it works. Research uses the Claude API's web search and web fetch tools, which run on Anthropic's servers. Browser and computer use stay off for that reply.
+Turn on **Research** in the composer. Each reply in that chat searches the web, reads the pages that matter, and writes a report with numbered links to its sources and a source list at the end. The searches and reads show as steps while it works. Research uses the Claude API's web search and web fetch tools, which run on Anthropic's servers. Turn on **Browser** as well for pages those can't read, such as ones behind a login or built by JavaScript: the model then has both. With **Computer** on, research keeps the chat's Claude model rather than the computer use model.
 
 Research runs on the chat's model if that is a Claude API model (`claude/…`). Otherwise it uses the research model in **Settings → Research**, which is Claude Opus 5.5 by default. That section also sets the depth (the effort) and the most searches one reply may make. A report usually costs $0.50 to $3: tokens at Claude API list prices, plus $0.01 a search. The cost shows under each reply.
 

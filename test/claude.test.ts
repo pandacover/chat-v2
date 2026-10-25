@@ -258,6 +258,38 @@ describe('streamClaude', () => {
     expect(reasoning?.type === 'reasoning' && (reasoning.details?.[0]?.content as any[])[0].signature).toBe('sig-1')
   })
 
+  test('research with the browser: a step that searches and then calls a browser tool hands back all of it, and saves the source list for the end', async () => {
+    const citation = { type: 'web_search_result_location', url: 'https://docs.test/a', title: 'Docs', cited_text: 'x', encrypted_index: 'z' }
+    const { url, bodies } = serve([
+      [
+        start(),
+        ...block(0, { type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search', input: {} }, [{ type: 'input_json_delta', partial_json: '{"query":"dashboard login"}' }]),
+        ...block(1, { type: 'web_search_tool_result', tool_use_id: 'srvtoolu_1', content: [] }),
+        ...block(2, { type: 'text', text: '', citations: [] }, [{ type: 'text_delta', text: 'The docs say to sign in.' }, { type: 'citations_delta', citation }]),
+        ...block(3, { type: 'tool_use', id: 'toolu_1', name: 'browser_navigate', input: {} }, [{ type: 'input_json_delta', partial_json: '{"url":"https://app.test"}' }]),
+        ...end('tool_use')
+      ]
+    ])
+    const deltas = await run(
+      url,
+      {
+        model: 'claude/claude-opus-5-5',
+        messages: [{ role: 'user', content: 'Check the dashboard' }],
+        research: true,
+        tools: [{ type: 'function', function: { name: 'browser_navigate', description: 'Go', parameters: { type: 'object' } } }]
+      },
+      { effort: 'high', maxSearches: 10 }
+    )
+    expect(bodies[0].tools.map((t: any) => t.name)).toEqual(['browser_navigate', 'web_search', 'web_fetch'])
+    const text = textOf(deltas)
+    expect(text).toContain('[[1]](https://docs.test/a)')
+    expect(text).not.toContain('**Sources**')
+    expect(deltas.filter((d) => d.type === 'tool')[0]).toEqual({ type: 'tool', index: 0, id: 'toolu_1', name: 'browser_navigate' })
+    // The search goes back with the tool call, so the next step sees what it found.
+    const reasoning = deltas.find((d) => d.type === 'reasoning')
+    expect(reasoning?.type === 'reasoning' && (reasoning.details?.[0]?.content as any[]).map((b) => b.type)).toEqual(['server_tool_use', 'web_search_tool_result', 'text', 'tool_use'])
+  })
+
   test('API errors become provider errors with their status', async () => {
     server = Bun.serve({
       port: 0,

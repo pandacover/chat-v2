@@ -375,7 +375,7 @@
       aria-checked={researchEnabled}
       aria-label="Research"
       use:tip={researchEnabled
-        ? 'Replies research the web on the Claude API and write a cited report'
+        ? 'Replies research the web on the Claude API and write a cited report, with the browser too when it is on'
         : 'Research replies in depth on the Claude API, with web search'}
       onclick={onresearch}
     >

@@ -177,7 +177,8 @@ export const RESEARCH_INSTRUCTIONS = `You are running in research mode, with web
 - Research the question thoroughly before answering: run many searches with varied wording, open the most relevant pages with web fetch (primary sources, official docs and pricing pages over summaries), and cross-check claims that matter.
 - Before your first search, say in one or two sentences what you will look into.
 - Then write a structured report in Markdown: a short summary first, then sections, with comparisons as tables where they help. Say what you could not confirm.
-- Cite your sources inline as you use them.`
+- Cite your sources inline as you use them.
+- If you also have the built-in browser's tools, read pages with web fetch first, and use the browser for pages that need it: ones behind a login, built by JavaScript, or that need clicking through.`
 
 /** The Messages API request for one of Chat's requests. */
 export const claudeParams = (req: ChatRequest, research: ResearchOptions | null): BetaMessageStreamParams => {
@@ -354,7 +355,8 @@ export const streamClaude = (
       } else if (message.stop_reason === 'max_tokens') yield text(`${atLineStart ? '' : '\n\n'}_The reply reached its length limit._`)
       break
     }
-    if (sources.size > 0) {
+    // The source list ends the report, which is the step without tool calls (citations before it keep their links).
+    if (sources.size > 0 && toolCount === 0) {
       const list = [...sources.entries()].map(([url, s]) => `${s.n}. [${s.title.replace(/[[\]]/g, '')}](${url})`)
       yield text(`${atLineStart ? '\n' : '\n\n'}**Sources**\n\n${list.join('\n')}\n`)
     }

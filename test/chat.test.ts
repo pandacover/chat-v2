@@ -511,7 +511,7 @@ describe('chat', () => {
     await t.runtime.dispose()
   })
 
-  test('research: the reply runs on the research model with research on, and without browser tools', async () => {
+  test('research: the reply runs on the research model with research on, and keeps the browser tools', async () => {
     const t = setup(() => Stream.make('::step {"tool":"web_search","label":"Searched “x”","ok":true}\n', 'Report.'), undefined, [], [], {
       titleModel: '',
       memoryModel: '',
@@ -526,7 +526,7 @@ describe('chat', () => {
     expect(t.requests).toHaveLength(1)
     expect(t.requests[0]!.model).toBe('claude/claude-fable-5-1')
     expect(t.requests[0]!.research).toBe(true)
-    expect(t.requests[0]!.tools).toBeUndefined()
+    expect(t.requests[0]!.tools?.map((x) => x.function.name)).toContain('browser_navigate')
     expect(String(t.requests[0]!.messages[0]!.content)).toContain('research mode')
     const view = await t.run(Chat.use((c) => c.view(s.id)))
     expect(view.path[1]!.message.model).toBe('claude/claude-fable-5-1')

@@ -154,10 +154,10 @@ export class Chat extends Context.Service<
       const computer = yield* Computer
       // Where each reply's time went, step by step (see timing.ts).
       const timing = timingLog(join((yield* AppPaths).root, 'timing.jsonl'), process.env.CHAT_V2_TIMING === '1')
-      // Research replies search the web on Anthropic's servers, so they take no browser or computer tools.
+      // Research replies search the web on Anthropic's servers, beside the browser and computer when those are on too.
       const researches = (session: Session) => session.researchEnabled
-      const usesComputer = (session: Session) => session.computerEnabled && computer.supported && !researches(session)
-      const usesBrowser = (session: Session) => session.browserEnabled && !researches(session)
+      const usesComputer = (session: Session) => session.computerEnabled && computer.supported
+      const usesBrowser = (session: Session) => session.browserEnabled
 
       // One fiber per streaming assistant message. Closing the layer (app quit)
       // interrupts them all, which marks their messages `interrupted`.
@@ -382,7 +382,8 @@ export class Chat extends Context.Service<
           // Computer runs can have their own model, so a chat can talk with one and act with a faster one.
           // Runs with tools never go to the auto-router: it could pick another model at every step.
           const actingModel = request.tools ? toolModel(chatModel) : chatModel
-          const ownModel = (computerRun && settings?.computerModel) || actingModel
+          // Research needs a Claude API model throughout, so it keeps the chat's rather than the computer use model.
+          const ownModel = (computerRun && !request.research && settings?.computerModel) || actingModel
           // The newest screenshot message this run added; the one before it is dropped when it comes.
           let lastShot: ChatMessage | null = null
           // Page snapshots this run added, oldest first; all but the newest are stale.
