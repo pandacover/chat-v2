@@ -16,6 +16,7 @@ import { AppPaths } from './AppPaths'
 import { Attachments } from './Attachments'
 import { Db } from './Db'
 import { type ChatMessage, type ChatRequest, type ContentPart, OpenRouter } from './OpenRouter'
+import { RESEARCH_INSTRUCTIONS, isClaudeModel } from '../claude'
 import { Browser } from './Browser'
 import { Computer } from './Computer'
 import { SettingsStore, toolModel } from './SettingsStore'
@@ -153,7 +154,10 @@ export class Chat extends Context.Service<
       const computer = yield* Computer
       // Where each reply's time went, step by step (see timing.ts).
       const timing = timingLog(join((yield* AppPaths).root, 'timing.jsonl'), process.env.CHAT_V2_TIMING === '1')
+      // Research replies search the web on Anthropic's servers, beside the browser and computer when those are on too.
+      const researches = (session: Session) => session.researchEnabled
       const usesComputer = (session: Session) => session.computerEnabled && computer.supported
+      const usesBrowser = (session: Session) => session.browserEnabled
 
       // One fiber per streaming assistant message. Closing the layer (app quit)
       // interrupts them all, which marks their messages `interrupted`.
@@ -216,7 +220,8 @@ export class Chat extends Context.Service<
           settings.artifactsEnabled ? MOODBOARD_INSTRUCTIONS : '',
           // Computer use brings the browser along, for looking up how unfamiliar apps work.
           usesComputer(session) ? computerInstructions(process.platform === 'darwin' ? 'darwin' : 'win32', { borrowPointer: settings.computerBorrowPointer }) : '',
-          session.browserEnabled || usesComputer(session) ? BROWSER_INSTRUCTIONS : '',
+          usesBrowser(session) || usesComputer(session) ? BROWSER_INSTRUCTIONS : '',
+          researches(session) ? RESEARCH_INSTRUCTIONS : '',
           profileBlock(facts)
         ]
           .map((s) => s.trim())
@@ -238,12 +243,15 @@ export class Chat extends Context.Service<
         // rest. (Not a prefill, a request ending on the assistant's turn: newer Claude models reject
         // those, and the rest vary.)
         if (partial) messages.push({ role: 'assistant', content: summarizeSteps(partial).trimEnd() }, { role: 'user', content: CONTINUE_NOTE })
+        const chosen = assistant.model ?? session.model ?? settings.defaultModel
         const request = {
-          model: assistant.model ?? session.model ?? settings.defaultModel,
+          // Research runs on a Claude API model: the chat's, if it is one, else the one in Settings.
+          model: researches(session) && !isClaudeModel(chosen) ? settings.researchModel : chosen,
           messages,
           temperature: settings.temperature,
           ...(hasPdf ? { plugins: [{ id: 'file-parser', pdf: { engine: settings.pdfEngine } }] } : {}),
-          ...(usesComputer(session) ? { tools: [...computerTools(process.platform === 'darwin' ? 'darwin' : 'win32'), ...BROWSER_TOOLS] } : session.browserEnabled ? { tools: BROWSER_TOOLS } : {})
+          ...(researches(session) ? { research: true } : {}),
+          ...(usesComputer(session) ? { tools: [...computerTools(process.platform === 'darwin' ? 'darwin' : 'win32'), ...BROWSER_TOOLS] } : usesBrowser(session) ? { tools: BROWSER_TOOLS } : {})
         } satisfies ChatRequest as ChatRequest
         return request
       })
@@ -358,6 +366,8 @@ export class Chat extends Context.Service<
           const request = yield* buildRequest(assistant, partial)
           const chatModel = request.model
           replyModel = chatModel
+          // A research reply runs on the research model rather than the chat's, and is saved as its.
+          if (chatModel !== assistant.model) answeredBy = chatModel
           const settings = yield* settingsStore.get.pipe(Effect.orElseSucceed(() => null))
           const refs = new Map<string, string>()
           const computerRun = request.tools?.some((t) => t.function.name.startsWith('computer_')) ?? false
@@ -372,7 +382,8 @@ export class Chat extends Context.Service<
           // Computer runs can have their own model, so a chat can talk with one and act with a faster one.
           // Runs with tools never go to the auto-router: it could pick another model at every step.
           const actingModel = request.tools ? toolModel(chatModel) : chatModel
-          const ownModel = (computerRun && settings?.computerModel) || actingModel
+          // Research needs a Claude API model throughout, so it keeps the chat's rather than the computer use model.
+          const ownModel = (computerRun && !request.research && settings?.computerModel) || actingModel
           // The newest screenshot message this run added; the one before it is dropped when it comes.
           let lastShot: ChatMessage | null = null
           // Page snapshots this run added, oldest first; all but the newest are stale.

@@ -101,7 +101,9 @@ const MIGRATIONS: string[] = [
     idx integer not null,
     text text not null,
     primary key (message_id, idx)
-  ) without rowid;`
+  ) without rowid;`,
+  // Per-chat switch that researches replies on the Claude API with web search.
+  `alter table sessions add column research_enabled integer not null default 0;`
 ]
 
 /** At most this many facts are kept; past it, new ones are dropped until some are removed. */
@@ -116,6 +118,7 @@ interface SessionRow {
   forked_from_session_id: string | null
   browser_enabled: number
   computer_enabled: number
+  research_enabled: number
   pinned_at: number | null
   created_at: number
   updated_at: number
@@ -161,6 +164,7 @@ const toSession = (r: SessionRow): Session => ({
   forkedFromSessionId: r.forked_from_session_id,
   browserEnabled: r.browser_enabled === 1,
   computerEnabled: r.computer_enabled === 1,
+  researchEnabled: r.research_enabled === 1,
   pinnedAt: r.pinned_at,
   createdAt: r.created_at,
   updatedAt: r.updated_at
@@ -440,6 +444,7 @@ export const makeDb = (file: string) => {
       })
       if (source.browserEnabled) run('update sessions set browser_enabled = 1 where id = ?', fork.id)
       if (source.computerEnabled) run('update sessions set computer_enabled = 1 where id = ?', fork.id)
+      if (source.researchEnabled) run('update sessions set research_enabled = 1 where id = ?', fork.id)
       let parentId = fork.rootId
       const stored = attachmentsFor(path.map((m) => m.id))
       for (const m of path) {
@@ -622,6 +627,7 @@ export const makeDb = (file: string) => {
         systemPrompt?: string | null
         browserEnabled?: boolean
         computerEnabled?: boolean
+        researchEnabled?: boolean
         pinned?: boolean
       }
     ) => {
@@ -632,6 +638,8 @@ export const makeDb = (file: string) => {
         run('update sessions set browser_enabled = ? where id = ?', patch.browserEnabled ? 1 : 0, id)
       if (patch.computerEnabled !== undefined)
         run('update sessions set computer_enabled = ? where id = ?', patch.computerEnabled ? 1 : 0, id)
+      if (patch.researchEnabled !== undefined)
+        run('update sessions set research_enabled = ? where id = ?', patch.researchEnabled ? 1 : 0, id)
       if (patch.title !== undefined) run('update sessions set title = ? where id = ?', patch.title, id)
       if (patch.model !== undefined) run('update sessions set model = ? where id = ?', patch.model, id)
       if (patch.systemPrompt !== undefined)

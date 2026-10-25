@@ -42,7 +42,7 @@ export interface Usage {
   totalTokens: number
   cachedTokens: number
   reasoningTokens: number
-  /** OpenRouter credits charged; null when the provider did not report a cost. */
+  /** USD charged (OpenRouter credits, or Claude API list prices); null when the provider did not report a cost. */
   cost: number | null
   /** Model calls behind the reply (more than one when it used the browser). */
   requests: number
@@ -78,6 +78,8 @@ export interface Session {
   browserEnabled: boolean
   /** When on, the model can see the screen and use the mouse and keyboard (and the browser). */
   computerEnabled: boolean
+  /** When on, replies are researched on the Claude API with web search (Settings → Research), without browser or computer tools. */
+  researchEnabled: boolean
   /** When the chat was pinned to the top of the sidebar; null when it isn't. */
   pinnedAt: number | null
   createdAt: number
@@ -131,6 +133,7 @@ export interface SessionPatch {
   systemPrompt?: string | null
   browserEnabled?: boolean
   computerEnabled?: boolean
+  researchEnabled?: boolean
   pinned?: boolean
 }
 
@@ -182,6 +185,12 @@ export interface Settings {
    * chat's model. If it can't see images, the vision model steps in, then the chat's model.
    */
   computerModel: string
+  /** The Claude API model research replies run on (a `claude/` id). */
+  researchModel: string
+  /** How hard research replies think; higher finds and checks more, and costs more. */
+  researchEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+  /** The most web searches (and, separately, page reads) one research reply may make; searches are $0.01 each. */
+  researchMaxSearches: number
 }
 
 /** Something the assistant learned about an app while using it, offered again when it's in front. */
@@ -196,6 +205,7 @@ export interface SettingsView {
   settings: Settings
   hasOpenRouterKey: boolean
   hasElevenLabsKey: boolean
+  hasAnthropicKey: boolean
   configPath: string
 }
 
@@ -204,6 +214,7 @@ export interface SettingsPatch {
   /** `undefined` leaves the key untouched, `''` clears it. */
   openRouterKey?: string
   elevenLabsKey?: string
+  anthropicKey?: string
 }
 
 export interface ModelInfo {

@@ -13,7 +13,7 @@
   import ModelPicker from './ModelPicker.svelte'
 
   let form = $state<Settings>({ ...app.settings!.settings })
-  let keys = $state({ openRouterKey: '', elevenLabsKey: '' })
+  let keys = $state({ openRouterKey: '', elevenLabsKey: '', anthropicKey: '' })
   let status = $state<'idle' | 'saving' | 'saved'>('idle')
   let scroller: HTMLDivElement | undefined = $state()
   let active = $state('keys')
@@ -21,6 +21,7 @@
   const sections = [
     { id: 'keys', label: 'API keys' },
     { id: 'model', label: 'Model' },
+    { id: 'research', label: 'Research' },
     { id: 'instructions', label: 'Instructions' },
     { id: 'memory', label: 'Memory' },
     ...(window.api.computer.supported ? [{ id: 'computer', label: 'Computer use' }] : []),
@@ -63,23 +64,27 @@
 
   const keyRows = $derived([
     { id: 'openRouterKey' as const, label: 'OpenRouter', has: app.settings!.hasOpenRouterKey, link: 'https://openrouter.ai/keys', hint: 'sk-or-…', use: 'Chat replies and the model list.' },
+    { id: 'anthropicKey' as const, label: 'Claude API', has: app.settings!.hasAnthropicKey, link: 'https://platform.claude.com/settings/keys', hint: 'sk-ant-…', use: 'Claude models and research.' },
     { id: 'elevenLabsKey' as const, label: 'ElevenLabs', has: app.settings!.hasElevenLabsKey, link: 'https://elevenlabs.io/app/settings/api-keys', hint: 'Paste your key', use: 'Voice input.' }
   ])
+  const KEY_LABELS = { openRouterKey: 'OpenRouter', anthropicKey: 'Claude API', elevenLabsKey: 'ElevenLabs' }
+  type KeyId = keyof typeof KEY_LABELS
 
-  const saveKey = async (id: 'openRouterKey' | 'elevenLabsKey') => {
+  const saveKey = async (id: KeyId) => {
     const value = keys[id].trim()
     if (!value) return
     const view = await app.attempt(() => window.api.settings.update({ [id]: value }))
     if (!view) return
     app.settings = view
     keys[id] = ''
-    app.toast(`${id === 'openRouterKey' ? 'OpenRouter' : 'ElevenLabs'} key saved`, 'info')
-    if (id === 'openRouterKey') void app.loadModels()
+    app.toast(`${KEY_LABELS[id]} key saved`, 'info')
+    if (id !== 'elevenLabsKey') void app.loadModels()
   }
 
-  const clearKey = async (id: 'openRouterKey' | 'elevenLabsKey') => {
+  const clearKey = async (id: KeyId) => {
     const view = await app.attempt(() => window.api.settings.update({ [id]: '' }))
     if (view) app.settings = view
+    if (view && id === 'anthropicKey') void app.loadModels()
   }
 
   const close = () => (app.page = 'chat')
@@ -200,6 +205,12 @@
     { id: 'low', label: 'Low', hint: 'Thinks briefly before each step. The default: quick, and enough for most tasks.' },
     { id: 'medium', label: 'Medium', hint: 'Thinks longer before each step, for fiddly work in apps it finds hard.' },
     { id: 'high', label: 'High', hint: 'Thinks hardest. Each step takes noticeably longer.' }
+  ]
+  const researchEfforts = [
+    { id: 'medium', label: 'Medium', hint: 'A quick look: fewer searches, a shorter report. Often under $0.50.' },
+    { id: 'high', label: 'High', hint: 'The default: searches widely and reads the main sources. About $0.50 to $2 a report.' },
+    { id: 'xhigh', label: 'Extra', hint: 'Digs further and checks more claims against each other. About $1 to $4.' },
+    { id: 'max', label: 'Max', hint: 'No limit on thinking, for questions where getting it right matters most. Can pass $5.' }
   ]
   const themes = [
     { id: 'system', label: 'System' },
@@ -353,6 +364,29 @@
               <span class="mb-1.5 flex justify-between"><span class="font-medium text-fg">Temperature</span><span class="text-fg-2 tabular-nums">{form.temperature.toFixed(1)}</span></span>
               <input type="range" min="0" max="2" step="0.1" bind:value={form.temperature} class="w-full accent-[var(--fg-2)]" />
               <span class="mt-0.5 flex justify-between text-[11.5px] text-muted"><span>Focused</span><span>Varied</span></span>
+            </label>
+          </section>
+
+          <section id="settings-research" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
+            <h2 class="font-serif text-[20px]">Research</h2>
+            <p class="mt-1 text-muted">
+              Turn on <span class="text-fg-2">Research</span> in a chat's composer and its replies search the web, read the pages that matter, and write a report that cites
+              them. It runs on the Claude API{app.settings!.hasAnthropicKey ? '' : ', so it needs a Claude API key (above)'}.
+            </p>
+            <div class="mt-5 max-w-md">
+              <span class="mb-1.5 block font-medium text-fg">Research model</span>
+              <ModelPicker block value={form.researchModel} onchange={(id) => (form.researchModel = id)} filter={(m) => ['claude/claude-opus-5-5', 'claude/claude-fable-5-1', 'claude/claude-sonnet-5-5'].includes(m.id)} />
+              <p class="mt-1.5 text-muted">Used when the chat's own model isn't a Claude API model. Opus 5.5 suits most research; Fable 5.1 is stronger and about 2.5 times the price.</p>
+            </div>
+            <div class="mt-5 max-w-md">
+              <span class="mb-1.5 block font-medium text-fg">Depth</span>
+              {@render segmented(researchEfforts, form.researchEffort, (v) => (form.researchEffort = v as Settings['researchEffort']))}
+              <p class="mt-1.5 text-muted">{researchEfforts.find((e) => e.id === form.researchEffort)?.hint ?? 'Thinks as little as it can.'}</p>
+            </div>
+            <label class="mt-5 block max-w-md">
+              <span class="mb-1.5 flex justify-between"><span class="font-medium text-fg">Most searches per reply</span><span class="text-fg-2 tabular-nums">{form.researchMaxSearches}</span></span>
+              <input type="range" min="5" max="100" step="5" bind:value={form.researchMaxSearches} class="w-full accent-[var(--fg-2)]" />
+              <span class="mt-0.5 block text-[11.5px] text-muted">Each search is $0.01, plus the tokens of what it finds. Page reads have the same limit and cost only their tokens.</span>
             </label>
           </section>
 

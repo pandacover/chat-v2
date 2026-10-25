@@ -294,7 +294,7 @@
         {#if message.model}<span class="ml-2 truncate text-[11.5px] text-muted">{message.model}</span>{/if}
         {#if message.usage}
           <span class="px-0.5 text-[11.5px] text-muted/60" aria-hidden="true">·</span>
-          <span class="shrink-0 text-[11.5px] text-muted tabular-nums" use:tip={usageDetail(message.usage)} in:fade={{ duration: 200 }}>{usageLabel(message.usage)}</span>
+          <span class="shrink-0 text-[11.5px] text-muted tabular-nums" use:tip={usageDetail(message.usage, message.model)} in:fade={{ duration: 200 }}>{usageLabel(message.usage)}</span>
         {/if}
       </div>
     {/if}

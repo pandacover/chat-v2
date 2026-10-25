@@ -511,6 +511,34 @@ describe('chat', () => {
     await t.runtime.dispose()
   })
 
+  test('research: the reply runs on the research model with research on, and keeps the browser tools', async () => {
+    const t = setup(() => Stream.make('::step {"tool":"web_search","label":"Searched “x”","ok":true}\n', 'Report.'), undefined, [], [], {
+      titleModel: '',
+      memoryModel: '',
+      defaultModel: 'deepseek/deepseek-v4.1-flash',
+      researchModel: 'claude/claude-fable-5-1'
+    })
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { browserEnabled: true, researchEnabled: true }))))
+    await t.run(Chat.use((c) => c.send({ sessionId: s.id, parentId: s.rootId, text: 'Compare hosts', attachmentIds: [] })))
+    await t.waitForDone(1)
+
+    expect(t.requests).toHaveLength(1)
+    expect(t.requests[0]!.model).toBe('claude/claude-fable-5-1')
+    expect(t.requests[0]!.research).toBe(true)
+    expect(t.requests[0]!.tools?.map((x) => x.function.name)).toContain('browser_navigate')
+    expect(String(t.requests[0]!.messages[0]!.content)).toContain('research mode')
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    expect(view.path[1]!.message.model).toBe('claude/claude-fable-5-1')
+    expect(view.path[1]!.message.content).toContain('Report.')
+
+    // A chat already on a Claude API model keeps it; forks keep the switch.
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { model: 'claude/claude-sonnet-5-5' }))))
+    const fork = await t.run(Db.use((db) => db.use((d) => d.forkSession(s.id, view.path[1]!.message.id))))
+    expect(fork.researchEnabled).toBe(true)
+    await t.runtime.dispose()
+  })
+
   test('browser agent: a saved screenshot goes on the reply, and a recording is saved to a file', async () => {
     const log: string[] = []
     const tool = (id: string, name: string, args: object): ChatDelta => ({ type: 'tool', index: 0, id, name, args: JSON.stringify(args) })
