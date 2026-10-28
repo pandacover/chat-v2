@@ -110,11 +110,15 @@
     sit in a notch curved out of its top-right corner. The inset stays when the sidebar closes, so the chat never shifts.
   -->
   <header class="absolute top-0 right-0 z-10">
-    <svg class="pointer-events-none absolute top-0 right-0" width="104" height="49" aria-hidden="true">
-      <path d="M0 0V14.5C16 14.5 16 47.5 32 47.5H104V0Z" fill="var(--side)" />
-      <path d="M0 14.5C16 14.5 16 47.5 32 47.5H104" fill="none" stroke="var(--line)" />
+    <svg class="pointer-events-none absolute top-0 right-0" width="132" height="49" aria-hidden="true">
+      <path d="M0 0V14.5C16 14.5 16 47.5 32 47.5H132V0Z" fill="var(--side)" />
+      <path d="M0 14.5C16 14.5 16 47.5 32 47.5H132" fill="none" stroke="var(--line)" />
     </svg>
     <div class="relative mt-2 mr-2 flex items-center gap-0.5 rounded-lg p-1">
+      <button class="icon-btn relative {hasOverride ? '!text-fg' : ''}" use:tip={'Instructions for this chat'} onclick={openPrompt}>
+        <Icon name="sliders" size={16} />
+        {#if hasOverride}<span class="absolute top-1 right-1 size-1.5 rounded-full bg-fg"></span>{/if}
+      </button>
       {#if app.settings}
         {@const onTop = app.settings.settings.alwaysOnTop}
         <button
@@ -182,8 +186,6 @@
         placeholder={empty ? 'Ask anything, or drop a file' : 'Reply'}
         {model}
         onmodel={(id) => app.updateSession({ model: id })}
-        customInstructions={hasOverride}
-        oninstructions={openPrompt}
         browserEnabled={app.chat.browserEnabled}
         onbrowser={toggleBrowser}
         computerEnabled={app.chat.computerEnabled}

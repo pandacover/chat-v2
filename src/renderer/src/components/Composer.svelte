@@ -15,8 +15,6 @@
     placeholder = 'Message',
     model,
     onmodel,
-    customInstructions = false,
-    oninstructions,
     browserEnabled = false,
     onbrowser,
     computerEnabled = false,
@@ -25,8 +23,6 @@
     placeholder?: string
     model: string
     onmodel: (id: string) => void
-    customInstructions?: boolean
-    oninstructions: () => void
     browserEnabled?: boolean
     onbrowser: () => void
     computerEnabled?: boolean
@@ -380,10 +376,6 @@
       </button>
     {/if}
     <span class="ml-auto"></span>
-    <button class="icon-btn relative" use:tip={'Instructions for this chat'} onclick={oninstructions}>
-      <Icon name="sliders" size={16} />
-      {#if customInstructions}<span class="absolute top-1 right-1 size-1.5 rounded-full bg-fg"></span>{/if}
-    </button>
     <ModelPicker placement="up" value={model} onchange={onmodel} />
     <button
       class="ml-1 grid size-8 place-items-center rounded-full transition-[background-color,color,transform] duration-150 active:scale-95 {busy
