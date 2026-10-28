@@ -106,17 +106,15 @@
 
 <div class="relative flex h-full min-w-0 flex-1 flex-col">
   <!--
-    With the sidebar open the chat is inset below a thin sidebar-coloured strip, its edge carrying on from the sidebar's,
-    and these controls sit in a notch curved out of its top-right corner. With the sidebar closed they float over the chat.
+    The chat is inset below a thin sidebar-coloured strip, its edge carrying on from the sidebar's, and these controls
+    sit in a notch curved out of its top-right corner. The inset stays when the sidebar closes, so the chat never shifts.
   -->
   <header class="absolute top-0 right-0 z-10">
-    {#if app.sidebarOpen}
-      <svg class="pointer-events-none absolute top-0 right-0" width="104" height="49" aria-hidden="true">
-        <path d="M0 0V14.5C16 14.5 16 47.5 32 47.5H104V0Z" fill="var(--side)" />
-        <path d="M0 14.5C16 14.5 16 47.5 32 47.5H104" fill="none" stroke="var(--line)" />
-      </svg>
-    {/if}
-    <div class="relative mt-2 mr-2 flex items-center gap-0.5 rounded-lg p-1 {app.sidebarOpen ? '' : 'bg-side'}">
+    <svg class="pointer-events-none absolute top-0 right-0" width="104" height="49" aria-hidden="true">
+      <path d="M0 0V14.5C16 14.5 16 47.5 32 47.5H104V0Z" fill="var(--side)" />
+      <path d="M0 14.5C16 14.5 16 47.5 32 47.5H104" fill="none" stroke="var(--line)" />
+    </svg>
+    <div class="relative mt-2 mr-2 flex items-center gap-0.5 rounded-lg p-1">
       {#if app.settings}
         {@const onTop = app.settings.settings.alwaysOnTop}
         <button
@@ -140,9 +138,7 @@
   </header>
 
   <div
-    class="flex min-h-0 flex-1 flex-col bg-bg transition-[margin] duration-200 {app.sidebarOpen
-      ? 'mt-3.5 rounded-tl-xl border-t border-l border-line'
-      : ''}"
+    class="mt-3.5 flex min-h-0 flex-1 flex-col rounded-tl-xl border-t border-l border-line bg-bg"
   >
     {#if empty}<div class="flex-1"></div>{/if}
 

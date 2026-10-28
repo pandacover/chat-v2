@@ -3,7 +3,7 @@
   import { flip } from 'svelte/animate'
   import { SvelteSet } from 'svelte/reactivity'
   import type { Session } from '@shared/types'
-  import { ease, fade, fly } from '@/lib/motion'
+  import { ease, fade } from '@/lib/motion'
   import { shortcut } from '@/lib/keys'
   import { app } from '@/lib/store.svelte'
   import { theme, type ThemePref } from '@/lib/theme.svelte'
@@ -286,7 +286,12 @@
 </aside>
 
 {#if !app.sidebarOpen}
-  <div class="fixed top-2 left-2 z-30 flex items-center gap-0.5 rounded-lg bg-side p-1" in:fly={{ x: -6, duration: 180 }}>
+  <!-- A notch curved out of the chat's top-left corner, mirroring the one on the right. -->
+  <svg class="pointer-events-none fixed top-0 left-0 z-30" width="104" height="49" aria-hidden="true" in:fade={{ duration: 180 }}>
+    <path d="M104 0V14.5C88 14.5 88 47.5 72 47.5H0V0Z" fill="var(--side)" />
+    <path d="M104 14.5C88 14.5 88 47.5 72 47.5H0" fill="none" stroke="var(--line)" />
+  </svg>
+  <div class="fixed top-2 left-2 z-30 flex items-center gap-0.5 rounded-lg p-1" in:fade={{ duration: 180 }}>
     <button class="icon-btn" use:tip={{ text: 'Show sidebar', kbd: shortcut('B') }} onclick={() => (app.sidebarOpen = true)}>
       <Icon name="sidebar" size={17} />
     </button>
