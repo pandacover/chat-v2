@@ -5,7 +5,7 @@ import { parseSseLine } from '../src/main/sse'
 import { splitSteps, stepLine, summarizeSteps } from '../src/shared/steps'
 import { normalizeSettings, DEFAULT_SETTINGS } from '../src/main/services/SettingsStore'
 import { classify } from '../src/main/services/Attachments'
-import { DROPPED_SNAPSHOT, STALE_SNAPSHOT_CHARS, cleanTitle, pruneSnapshots } from '../src/main/services/Chat'
+import { DESKTOP_TRIMMED, DROPPED_SNAPSHOT, STALE_DESKTOP_CHARS, STALE_SNAPSHOT_CHARS, cleanTitle, pruneDesktop, pruneSnapshots } from '../src/main/services/Chat'
 import type { ChatMessage } from '../src/main/services/OpenRouter'
 import { clipElements } from '../src/main/agent'
 import { AD_HOSTS, adUrlPatterns } from '../src/shared/blocklist'
@@ -304,5 +304,22 @@ describe('browser snapshots', () => {
     pruneSnapshots(snaps)
     expect(all.map((m) => m.content)).toEqual([DROPPED_SNAPSHOT, DROPPED_SNAPSHOT, DROPPED_SNAPSHOT, 'newest'])
     expect(snaps.map((m) => m.content)).toEqual(['newest'])
+  })
+
+  test("old desktop results lose their window lists together once they add up, keeping what each action did", () => {
+    const windows = `Screenshot: 1280×720 pixels.\n${'- "A window" (app.exe) at 0,0 100×100\n'.repeat(80)}`
+    const result = (did: string) => ({ result: { role: 'tool', content: `${did}\n${windows}` } as ChatMessage, stale: did })
+    const runs = [result('After this action: Nothing on the screen changed.'), result('After this action: The screen changed where you clicked (10,10).')]
+    pruneDesktop(runs)
+    expect(runs).toHaveLength(2)
+    const all = [...runs, ...Array.from({ length: 4 }, (_, i) => result(`step ${i}`)), result('newest')]
+    runs.push(...all.slice(2))
+    pruneDesktop(runs)
+    expect(all[0]!.result.content).toBe(`After this action: Nothing on the screen changed.\n${DESKTOP_TRIMMED}`)
+    expect(all.at(-2)!.result.content).toBe(`step 3\n${DESKTOP_TRIMMED}`)
+    // The newest is the screen now: it keeps its windows, and stays to be cut next time.
+    expect(all.at(-1)!.result.content).toContain(windows)
+    expect(runs.map((r) => r.stale)).toEqual(['newest'])
+    expect(STALE_DESKTOP_CHARS).toBeLessThan(windows.length * 6)
   })
 })

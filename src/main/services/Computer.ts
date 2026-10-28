@@ -14,7 +14,11 @@ import {
   type OverlayCommand,
   type WindowInfo,
   appName,
+  changedNear,
+  changedRegions,
+  changedShare,
   hiddenRegions,
+  ignoreCells,
   inShot,
   makeFrame,
   parseKeys,
@@ -25,7 +29,9 @@ import {
   spoken,
   toOverlay,
   toPhysical,
-  windowAt
+  toShot,
+  windowAt,
+  windowChanges
 } from '@shared/computer'
 import type { AppTip } from '@shared/types'
 import type { ChatWindowsPort, OverlayPort, ScreenChanges, ScreenPort } from '../desktop'
@@ -38,10 +44,11 @@ import { SettingsStore } from './SettingsStore'
 /**
  * `blocked`: the guard refused, which ends the run's control. `stale`: the screen changed under
  * the action since the screenshot the model planned it on (see `thinking`), so it wasn't done.
+ * `repeat`: the same click already did nothing twice (see `misses`), so it wasn't sent again.
  */
 export class ComputerError extends Schema.TaggedError<ComputerError>()('ComputerError', {
   message: Schema.String,
-  kind: Schema.Literals(['failed', 'blocked', 'stale'])
+  kind: Schema.Literals(['failed', 'blocked', 'stale', 'repeat'])
 }) {}
 
 /** What the model gets back after looking or acting. */
@@ -53,6 +60,11 @@ export interface Look {
   settled?: boolean
   /** The driver's word on how the action went, also at the start of `text` (see `noted`). */
   note?: string
+  /**
+   * What changed since the screenshot before this one (see `compare`), also at the start of
+   * `text`: windows that opened or closed, and whether the screen changed where it acted.
+   */
+  report?: string
 }
 
 export interface Acted {
@@ -268,6 +280,36 @@ const BEGIN_MAX_MS = 400
  */
 export const HELPER_IDLE_MS = 60_000
 
+/**
+ * How close to where an action pointed a change must be for the report to say the screen changed
+ * there, in screenshot pixels: a button's own state, a caret, a menu dropping open beside it.
+ */
+export const NEAR_PX = 40
+/** Two clicks this close (screenshot pixels), with the same button and count, are the same click again. */
+export const SAME_SPOT_PX = 10
+/** The tallest a Mac's menu bar is, in points (37 on a Mac with a notch, 24 on others). */
+const MENU_BAR_PT = 40
+/** Past this share of the screen changing, an action did something, wherever it was. */
+const CHANGED_SHARE = 0.01
+/** Past this share (or with a window opening or closing), the screen is a new one: earlier clicks that did nothing are forgotten. */
+const NEW_SCREEN_SHARE = 0.05
+
+/** An action since the last look, waiting to hear what it changed (see `compare`). */
+interface Pending {
+  kind: 'click' | 'drag' | 'scroll' | 'move' | 'type' | 'keys' | 'menu' | 'switch'
+  /** Where a pointer action acted (a drag: where it dropped), in screenshot pixels. */
+  at?: { x: number; y: number }
+  /** A click's button and count, so a repeat is the same click. */
+  how?: string
+}
+
+/** A click of this reply, and whether the screen changed for it (null: it couldn't be told). */
+interface Tried {
+  at: { x: number; y: number }
+  how: string
+  changed: boolean | null
+}
+
 /** `open_app` waits at most this long, once the new window shows, for its content to stop changing. */
 export const OPEN_SETTLE_MAX_MS = 3000
 /** A starting app draws in bursts (a splash, then its window): it counts as loaded after this long still. */
@@ -341,6 +383,12 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
         let saying = ''
         /** Actions look at the screen once it has settled (see `lookAfter`). */
         let lookAfter = true
+        /** The newest screenshot, how it was made and the windows then: what the next one is compared with (see `compare`). */
+        let lastShot: { image: string; via?: string; state: DesktopState; frame: Frame } | null = null
+        /** Actions since the last look (see `compare`). */
+        let pending: Pending[] = []
+        /** This reply's clicks since the screen last changed much, for `misses`. */
+        let tried: Tried[] = []
 
         const sendSay = () => overlay.send({ type: 'say', text: saying })
 
@@ -409,6 +457,17 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
 
         const readState = Effect.flatMap(needDriver, (d) => attempt('Reading the windows', () => d.state())).pipe(timed('readState'))
 
+        const meets = (a: Rect, b: Rect) => a.x < b.x + b.w && a.y < b.y + b.h && a.x + a.w > b.x && a.y + a.h > b.y
+        /** Whether a window shows on the primary display: the only one computer use sees and works. */
+        const onMainDisplay = (w: Rect) => {
+          const d = screen.display()
+          return meets(w, { x: d.x, y: d.y, w: d.w, h: d.h })
+        }
+        const onOtherDisplay = (w: Rect) => (screen.others?.() ?? []).some((d) => meets(w, d))
+        /** For an action that brought a window forward on another display, where it can't be seen. */
+        const elsewhereNote = (w: WindowInfo | null) =>
+          w && !onMainDisplay(w) && onOtherDisplay(w) ? `${appName(w)} is on another display, where you can't see it or click in it: ask the user to move it to the main display.` : null
+
         /** `active` says what's in front instead, when that window isn't in `s` (left out of a glance). */
         const describe = (s: DesktopState, f: Frame, hidden: Hidden[], reasonOf: (w: WindowInfo) => string | null, active?: string) => {
           const screenRect = { x: f.screenX, y: f.screenY, w: f.screenW, h: f.screenH }
@@ -434,6 +493,13 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const r = shotRect(f, w)
               lines.push(`- ${w.title.trim() ? `"${clip(w.title, 80)}"` : 'A window'} (${w.exe || '?'}) at ${r.x},${r.y} ${r.w}×${r.h}`)
             }
+          }
+          // Out of the screenshot and out of reach: listed, so the model doesn't hunt for one here,
+          // or bring it forward where it can't see it.
+          const elsewhere = s.windows.filter((w) => !w.clickThrough && !onScreen(w) && w.pid !== ports.selfPid && w.title.trim() && !reasonOf(w) && onOtherDisplay(w)).slice(0, 8)
+          if (elsewhere.length) {
+            lines.push("On another display, where you can't see or click them; to work in one, ask the user to move it to the main display:")
+            for (const w of elsewhere) lines.push(`- "${clip(w.title, 80)}" (${w.exe || '?'})`)
           }
           if (hidden.length) {
             lines.push('Hidden from you (protected, painted grey). Do not try to reach these; ask the user to do anything that needs them:')
@@ -482,6 +548,88 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             return shot
           })
 
+        /** What a pointer action did, in the report. */
+        const VERBS: Partial<Record<Pending['kind'], string>> = { click: 'clicked', drag: 'dropped', scroll: 'scrolled', move: 'pointed' }
+        /** What the report says when nothing on the screen changed, by the last action's kind. */
+        const NOTHING: Partial<Record<Pending['kind'], string>> = {
+          click:
+            "The click did nothing you can see: it missed what you meant, or the app didn't take it. Don't send it again as it was. If the app may just be slow to answer, use computer_wait before trying again.",
+          type: "If you meant to type into a field, it didn't have the keyboard: click in it first.",
+          scroll: "It can't scroll further that way there, or that spot doesn't scroll.",
+          drag: 'The drag did nothing you can see. Do it another way (a menu, a shortcut, a value typed in), or ask the user to drag it.'
+        }
+
+        /**
+         * What changed since the screenshot before this one, for the model, which keeps only its
+         * newest and so can't compare them itself: windows that opened, closed or came to the
+         * front, titles that changed, and whether the screen changed where each action since then
+         * pointed (`pending`). Without that, a click that did nothing looked like one that worked,
+         * and the model sent it again and again. Clicks are noted in `tried`, for `misses`. Null
+         * when there's nothing to compare with.
+         */
+        const compare = (s: DesktopState, f: Frame, shot: { dataUrl: string; via?: string }, reasonOf: (w: WindowInfo) => string | null) =>
+          Effect.gen(function* () {
+            const acts = pending
+            pending = []
+            const before = lastShot
+            if (!before) return null
+            const windows = windowChanges(before.state, s, { screen: { x: f.screenX, y: f.screenY, w: f.screenW, h: f.screenH }, selfPid: ports.selfPid, reasonOf })
+            const comparable = screen.diff && before.via === shot.via && before.frame.shotW === f.shotW && before.frame.shotH === f.shotH
+            const raw = comparable ? yield* Effect.promise(() => screen.diff!(before.image, shot.dataUrl).catch(() => null)).pipe(timed('compare')) : null
+            // The user's pointer (in Windows' screenshots) moves on its own, and this app's own
+            // windows going away (a Mac's grey chat, after `begin`) isn't any action's doing.
+            const ignore: Rect[] = []
+            if (before.state.cursor.x !== s.cursor.x || before.state.cursor.y !== s.cursor.y) {
+              for (const c of [before.state.cursor, s.cursor]) {
+                const p = toShot(f, c.x, c.y)
+                ignore.push({ x: p.x - 8, y: p.y - 8, w: 40, h: 48 })
+              }
+            }
+            for (const w of [...before.state.windows, ...s.windows]) if (w.pid === ports.selfPid && !w.clickThrough) ignore.push(shotRect(f, w))
+            const diff = raw ? ignoreCells(raw, ignore) : null
+            const share = diff ? changedShare(diff) : 0
+            const pointed = acts.filter((a): a is Pending & { at: { x: number; y: number } } => a.at !== undefined)
+            const near = new Map(pointed.map((a) => [a, diff ? changedNear(diff, a.at.x, a.at.y, NEAR_PX) : false]))
+            // Clicks: whether they did anything, for `misses`. A screen that's a new one forgets the old misses.
+            if (windows.length || share >= NEW_SCREEN_SHARE) tried = []
+            for (const a of pointed) {
+              if (a.kind !== 'click') continue
+              const changed = windows.length > 0 || (diff ? near.get(a)! || share >= CHANGED_SHARE : null)
+              tried = [...tried, { at: a.at, how: a.how ?? '', changed }].slice(-8)
+            }
+
+            const where = (p: { x: number; y: number }) => `${Math.round(p.x)},${Math.round(p.y)}`
+            const lines = [...windows]
+            if (diff) {
+              if (share === 0 && !windows.length) {
+                const by = pointed.length ? `, not even where you ${pointed.map((a) => `${VERBS[a.kind]} (${where(a.at)})`).join(' or ')}` : ''
+                lines.push(acts.length ? `Nothing on the screen changed${by}.` : 'Nothing on the screen has changed.')
+              } else {
+                for (const a of pointed) lines.push(`${near.get(a) ? 'The screen changed' : 'Nothing changed'} where you ${VERBS[a.kind]} (${where(a.at)}).`)
+                // Changes away from the actions, largest first: what the model may want to look at.
+                // Spots of two by two cells at most (a spinner, a caret, a clock: a small icon off
+                // the grid touches four) are only summed up.
+                const away = changedRegions(diff).filter((r) => !pointed.some((a) => a.at.x >= r.x - NEAR_PX && a.at.x <= r.x + r.w + NEAR_PX && a.at.y >= r.y - NEAR_PX && a.at.y <= r.y + r.h + NEAR_PX))
+                const big = away.filter((r) => r.w * r.h > 4 * diff.cell * diff.cell)
+                if (big.length) {
+                  const listed = big.slice(0, 3).map((r) => `${r.x},${r.y} ${r.w}×${r.h}`)
+                  lines.push(`${pointed.length ? 'Elsewhere, the' : 'The'} screen changed at ${listed.join('; ')}${away.length > listed.length ? ', and in smaller places' : ''}.`)
+                } else if (away.length) {
+                  const spots = away.slice(0, 3).map((r) => where({ x: r.x + r.w / 2, y: r.y + r.h / 2 }))
+                  lines.push(`${pointed.length ? 'Elsewhere, only' : 'Only'} small spots changed (at ${spots.join('; ')}${away.length > 3 ? '; …' : ''}).`)
+                }
+              }
+              // A click, drag or scroll that changed nothing near it and nothing much elsewhere did
+              // nothing; typing did nothing only if nothing at all changed (a few letters are small).
+              const last = acts.at(-1)
+              const missed = !windows.length && share < CHANGED_SHARE && pointed.length > 0 && !pointed.some((a) => near.get(a))
+              if (last && NOTHING[last.kind] && (last.kind === 'type' ? share === 0 && !windows.length : last.at ? missed : false)) lines.push(NOTHING[last.kind]!)
+            }
+            if (!lines.length) return null
+            const head = acts.length === 0 ? 'Since your last screenshot:' : acts.length === 1 ? 'After this action:' : 'After these actions:'
+            return `${head} ${lines.join(' ')}`
+          })
+
         /**
          * Looks at the screen with `s`'s protected windows painted over. A glance passes a state
          * without the windows it left out of the capture, a fresh frame, and what's in front.
@@ -498,9 +646,12 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             const fresh = opts?.fresh ? { fresh: true, ...(opts.after !== undefined ? { after: opts.after } : {}) } : undefined
             const shot = yield* shoot({ w: f.shotW, h: f.shotH }, cover, undefined, opts?.withoutApp ? { ...fresh, withoutApp: true } : fresh)
             if (shot.w !== f.shotW || shot.h !== f.shotH) f = { ...f, shotW: shot.w, shotH: shot.h }
+            const report = yield* compare(s, f, shot, reasonOf)
             frame = f
             shown = s
-            return { image: shot.dataUrl, frame: f, text: describe(s, f, hidden, reasonOf, opts?.active) } satisfies Look
+            lastShot = { image: shot.dataUrl, ...(shot.via ? { via: shot.via } : {}), state: s, frame: f }
+            const text = describe(s, f, hidden, reasonOf, opts?.active)
+            return { image: shot.dataUrl, frame: f, text: report ? `${report}\n${text}` : text, ...(report ? { report } : {}) } satisfies Look
           })
 
         const status = (label: string) =>
@@ -567,8 +718,11 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
          * Waits for the screen to react to an action and stop changing: at least `min` ms, then
          * until two looks in a row (SETTLE_STEP_MS apart) match, at most SETTLE_MAX_MS. Says
          * whether it settled. A stream that reports its changes (macOS) ends it as soon as the
-         * screen has been still for SETTLE_QUIET_MS since the action, once the action has changed
-         * something (against `baseline`, taken before it) or `react` ms have gone by without. Where
+         * screen has been still for SETTLE_QUIET_MS since the action instead. Either way, a screen
+         * that hasn't changed since the action (against `baseline`, taken just before it) gets up
+         * to `react` ms from the action for the app to answer, so the screenshot isn't of the
+         * screen before it did: an app that draws its answer after a few frames looked still
+         * twice, and the model took the click for one that didn't happen and clicked again. Where
          * the screen can't be watched (the stream isn't up), it waits `fixed` ms instead.
          */
         const settle = (min: number, fixed: number, react = 0) =>
@@ -585,20 +739,23 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               yield* sleep(Math.max(0, fixed - (performance.now() - t)))
               return true
             }
+            // Without a look from before the action, there's nothing to wait for an answer against.
+            let reacted = from === null || w.changed(from, prev)
+            const waited = () => performance.now() - t >= react
             let still = 0
             while (performance.now() - t < SETTLE_MAX_MS) {
               if (w.stillMs) {
                 // Still since the action at the earliest: a quiet screen before it proves nothing.
                 const quiet = Math.min(w.stillMs(prev), performance.now() - t)
-                const reacted = from === null || w.changed(from, prev)
-                if (quiet >= SETTLE_QUIET_MS && (reacted || performance.now() - t >= react)) return true
+                if (quiet >= SETTLE_QUIET_MS && (reacted || waited())) return true
                 // Quiet but nothing yet: look again soon for the app's reaction.
                 yield* sleep(quiet >= SETTLE_QUIET_MS ? REPORT_POLL_MS : Math.max(10, Math.min(SETTLE_STEP_MS, SETTLE_QUIET_MS - quiet)))
               } else yield* sleep(SETTLE_STEP_MS)
               const next = yield* w.peek
               if (!next) return true
+              if (!reacted && w.changed(from, next)) reacted = true
               still = w.changed(prev, next) ? 0 : still + 1
-              if (!w.stillMs && still >= 2) return true
+              if (!w.stillMs && still >= 2 && (reacted || waited())) return true
               prev = next
             }
             return false
@@ -739,14 +896,15 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
           })
 
         /**
-         * An action is about to change the screen: marks drawn after it would be guesses. A stream
-         * that reports its changes (macOS) says where it stands now, so `settle` can tell whether
-         * the app has reacted yet.
+         * An action is about to change the screen: marks drawn after it would be guesses. A look
+         * at the screen as it stands now (Windows' probe, or the change count of a stream that
+         * reports its changes, macOS) lets `settle` tell whether the app has reacted yet. Pointer
+         * actions call it after the glide, just before the input goes.
          */
         const acting = Effect.gen(function* () {
           actedSincePlan = true
           const w = watcher()
-          baseline = w?.stillMs ? yield* w.peek : null
+          baseline = w ? yield* w.peek : null
         })
 
         const glide = (f: Frame, x: number, y: number, label: string, action?: 'click' | 'double' | 'right' | 'drag' | 'scroll' | 'type') =>
@@ -757,12 +915,29 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
             yield* sleep(GLIDE_MS).pipe(timed('glide'))
           })
 
-        /** The window a pointer action goes to; there must be one (the desktop counts). */
+        /**
+         * The window a pointer action goes to; there must be one (the desktop counts). On a Mac,
+         * the menu bar's own window belongs to the window server, so a point up there has none.
+         */
         const pointerTarget = (s: DesktopState, p: { x: number; y: number }) =>
-          Effect.flatMap(targetAt(s, p), (w) => (w ? Effect.succeed(w) : Effect.fail(fail("There's no window there to act on."))))
+          Effect.flatMap(targetAt(s, p), (w) => {
+            if (w) return Effect.succeed(w)
+            const d = screen.display()
+            if (ports.os === 'darwin' && p.y - d.y < MENU_BAR_PT * d.scale)
+              return Effect.fail(fail('That is the menu bar, which can\'t be clicked: choose its commands by name with computer_menu, e.g. ["File", "Save"].'))
+            return Effect.fail(fail("There's no window there to act on. Aim at something you can see in the screenshot, inside a window."))
+          })
 
         const staleFail = (what: string) =>
           fail(`Not done: ${what} since the screenshot you planned this on, so it would land on something you haven't seen. The screen as it is now follows; plan the next step from it.`, 'stale')
+        /**
+         * The real pointer goes only where the window the guard checked is still what the mouse
+         * would hit (the helpers check just before it moves): something that came up there since
+         * holds the action back as stale, so the model gets the screen as it is now.
+         */
+        const stillThere = Effect.catch((e: ComputerError) =>
+          e.message.includes('Something else is at that point now') ? Effect.fail(staleFail('something else came up at that point')) : Effect.fail(e)
+        )
         // #32768 is a Windows popup menu, which has no title.
         const named = (w: WindowInfo) => (w.title.trim() ? `"${clip(w.title, 60)}" (${appName(w)})` : w.cls === '#32768' ? 'a menu' : `a window of ${appName(w)}`)
 
@@ -799,6 +974,20 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
         const expect = (w: WindowInfo | null) => {
           if (w) expectedApps.add(w.pid)
         }
+
+        /**
+         * How many times this reply has clicked at about `at`, the same way, and nothing on the
+         * screen changed for it, since the screen last changed much (see `compare`). The second
+         * try goes with the real pointer where the user allows it; a third isn't sent at all.
+         */
+        const misses = (at: { x: number; y: number }, how: string) =>
+          tried.filter((t) => t.how === how && t.changed === false && Math.hypot(t.at.x - at.x, t.at.y - at.y) <= SAME_SPOT_PX).length
+
+        const repeatFail = (x: number, y: number) =>
+          fail(
+            `Not done: you clicked here (${Math.round(x)}, ${Math.round(y)}) twice already and nothing on the screen changed either time, so a third click won't either. Try another way: zoom in (computer_zoom) to see what is really at that point; double-click if it should open; use the keyboard (Tab to it, then Enter or Space); use the app's menu or a shortcut; or, if it is greyed out, first do what enables it. If you're stuck, tell the user what you tried.`,
+            'repeat'
+          )
 
         /** The sketch cursor shows where keys go: it stays where it was left. */
         const showTyping = (f: Frame, label: string) =>
@@ -878,8 +1067,13 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               screen.hold?.()
               workWindow = null
               agentAt = null
-              // The reply's glance is the screenshot its first action aims at.
-              if (glancedFor !== id) frame = null
+              pending = []
+              tried = []
+              // The reply's glance is the screenshot its first action aims at, and is compared with.
+              if (glancedFor !== id) {
+                frame = null
+                lastShot = null
+              }
               glancedFor = null
               if (marks.length) {
                 marks = []
@@ -899,6 +1093,9 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               if (owner !== id) return
               owner = null
               frame = null
+              lastShot = null
+              pending = []
+              tried = []
               workWindow = null
               agentAt = null
               afterBegin = false
@@ -1005,6 +1202,8 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               grantedBefore()
               if (!driver || !granted || (owner && owner !== id)) return null
               screen.prepare?.()
+              // A reply's first screenshot: there's nothing of its own to compare it with.
+              if (!owner) lastShot = null
               const ctx = yield* guard
               const reasonOf = (w: WindowInfo) => protectedReason(w, ctx)
               const s = yield* readState
@@ -1098,13 +1297,26 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const p = yield* toScreen(f, x, y)
               const w = yield* pointerTarget(s, p)
               yield* samePlace(s, p)
-              yield* acting
-              yield* glide(f, x, y, label, button === 'right' ? 'right' : count > 1 ? 'double' : 'click')
+              const how = `${button} ${count}`
+              const missed = misses({ x, y }, how)
+              if (missed >= 2) return yield* Effect.fail(repeatFail(x, y))
               const borrow = yield* borrowPointer
-              const note = yield* act('Clicking', () => d.click(w.hwnd, p.x, p.y, button, count, { borrow }))
+              // The same click did nothing a moment ago, perhaps because the app ignores clicks
+              // sent in the background: this one goes with the real pointer, if the user allows it.
+              const pointer = missed === 1 && borrow
+              yield* glide(f, x, y, label, button === 'right' ? 'right' : count > 1 ? 'double' : 'click')
+              yield* acting
+              const note = yield* act('Clicking', () => d.click(w.hwnd, p.x, p.y, button, count, { borrow, ...(pointer ? { pointer } : {}) })).pipe(stillThere)
+              pending.push({ kind: 'click', at: { x, y }, how })
               workWindow = w.hwnd
               expect(w)
-              return { look: noted(yield* settleAndLook(150, 550, SETTLE_REACT_MS), note), app: nameOf(w) }
+              const why =
+                missed === 0
+                  ? note
+                  : pointer
+                    ? `Your last click here changed nothing, so this one was made with the real pointer, borrowed for a moment and put back.${note ? ` ${note}` : ''}`
+                    : `Your last click here changed nothing either. Clicks reach apps without the real pointer, which some apps ignore, and the user has turned off borrowing it. Use the keyboard instead (Tab, Enter, Space, the arrow keys), or ask the user to click it.${note ? ` ${note}` : ''}`
+              return { look: noted(yield* settleAndLook(150, 550, SETTLE_REACT_MS), why), app: nameOf(w) }
             }),
 
           move: (x, y, label) =>
@@ -1113,9 +1325,10 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const p = yield* toScreen(f, x, y)
               const w = yield* pointerTarget(s, p)
               yield* samePlace(s, p)
-              yield* acting
               yield* glide(f, x, y, label)
+              yield* acting
               yield* act('Pointing', () => d.hover(w.hwnd, p.x, p.y))
+              pending.push({ kind: 'move', at: { x, y } })
               return { look: yield* settleAndLook(100, 450), app: nameOf(w) }
             }),
 
@@ -1128,14 +1341,15 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               yield* targetAt(s, b)
               yield* samePlace(s, a)
               yield* samePlace(s, b)
-              yield* acting
               yield* glide(f, from[0], from[1], label)
+              yield* acting
               const p = toOverlay(f, to[0], to[1])
               overlay.send({ type: 'cursor', x: p.x, y: p.y, label, action: 'drag' })
               agentAt = { x: to[0], y: to[1] }
               // The helper moves through the drag over about the time the overlay's cursor takes.
               const borrow = yield* borrowPointer
-              const note = yield* act('Dragging', () => d.drag(w.hwnd, a, b, { borrow }))
+              const note = yield* act('Dragging', () => d.drag(w.hwnd, a, b, { borrow })).pipe(stillThere)
+              pending.push({ kind: 'drag', at: { x: to[0], y: to[1] } })
               workWindow = w.hwnd
               expect(w)
               return { look: noted(yield* settleAndLook(150, 500, SETTLE_REACT_MS), note), app: nameOf(w) }
@@ -1147,9 +1361,11 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const p = yield* toScreen(f, x, y)
               const w = yield* pointerTarget(s, p)
               yield* samePlace(s, p)
-              yield* acting
               yield* glide(f, x, y, label, 'scroll')
-              const note = yield* act('Scrolling', () => d.wheel(w.hwnd, p.x, p.y, dx, dy))
+              yield* acting
+              const borrow = yield* borrowPointer
+              const note = yield* act('Scrolling', () => d.wheel(w.hwnd, p.x, p.y, dx, dy, { borrow })).pipe(stillThere)
+              pending.push({ kind: 'scroll', at: { x, y } })
               return { look: noted(yield* settleAndLook(120, 450, SETTLE_REACT_MS), note), app: nameOf(w) }
             }),
 
@@ -1161,6 +1377,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               yield* acting
               yield* showTyping(f, label)
               yield* act('Typing', () => d.text(text))
+              pending.push({ kind: 'type' })
               return { look: yield* settleAndLook(100, 350), app: nameOf(w) }
             }),
 
@@ -1175,6 +1392,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               yield* acting
               yield* showTyping(f, label)
               yield* act('Pressing keys', () => d.keys(vks))
+              pending.push({ kind: 'keys' })
               return { look: yield* settleAndLook(150, 450, SETTLE_REACT_MS), app: nameOf(w) }
             }),
 
@@ -1199,6 +1417,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               const s0 = yield* readState
               yield* acting
               yield* act('Opening the app', () => d.launch(found.id))
+              pending.push({ kind: 'switch' })
               // Wait for its window: a new foreground window, up to several seconds for big apps.
               // An app that was already in front only adds a window, if anything; give it a moment.
               const before = new Set(s0.windows.map((w) => w.hwnd))
@@ -1218,7 +1437,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               // A window in front that wasn't there before: the app is starting, or opened a new window.
               const launched = fg !== null && !before.has(fg.hwnd)
               const settled = yield* settleOpened(launched)
-              return { look: { ...(yield* lookNow), settled }, app: fg ? appName(fg) : found.name }
+              return { look: noted({ ...(yield* lookNow), settled }, elsewhereNote(fg)), app: fg ? appName(fg) : found.name }
             }),
 
           focusWindow: (title) =>
@@ -1237,9 +1456,10 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               }
               yield* acting
               yield* act('Switching windows', () => d.focus(w.hwnd))
+              pending.push({ kind: 'switch' })
               workWindow = w.hwnd
               expect(w)
-              return { look: yield* settleAndLook(120, 500, SETTLE_REACT_MS), app: appName(w) }
+              return { look: noted(yield* settleAndLook(120, 500, SETTLE_REACT_MS), elsewhereNote(w)), app: appName(w) }
             }),
 
           menu: (path) =>
@@ -1255,6 +1475,7 @@ export class Computer extends Context.Service<Computer, ComputerApi>()('chat-v2/
               yield* acting
               yield* showTyping(f, label)
               const note = yield* act('Choosing from the menu', () => choose(w.hwnd, path))
+              pending.push({ kind: 'menu' })
               return { look: noted(yield* settleAndLook(150, 500, SETTLE_REACT_MS), note), app: nameOf(w) }
             }),
 

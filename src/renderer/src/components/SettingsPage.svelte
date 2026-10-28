@@ -528,8 +528,9 @@
                 <span>
                   <span class="block font-medium text-fg">Borrow the pointer when needed</span>
                   <span class="block max-w-prose text-muted">
-                    Apps only follow a drag from the real mouse, so drags take your pointer for under a second and put it back. On a Mac, so do clicks in areas an app
-                    draws itself, like a video timeline. Off, your pointer is never touched, and those drags and clicks mostly won't work.
+                    Apps only follow a drag from the real mouse, so drags take your pointer for under a second and put it back. So do clicks in apps that take no
+                    other kind (on Windows, File Explorer's bars, the taskbar and Store apps; on a Mac, areas an app draws itself, like a video timeline), and a click
+                    tried again after it did nothing. Off, your pointer is never touched, and those drags and clicks mostly won't work.
                   </span>
                 </span>
               </label>

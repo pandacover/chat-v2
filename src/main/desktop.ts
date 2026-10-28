@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { BrowserWindow, app, desktopCapturer, ipcMain, nativeImage, screen, systemPreferences } from 'electron'
-import type { OverlayCommand, OverlayEvent, Rect } from '@shared/computer'
+import type { OverlayCommand, OverlayEvent, Rect, ShotDiff } from '@shared/computer'
 import { macCaptureScreen } from './macCapture'
 import type { MacNativeInput } from './macHelper'
 
@@ -19,6 +19,8 @@ export interface DisplayInfo {
 
 export interface ScreenPort {
   display(): DisplayInfo
+  /** The other displays, in the window list's physical pixels: windows there can't be seen or clicked. */
+  others?(): Rect[]
   /** Where Electron says the cursor is, in physical pixels, to check the input helper agrees. */
   cursor(): { x: number; y: number }
   /**
@@ -35,7 +37,13 @@ export interface ScreenPort {
     cover: Rect[],
     crop?: Rect,
     opts?: { fresh?: boolean; after?: number; withoutApp?: boolean }
-  ): Promise<{ dataUrl: string; w: number; h: number; ms?: Record<string, number> }>
+  ): Promise<Shot>
+  /**
+   * Where two screenshots `capture` made (JPEG data URLs of one size, made the same way: see
+   * Shot.via) differ: a grid of cells over them, each marked where enough of its pixels changed.
+   * Null when they can't be compared.
+   */
+  diff?(before: string, after: string): Promise<ShotDiff | null>
   /**
    * A small grey thumbnail of the screen as it is now, cheap enough to take every few dozen
    * milliseconds, to wait until the screen stops changing (see screenChanged in Computer.ts).
@@ -78,6 +86,20 @@ export interface ScreenPort {
   release?(): void
   /** Quitting: done capturing for good. Ends what it started (a stream, a helper process) and starts nothing again. */
   close?(): void
+}
+
+/** A screenshot from ScreenPort.capture. */
+export interface Shot {
+  dataUrl: string
+  w: number
+  h: number
+  /** How long its parts took, for timing. */
+  ms?: Record<string, number>
+  /**
+   * How it was made (the screen stream, or a fresh capture): two made differently are never
+   * compared (see ScreenPort.diff), since two scalers don't agree pixel for pixel.
+   */
+  via?: string
 }
 
 /** How the screen has changed, as a stream that reports it says (see ScreenPort.changes). */
@@ -123,6 +145,22 @@ const display = (): DisplayInfo => {
   return { x: origin.x, y: origin.y, w: Math.round(d.size.width * d.scaleFactor), h: Math.round(d.size.height * d.scaleFactor), scale: d.scaleFactor }
 }
 
+const others = (): Rect[] => {
+  const primary = screen.getPrimaryDisplay()
+  return screen
+    .getAllDisplays()
+    .filter((d) => d.id !== primary.id)
+    .map((d) => {
+      if (process.platform === 'win32') {
+        const r = screen.dipToScreenRect(null, d.bounds)
+        return { x: r.x, y: r.y, w: r.width, h: r.height }
+      }
+      // A Mac's window list is in points times the primary display's scale (see macDriver).
+      const k = primary.scaleFactor
+      return { x: d.bounds.x * k, y: d.bounds.y * k, w: d.bounds.width * k, h: d.bounds.height * k }
+    })
+}
+
 const cursor = () => {
   const p = screen.getCursorScreenPoint()
   if (process.platform === 'win32') return screen.dipToScreenPoint(p)
@@ -159,14 +197,53 @@ const captureSources: ScreenPort['capture'] = async (size, cover, crop) => {
   const t3 = performance.now()
   const dataUrl = `data:image/jpeg;base64,${image.toJPEG(75).toString('base64')}`
   const ms = { sources: t1 - t0, ...(crop ? { crop: t2 - t1 } : {}), cover: t3 - t2, encode: performance.now() - t3 }
-  return { dataUrl, w, h, ms }
+  return { dataUrl, w, h, ms, via: 'sources' }
+}
+
+/** `diff`'s grid, in screenshot pixels: a JPEG's colour blocks, so a change stays inside its cells. */
+const DIFF_CELL = 16
+/**
+ * A pixel has changed when its grey level moved this much. One picture encoded twice gives the
+ * same bytes, and JPEG noise around a change stays inside its blocks and under this.
+ */
+const DIFF_LEVEL = 40
+/** A cell has changed when this many of its pixels did: a checkbox's tick or a caret does, a stray pixel doesn't. */
+const DIFF_PIXELS = 5
+
+/** ScreenPort.diff, with nativeImage: both screenshots decoded, compared a grey level at a time. */
+export const diffShots = async (before: string, after: string): Promise<ShotDiff | null> => {
+  const a = nativeImage.createFromDataURL(before)
+  const b = nativeImage.createFromDataURL(after)
+  if (a.isEmpty() || b.isEmpty()) return null
+  const { width: w, height: h } = a.getSize()
+  const size = b.getSize()
+  if (size.width !== w || size.height !== h) return null
+  const pa = a.toBitmap()
+  const pb = b.toBitmap()
+  if (pa.length < w * h * 4 || pb.length < w * h * 4) return null
+  const cols = Math.ceil(w / DIFF_CELL)
+  const rows = Math.ceil(h / DIFF_CELL)
+  const counts = new Uint16Array(cols * rows)
+  for (let y = 0; y < h; y++) {
+    const row = Math.floor(y / DIFF_CELL) * cols
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4
+      // BGRA. Grey near enough, at four times the level: green counts twice.
+      const ga = pa[i]! + 2 * pa[i + 1]! + pa[i + 2]!
+      const gb = pb[i]! + 2 * pb[i + 1]! + pb[i + 2]!
+      if (Math.abs(ga - gb) > DIFF_LEVEL * 4) counts[row + Math.floor(x / DIFF_CELL)]!++
+    }
+  }
+  const changed = new Uint8Array(cols * rows)
+  for (let i = 0; i < counts.length; i++) changed[i] = counts[i]! >= DIFF_PIXELS ? 1 : 0
+  return { w, h, cell: DIFF_CELL, cols, rows, changed }
 }
 
 /**
  * macOS without the capture helper (see macScreen) captures fresh every time: the overlay is in
  * its captures and has to be hidden for each one (see hiddenWhile).
  */
-const sourcesScreen: ScreenPort = { display, cursor, capture: captureSources }
+const sourcesScreen: ScreenPort = { display, others, cursor, capture: captureSources, diff: diffShots }
 
 /** With nothing captured for this long, the stream closes. */
 const STREAM_IDLE_MS = 30_000
@@ -261,6 +338,7 @@ const streamedScreen = (): ScreenPort => {
 
   return {
     display,
+    others,
     cursor,
     capture: async (size, cover, crop, opts) => {
       // The stream's newest frame can predate what the caller just changed; getSources looks now,
@@ -274,10 +352,11 @@ const streamedScreen = (): ScreenPort => {
         const shot = await run<{ dataUrl: string; w: number; h: number; ms: Record<string, number> }>(
           `capture.grab(${JSON.stringify(size)}, ${JSON.stringify(cover)}, ${JSON.stringify(rel)}, ${origin.w}, ${JSON.stringify(after ?? null)})`
         )
-        if (shot) return { ...shot, ms: { stream: performance.now() - t, ...shot.ms } }
+        if (shot) return { ...shot, ms: { stream: performance.now() - t, ...shot.ms }, via: 'stream' }
       }
       return captureSources(size, cover, crop)
     },
+    diff: diffShots,
     mark: async () => (live() ? Date.now() : null),
     probe: async () => {
       if (!live()) return null
@@ -311,6 +390,8 @@ export const macScreen = (overlay: OverlayPort): ScreenPort & { input?: MacNativ
   if (process.env.CHAT_V2_CAPTURE === 'sources') return sourcesScreen
   const path = macCaptureHelper()
   return macCaptureScreen({
+    diff: diffShots,
+    others,
     // Spawned by the app, so macOS counts its screen capture as the app's (one permission, one prompt).
     spawnHelper: existsSync(path) ? () => spawn(path, [], { stdio: 'pipe' }) : null,
     display,

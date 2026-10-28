@@ -73,6 +73,11 @@ export interface FakeDesktop {
   closed: number
   /** Times the input helper was ended for being idle. */
   helperStops: number
+  /**
+   * Repaints parts of the pretend screen (screenshot pixels): later screenshots differ from
+   * earlier ones there, as `diff` sees it. Each screenshot carries how many repaints came before it.
+   */
+  paint: (rects: Array<{ x: number; y: number; w: number; h: number }>) => void
 }
 
 /** A probe thumbnail of a screen of one grey level. */
@@ -109,15 +114,21 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'da
     held: 0,
     closed: 0,
     helperStops: 0,
+    paint: (rects) => void paints.push(rects),
     ports: null as unknown as ComputerPorts
   }
   const minimised: WindowInfo[] = []
+  /** Each repaint, in order; a screenshot's image says how many it shows ("SHOT", then "SHOT-1", …). */
+  const paints: Array<Array<{ x: number; y: number; w: number; h: number }>> = []
+  const picture = () => `data:image/jpeg;base64,SHOT${paints.length ? `-${paints.length}` : ''}`
+  const version = (url: string) => Number(/-(\d+)$/.exec(url)?.[1] ?? 0)
   d.ports = {
     selfPid: SELF_PID,
     os,
     driver: {
       state: async () => structuredClone(d.state),
-      click: async (hwnd, x, y, button, count) => void d.input.push(`click ${hwnd} ${Math.round(x)},${Math.round(y)} ${button}${count > 1 ? ` x${count}` : ''}`),
+      click: async (hwnd, x, y, button, count, opts) =>
+        void d.input.push(`${opts?.pointer ? 'pointer click' : 'click'} ${hwnd} ${Math.round(x)},${Math.round(y)} ${button}${count > 1 ? ` x${count}` : ''}`),
       hover: async (hwnd, x, y) => void d.input.push(`hover ${hwnd} ${Math.round(x)},${Math.round(y)}`),
       drag: async (hwnd, a, b, opts) => void d.input.push(`${opts?.borrow ? 'pointer drag' : 'drag'} ${hwnd} ${Math.round(a.x)},${Math.round(a.y)} to ${Math.round(b.x)},${Math.round(b.y)}`),
       wheel: async (hwnd, x, y, dx, dy) => void d.input.push(`wheel ${hwnd} ${Math.round(x)},${Math.round(y)} ${dx},${dy}`),
@@ -153,7 +164,21 @@ export const fakeDesktop = (windows: WindowInfo[] = [win({})], os: 'win32' | 'da
           ...(opts?.withoutApp ? { withoutApp: true as const } : {})
         })
         // Made-up part timings, so tests can see them reach the timing log.
-        return { dataUrl: 'data:image/jpeg;base64,SHOT', w: size.w, h: size.h, ms: { sources: 3, cover: 1, encode: 2 } }
+        return { dataUrl: picture(), w: size.w, h: size.h, ms: { sources: 3, cover: 1, encode: 2 } }
+      },
+      // The cells under the repaints between two screenshots, on a 16-pixel grid as in the app.
+      diff: async (before, after) => {
+        const [w, h, cell] = [1280, 720, 16]
+        const cols = w / cell
+        const changed = new Uint8Array(cols * (h / cell))
+        for (const rects of paints.slice(version(before), version(after))) {
+          for (const r of rects) {
+            for (let y = Math.max(0, Math.floor(r.y / cell)); y < Math.min(h / cell, Math.ceil((r.y + r.h) / cell)); y++) {
+              for (let x = Math.max(0, Math.floor(r.x / cell)); x < Math.min(cols, Math.ceil((r.x + r.w) / cell)); x++) changed[y * cols + x] = 1
+            }
+          }
+        }
+        return { w, h, cell, cols, rows: h / cell, changed }
       },
       // A Mac's stream reports its own changes, and leaves this app (overlay and chat) out.
       ...(os === 'darwin' && opts.stream

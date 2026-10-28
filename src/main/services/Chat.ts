@@ -51,6 +51,27 @@ export const pruneSnapshots = (snapshots: ChatMessage[]) => {
   snapshots.splice(0, stale.length)
 }
 
+/**
+ * How much of earlier desktop results' window lists a run carries before they're cut. Every
+ * action's result lists the windows as they were then; only the newest is the screen now, and a
+ * long run piled up dozens of old ones. Cut in a batch, as snapshots are, to keep the cache.
+ */
+export const STALE_DESKTOP_CHARS = 16000
+export const DESKTOP_TRIMMED = '[The window list from then is left out.]'
+
+/**
+ * Cuts every desktop result but the newest down to how it went and what it changed (`stale`),
+ * once together they pass STALE_DESKTOP_CHARS. The model keeps the run's history of what each
+ * action did, which is what tells it when it's going round in circles.
+ */
+export const pruneDesktop = (results: Array<{ result: ChatMessage; stale: string }>) => {
+  const old = results.slice(0, -1)
+  const chars = old.reduce((n, r) => n + (typeof r.result.content === 'string' ? r.result.content.length : 0), 0)
+  if (chars <= STALE_DESKTOP_CHARS) return
+  for (const r of old) r.result.content = `${r.stale}\n${DESKTOP_TRIMMED}`
+  results.splice(0, old.length)
+}
+
 /** Continuing a reply: the partial reply goes back as the assistant's turn, and this asks for the rest. */
 export const CONTINUE_NOTE =
   "Your reply above was cut off. Continue it from exactly where it stopped: don't repeat anything you already wrote, don't start over, and don't say that you are continuing."
@@ -377,6 +398,8 @@ export class Chat extends Context.Service<
           let lastShot: ChatMessage | null = null
           // Page snapshots this run added, oldest first; all but the newest are stale.
           const snapshots: ChatMessage[] = []
+          // Desktop results this run added, oldest first, with what each is cut to once stale.
+          const desktopResults: Array<{ result: ChatMessage; stale: string }> = []
           // The screen comes with the first request, so the model can act on its first step rather
           // than spend a round trip asking for a screenshot. This only looks: the chat window stays
           // up (left out of the capture on Windows, painted grey on a Mac) until the first computer
@@ -503,6 +526,7 @@ export class Chat extends Context.Service<
               const result: ChatMessage = { role: 'tool', tool_call_id: call.id, content: outcome.text }
               request.messages.push(result)
               if (outcome.snapshot) snapshots.push(result)
+              if (desktop && outcome.stale !== undefined) desktopResults.push({ result, stale: outcome.stale })
               // Of the desktop, only the screen after the last action goes back: an earlier one would
               // show a screen that is gone, and the model could take it for the current one.
               if (outcome.image && desktop && call.function.name !== 'computer_zoom') {
@@ -516,6 +540,7 @@ export class Chat extends Context.Service<
             }
             if (halt !== null) return yield* emit(halt)
             pruneSnapshots(snapshots)
+            pruneDesktop(desktopResults)
             if (screen) images.push({ url: screen.url, desktop: true })
             // Tool results are text-only on most providers, so screenshots follow as a user turn.
             if (images.length > 0) {

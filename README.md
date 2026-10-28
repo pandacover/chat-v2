@@ -49,7 +49,7 @@ For tests, `OPENROUTER_BASE_URL` and `ELEVENLABS_BASE_URL` point the app at a mo
 
 ## Computer use
 
-Turn on **Computer** in the composer. The model sees the main screen and works in your apps with its own cursor. It clicks and types without moving your mouse. Drags borrow the pointer for under a second. A tag beside its cursor says what it is doing, and it can draw marks on the screen to show you where things are. **Stop** in the bar at the top of the screen ends the run.
+Turn on **Computer** in the composer. The model sees the main screen and works in your apps with its own cursor. It clicks and types without moving your mouse where it can. Where an app only answers the real mouse (drags, and clicks or scrolls in some apps), it borrows the pointer for under a second and puts it back. After every action the model is told what changed on screen, so a click that did nothing isn't sent again and again. A tag beside its cursor says what it is doing, and it can draw marks on the screen to show you where things are. **Stop** in the bar at the top of the screen ends the run.
 
 A guard in `src/shared/computer.ts` checks every action. It hides system settings, security prompts, terminals, password managers, and chat-v2 itself from the model, and refuses input to them. You can add apps in Settings. A refused step ends the reply and asks you to do that step yourself.
 

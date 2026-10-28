@@ -298,6 +298,130 @@ export const hiddenRegions = (windows: WindowInfo[], reasonOf: (w: WindowInfo) =
   return out
 }
 
+// --- What an action changed ----------------------------------------------------------------
+
+/**
+ * Where two screenshots of the same size differ, as a grid of cells over them (see
+ * ScreenPort.diff). The model keeps only its newest screenshot, so it can't compare one with the
+ * one before: this is how it hears whether an action did anything, and where.
+ */
+export interface ShotDiff {
+  /** The screenshots' size, in their pixels. */
+  w: number
+  h: number
+  /** Cell size, in screenshot pixels. */
+  cell: number
+  cols: number
+  rows: number
+  /** One flag per cell, row by row: 1 where it changed. */
+  changed: Uint8Array
+}
+
+const cellRect = (d: ShotDiff, i: number): Rect => {
+  const x = (i % d.cols) * d.cell
+  const y = Math.floor(i / d.cols) * d.cell
+  return { x, y, w: Math.min(d.cell, d.w - x), h: Math.min(d.cell, d.h - y) }
+}
+const overlaps = (a: Rect, b: Rect) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+
+/** The diff without the cells under `ignore` (the user's own pointer, which moves on its own). */
+export const ignoreCells = (d: ShotDiff, ignore: Rect[]): ShotDiff => {
+  if (!ignore.length) return d
+  const changed = d.changed.slice()
+  for (let i = 0; i < changed.length; i++) if (changed[i] && ignore.some((r) => overlaps(cellRect(d, i), r))) changed[i] = 0
+  return { ...d, changed }
+}
+
+/** Whether anything changed within `radius` screenshot pixels of a point. */
+export const changedNear = (d: ShotDiff, x: number, y: number, radius: number) => {
+  const box = { x: x - radius, y: y - radius, w: radius * 2, h: radius * 2 }
+  for (let i = 0; i < d.changed.length; i++) if (d.changed[i] && overlaps(cellRect(d, i), box)) return true
+  return false
+}
+
+/** The share of the screenshot that changed, 0 to 1. */
+export const changedShare = (d: ShotDiff) => {
+  let n = 0
+  for (const c of d.changed) n += c
+  return d.changed.length ? n / d.changed.length : 0
+}
+
+/** The changed areas: bounding boxes of cells that touch (corners count), largest first. */
+export const changedRegions = (d: ShotDiff): Rect[] => {
+  const seen = new Uint8Array(d.changed.length)
+  const out: Array<Rect & { cells: number }> = []
+  for (let start = 0; start < d.changed.length; start++) {
+    if (!d.changed[start] || seen[start]) continue
+    let [c0, r0, c1, r1, cells] = [d.cols, d.rows, -1, -1, 0]
+    const stack = [start]
+    seen[start] = 1
+    while (stack.length) {
+      const i = stack.pop()!
+      const c = i % d.cols
+      const r = Math.floor(i / d.cols)
+      ;[c0, r0, c1, r1, cells] = [Math.min(c0, c), Math.min(r0, r), Math.max(c1, c), Math.max(r1, r), cells + 1]
+      for (let dr = -1; dr <= 1; dr++) {
+        for (let dc = -1; dc <= 1; dc++) {
+          const nc = c + dc
+          const nr = r + dr
+          const j = nr * d.cols + nc
+          if (nc < 0 || nr < 0 || nc >= d.cols || nr >= d.rows || seen[j] || !d.changed[j]) continue
+          seen[j] = 1
+          stack.push(j)
+        }
+      }
+    }
+    const x = c0 * d.cell
+    const y = r0 * d.cell
+    out.push({ x, y, w: Math.min(d.w, (c1 + 1) * d.cell) - x, h: Math.min(d.h, (r1 + 1) * d.cell) - y, cells })
+  }
+  return out.sort((a, b) => b.cells - a.cells).map(({ cells: _, ...r }) => r)
+}
+
+/**
+ * How the windows changed between two looks, in a few plain lines: what opened (and whether it
+ * took the front), what closed, what came to the front, and titles that changed (a document
+ * that now has unsaved changes, a page that loaded). Only windows on the screen in `screen`
+ * (physical pixels) count, and never this app's own (`selfPid`); a protected one is named only
+ * by why it's protected.
+ */
+export const windowChanges = (
+  before: DesktopState,
+  after: DesktopState,
+  opts: { screen: Rect; selfPid: number; reasonOf: (w: WindowInfo) => string | null; max?: number }
+): string[] => {
+  const counts = (w: WindowInfo) => !w.clickThrough && w.pid !== opts.selfPid && overlaps(w, opts.screen)
+  // Menus have no title: #32768 is a Windows popup menu, and layer 101 a Mac's pop-up menu level.
+  const menu = (w: WindowInfo) => w.cls === '#32768' || w.cls === 'layer 101'
+  const titled = (w: WindowInfo) => w.title.trim() !== '' || menu(w)
+  const name = (w: WindowInfo) => {
+    const reason = opts.reasonOf(w)
+    if (reason) return `a protected window (${reason})`
+    if (menu(w)) return 'a menu'
+    return `"${w.title.trim().length > 60 ? `${w.title.trim().slice(0, 60)}…` : w.title.trim()}" (${w.exe || 'an app'})`
+  }
+  const was = new Map(before.windows.filter(counts).map((w) => [w.hwnd, w]))
+  const now = new Map(after.windows.filter(counts).map((w) => [w.hwnd, w]))
+  const lines: string[] = []
+  for (const w of now.values()) {
+    if (was.has(w.hwnd) || !titled(w)) continue
+    lines.push(`${name(w)} opened${w.hwnd === after.foreground ? ' and is in front' : ''}.`)
+  }
+  for (const w of was.values()) if (!now.has(w.hwnd) && titled(w)) lines.push(`${name(w)} closed.`)
+  // Only from another counted window: after this app's chat leaves the front (its first action),
+  // what comes forward is just what was under it.
+  const front = now.get(after.foreground)
+  if (front && after.foreground !== before.foreground && was.has(front.hwnd) && was.has(before.foreground) && titled(front)) lines.push(`${name(front)} came to the front.`)
+  for (const w of now.values()) {
+    const old = was.get(w.hwnd)
+    if (!old || old.title.trim() === w.title.trim() || opts.reasonOf(w) || opts.reasonOf(old)) continue
+    if (!old.title.trim() || !w.title.trim()) continue
+    lines.push(`${name(old)} is now titled "${w.title.trim().length > 60 ? `${w.title.trim().slice(0, 60)}…` : w.title.trim()}".`)
+  }
+  const max = opts.max ?? 5
+  return lines.length > max ? [...lines.slice(0, max - 1), `…and ${lines.length - max + 1} more window changes.`] : lines
+}
+
 /**
  * A short name for a window's app, from its title: the part naming the exe ("DaVinci Resolve"
  * for Resolve.exe, wherever it sits), else the last part ("notes.txt - Notepad"), else the exe.

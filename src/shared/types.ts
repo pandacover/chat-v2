@@ -168,8 +168,10 @@ export interface Settings {
   computerProtected: string[]
   /**
    * Lets computer use borrow the real pointer for a moment where nothing else works: drags (apps
-   * follow a drag only from the real mouse) and, on a Mac, clicks in areas an app draws itself.
-   * Off, the pointer is never touched and those drags and clicks mostly don't happen.
+   * follow a drag only from the real mouse), clicks and scrolls in apps that ignore any other kind
+   * (on Windows, UWP, WinUI, XAML islands and WPF; on a Mac, areas an app draws itself), and a click
+   * tried again after it changed nothing. Off, the pointer is never touched and those drags and
+   * clicks mostly don't happen.
    */
   computerBorrowPointer: boolean
   /**

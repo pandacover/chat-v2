@@ -14,7 +14,8 @@ export const MAX_BATCH = 12
 
 /** What the model is told about computer use, for the system it runs on. */
 export const computerInstructions = (os: DesktopOs, opts: { borrowPointer: boolean } = { borrowPointer: true }) => `Computer mode is on: you can see and use the user's computer (the primary display) with the computer_* tools, and the user expects you to. They watch a sketched cursor make each move; it isn't in your screenshots.${os === 'win32' ? " The user's own mouse pointer can be; it isn't yours, so pay it no attention." : ''}
-- Your pointer is your own: clicks and scrolls go straight to the app under the point, and the user's mouse stays theirs (they may be using it while you work). ${opts.borrowPointer ? "Drags are the exception: apps only follow a drag from the real mouse, so computer_drag borrows the user's pointer for under a second and puts it back." : "Drags are delivered the same way, and many apps ignore them; if a drag changes nothing, find another way (menus, shortcuts, typing a value) or ask the user to drag."} Some apps ignore clicks delivered this way, games especially. If a click changes nothing in the next screenshot, don't click again: use the keyboard (Tab, arrow keys, Enter, Escape, the app's shortcuts). Keys and typing go to the app you last clicked in, which comes to the front first.
+- Your pointer is your own: clicks and scrolls go straight to the app under the point, and the user's mouse stays theirs (they may be using it while you work). ${opts.borrowPointer ? "Where an app only follows the real mouse (drags, and clicks in some apps), your action borrows the user's pointer for under a second and puts it back." : "Drags are delivered the same way, and many apps ignore them, as some ignore clicks; if a drag changes nothing, find another way (menus, shortcuts, typing a value) or ask the user to drag."} Keys and typing go to the app you last clicked in, which comes to the front first.
+- Each result starts with what your action changed since the screenshot before it: windows that opened, closed or came to the front, and whether the screen changed where you clicked. Believe it over what you expected to happen. When it says nothing changed, the action didn't work: don't send it again as it was. Zoom in (computer_zoom) to check what is really at that point, then try another way: the keyboard (Tab, arrow keys, Enter, Space, Escape, the app's shortcuts), a menu, a double-click, or scrolling the target into view. A click at the same spot that did nothing goes once more a different way at most; a third time it is held back.
 - Do the work yourself, start to finish, in this reply. When the user gives a task, carry it out with the cursor. When they ask how to do something on their computer ("how do I change the camera in Brawlhalla?"), go there yourself: open the app, click through the menus, and stop at the setting with it marked, then explain the path. Don't describe steps you could take, and don't stop to ask whether to go on; only ask when the request is unclear or the next step is hard to undo. If they asked for a particular value, set it.
 - The user's message comes with the screen as it is now, so start working from it. If it has no screenshot it says why, and you still don't start with computer_screenshot: your first action's result includes a screenshot, taken after this chat minimises. Start with computer_open_app or computer_focus_window if the app you need is in the window list or installed; only otherwise call computer_screenshot.
 - Your actions return a screenshot and the list of windows, taken once the screen has stopped changing: that is the screen after your last action, so don't call computer_screenshot to check it. When something needs time to finish (an app starting, a page or file loading, a render), call computer_wait with the longest it should take: it returns as soon as the screen changes and settles, so you see the result the moment it's there, and waits that long only if nothing changes. Call computer_screenshot only when the screen may have changed on its own since the last one (a video playing). Give coordinates in screenshot pixels, aimed at the centre of what you mean.
@@ -33,7 +34,7 @@ export const computerInstructions = (os: DesktopOs, opts: { borrowPointer: boole
 
 /** What changes on a Mac, where clicks go through Accessibility and only the real pointer can drag. */
 const macNotes = (borrowPointer: boolean) => `- This computer is a Mac: shortcuts use Cmd, not Ctrl (Cmd+C, Cmd+S, Cmd+, for an app's settings, Cmd+Tab to switch apps).
-- computer_menu chooses any menu-bar command by name (["Timeline", "Add Transition"]); the menu bar itself can't be clicked. Clicks press buttons, list rows, tabs, links and fields through Accessibility, and each result says how the click went: when it says the click may not have happened, believe the screenshot.
+- computer_menu chooses any menu-bar command by name (["Timeline", "Add Transition"]); the menu bar itself can't be clicked. Clicks press buttons, list rows, tabs, links and fields through Accessibility, and each result says how the click went and what it changed: when it says the click may not have happened, believe that.
 ${
   borrowPointer
     ? "- Areas an app draws itself (video and audio timelines, canvases, viewers) don't respond to Accessibility; clicks there borrow the user's pointer for a moment, as drags do, so clicking clips on a timeline and dragging between panels work."
@@ -45,7 +46,7 @@ const tool = (name: string, description: string, parameters: object): ToolDefini
 
 const num = { type: 'number' }
 const label = { type: 'string', description: 'What you are pointing at, in a few words (shown to the user), e.g. "Export button"' }
-const color = { type: 'string', enum: [...MARK_COLORS], description: 'Default red' }
+const color = { type: 'string', enum: [...MARK_COLORS], description: 'Default red. Black barely shows on a dark screen: use it only on light ones.' }
 const pair = { type: 'array', items: num, minItems: 2, maxItems: 2 }
 /** What the cursor says to the user while the action runs (see Computer.say). */
 const say = { type: 'string', description: 'One short sentence for the user, shown beside your cursor while this runs: what you are doing and why. Plain words, no Markdown.' }
@@ -225,9 +226,11 @@ export const readMarks = (raw: unknown): MarkInput[] => {
 }
 
 const describeLook = (look: Look) => `${look.text}\nThe screenshot follows as an image.`
-/** An action's result when a later one in the same turn sends the screen instead. */
+/** An action's result when a later one in the same turn sends the screen instead: how it went, and what it changed. */
 const briefActed = (look: Look) =>
-  [look.note, 'Done. The screenshot after your last action in this turn follows instead of this one.'].filter(Boolean).join('\n')
+  [look.note, look.report, 'Done. The screenshot after your last action in this turn follows instead of this one.'].filter(Boolean).join('\n')
+/** A result once later steps have shown the screen since: how it went and what it changed, without the windows then. */
+const staleActed = (look: Look) => [look.note, look.report].filter(Boolean).join('\n') || 'Done.'
 /** After an action the model is told the screenshot is already the result, so it doesn't ask for another. */
 const describeActed = (look: Look) =>
   `${look.text}\nThe screenshot after this action follows as an image. ${look.settled === false ? 'The screen was still changing when it was taken (something loading or moving); if you need it finished, use computer_wait.' : 'It is current: it was taken once the screen stopped changing.'}`
@@ -268,13 +271,19 @@ const runOne = (computer: ComputerApi, name: string, args: Record<string, any>):
   const acted = (label: (app: string) => string, effect: Effect.Effect<Acted, ComputerError>) =>
     Effect.map(effect, ({ look, app }) => {
       const step = { tool: name, label: label(app), ok: true }
-      return (looked(look) ? { text: describeActed(look), image: look.image, brief: briefActed(look), step } : { text: look.note ?? 'Done.', step }) satisfies ToolOutcome
+      return (looked(look) ? { text: describeActed(look), image: look.image, brief: briefActed(look), stale: staleActed(look), step } : { text: look.note ?? 'Done.', step }) satisfies ToolOutcome
     })
 
   const run: Effect.Effect<ToolOutcome, ComputerError> = (() => {
     switch (name) {
       case 'computer_screenshot':
-        return Effect.map(computer.look('Looking at the screen'), (look) => ({ text: describeLook(look), image: look.image, brief: briefActed(look), step: { tool: name, label: 'Looked at the screen', ok: true } }))
+        return Effect.map(computer.look('Looking at the screen'), (look) => ({
+          text: describeLook(look),
+          image: look.image,
+          brief: briefActed(look),
+          stale: look.report ?? 'Looked at the screen.',
+          step: { tool: name, label: 'Looked at the screen', ok: true }
+        }))
       case 'computer_zoom':
         return Effect.map(computer.zoom(finite(args.x), finite(args.y), finite(args.w), finite(args.h)), (z) => ({
           text: `${z.text}\nThe close-up follows as an image.`,
@@ -338,7 +347,13 @@ const runOne = (computer: ComputerApi, name: string, args: Record<string, any>):
           const took = `${Number((ms / 1000).toFixed(1))}s`
           const step = { tool: name, label: `Waited ${took}`, ok: true }
           if (!looked(look)) return { text: waitedText(took, end), step }
-          return { text: `${waitedText(took, end)}\n${describeLook(look)}`, image: look.image, brief: `${waitedText(took, end)}\n${briefActed(look)}`, step }
+          return {
+            text: `${waitedText(took, end)}\n${describeLook(look)}`,
+            image: look.image,
+            brief: `${waitedText(took, end)}\n${briefActed(look)}`,
+            stale: [waitedText(took, end), look.report].filter(Boolean).join('\n'),
+            step
+          }
         })
       }
       case 'computer_save_tip':
@@ -352,26 +367,32 @@ const runOne = (computer: ComputerApi, name: string, args: Record<string, any>):
   })()
 
   return run.pipe(
-    Effect.catch((e: ComputerError) =>
+    Effect.catch((e: ComputerError): Effect.Effect<ToolOutcome> =>
       e.kind === 'stale'
         ? // The screen changed under the action: the model gets it as it is now, to plan again from.
           computer.look('Looking again').pipe(
-            Effect.map((look) => ({ text: `${e.message}\n${describeLook(look)}`, image: look.image, step: staleStep(name, e.message) }) satisfies ToolOutcome),
+            Effect.map(
+              (look) =>
+                ({ text: `${e.message}\n${describeLook(look)}`, image: look.image, stale: [e.message, look.report].filter(Boolean).join('\n'), step: staleStep(name, e.message) }) satisfies ToolOutcome
+            ),
             Effect.orElseSucceed(() => ({ text: e.message, step: staleStep(name, e.message) }) satisfies ToolOutcome)
           )
-        : Effect.succeed({
-        text: e.kind === 'failed' ? `Error: ${e.message}` : e.message,
-        step: {
-          tool: name,
-          label: e.kind === 'blocked' ? 'Stopped at a protected app' : `${name.replace('computer_', '').replace('_', ' ')} failed`,
-          ok: false,
-          detail: clip(e.message, 160)
-        },
-        // A refusal ends the run so the model can't keep probing for a way in.
-        ...(e.kind === 'failed'
-          ? {}
-          : { halt: `I stopped here: ${e.message.replace(/^Blocked: /, '').replace(/ Don't look for another way in; ask the user[^.]*\./, '')} You'll need to do this step yourself.` })
-      } satisfies ToolOutcome)
+        : e.kind === 'repeat'
+          ? // The same click did nothing twice: the model has the screen, and needs another way.
+            Effect.succeed({ text: e.message, step: { tool: name, label: 'Held back a click that already did nothing twice', ok: false } } satisfies ToolOutcome)
+          : Effect.succeed({
+              text: e.kind === 'failed' ? `Error: ${e.message}` : e.message,
+              step: {
+                tool: name,
+                label: e.kind === 'blocked' ? 'Stopped at a protected app' : `${name.replace('computer_', '').replace('_', ' ')} failed`,
+                ok: false,
+                detail: clip(e.message, 160)
+              },
+              // A refusal ends the run so the model can't keep probing for a way in.
+              ...(e.kind === 'failed'
+                ? {}
+                : { halt: `I stopped here: ${e.message.replace(/^Blocked: /, '').replace(/ Don't look for another way in; ask the user[^.]*\./, '')} You'll need to do this step yourself.` })
+            } satisfies ToolOutcome)
     )
   )
 }
@@ -431,6 +452,7 @@ const runBatch = (computer: ComputerApi, raw: unknown): Effect.Effect<ToolOutcom
     return {
       text: screen ? `${head}\n${screen.text}` : head,
       ...(screen ? { image: screen.image, brief: `${head}\nThe screenshot after your last action in this turn follows instead of this one.` } : {}),
+      stale: [head, last?.stale].filter((s) => s && s !== 'Done.').join('\n'),
       step,
       steps
     } satisfies ToolOutcome
