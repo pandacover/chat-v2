@@ -168,14 +168,15 @@
       </div>
 
       {#if !pinned && !empty}
-        <button
-          class="absolute bottom-3 left-1/2 grid size-8 -translate-x-1/2 place-items-center rounded-full bg-surface text-fg-2 shadow-float hover:text-fg"
-          use:tip={'Jump to latest'}
-          transition:fly={{ y: 6, duration: 160 }}
-          onclick={() => toBottom('smooth')}
-        >
-          <Icon name="arrowDown" size={15} />
-        </button>
+        <!-- Centred by a wrapper so the fly transition's transform doesn't fight the centring. -->
+        <div class="pointer-events-none absolute inset-x-0 bottom-4 z-10 flex justify-center" transition:fly={{ y: 6, duration: 160 }}>
+          <button
+            class="pointer-events-auto flex h-8 items-center gap-1.5 rounded-full bg-surface pr-3.5 pl-3 text-[12.5px] text-fg-2 shadow-[0_0_0_1px_var(--line),var(--shadow)] transition-colors hover:text-fg"
+            onclick={() => toBottom('smooth')}
+          >
+            <Icon name="arrowDown" size={14} /> Scroll to end
+          </button>
+        </div>
       {/if}
     </div>
 

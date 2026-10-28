@@ -5,7 +5,7 @@
   import { CALL_TOKENS, callCost } from '@shared/estimates'
   import { money } from '@/lib/pricing'
   import { CODE_FONTS, READING_FONTS, READING_SIZES, UI_FONTS, appearance, type FontOption, type ReadingSize } from '@/lib/appearance.svelte'
-  import { fade, fly } from '@/lib/motion'
+  import { fade, pop } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
   import { theme, type ThemePref } from '@/lib/theme.svelte'
   import Icon from './Icon.svelte'
@@ -253,19 +253,16 @@
   </div>
 {/snippet}
 
-<section class="absolute inset-0 z-20 flex flex-col bg-side" aria-label="Settings" in:fly={{ y: 8, duration: 220 }} out:fade={{ duration: 120 }}>
-  <div
-    class="flex min-h-0 flex-1 flex-col bg-bg transition-[margin] duration-200 {app.sidebarOpen
-      ? 'mt-3.5 rounded-tl-xl border-t border-l border-line'
-      : ''}"
-  >
-    <header class="flex h-12 shrink-0 items-center gap-2 pr-4 {app.sidebarOpen ? 'pl-3' : 'pl-20'}">
-      <button class="flex items-center gap-1 rounded-md py-1 pr-2.5 pl-1.5 text-[13px] text-fg-2 hover:bg-hover hover:text-fg" onclick={close}>
-        <Icon name="chevronLeft" size={15} /> Back to chat
-      </button>
-      <span class="ml-auto text-[12px] text-muted" aria-live="polite">
+<div class="fixed inset-0 z-50 grid place-items-center p-6" role="dialog" aria-modal="true" aria-label="Settings">
+  <button class="absolute inset-0 bg-scrim" aria-label="Close settings" transition:fade={{ duration: 150 }} onclick={close}></button>
+  <section class="relative flex h-full max-h-[780px] w-full max-w-[920px] flex-col overflow-hidden rounded-xl bg-bg shadow-[0_0_0_1px_var(--line),var(--shadow)]" transition:pop>
+    <header class="flex h-12 shrink-0 items-center gap-2 pr-2 pl-4">
+      <span class="text-[12px] text-muted" aria-live="polite">
         {#if status === 'saving'}<span in:fade>Saving…</span>{:else if status === 'saved'}<span class="flex items-center gap-1" in:fade><Icon name="check" size={12} /> Saved</span>{/if}
       </span>
+      <button class="icon-btn ml-auto" use:tip={'Close'} aria-label="Close settings" onclick={close}>
+        <Icon name="x" size={16} />
+      </button>
     </header>
 
     <div bind:this={scroller} {onscroll} class="min-h-0 flex-1 overflow-y-auto">
@@ -701,5 +698,5 @@
         </div>
       </div>
     </div>
-  </div>
-</section>
+  </section>
+</div>

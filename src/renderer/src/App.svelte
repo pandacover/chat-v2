@@ -124,11 +124,11 @@
           </div>
         {/if}
       </div>
-      {#if app.page === 'settings' && app.settings}
-        <SettingsPage />
-      {/if}
     </main>
   </div>
+  {#if app.page === 'settings' && app.settings}
+    <SettingsPage />
+  {/if}
 {/if}
 
 

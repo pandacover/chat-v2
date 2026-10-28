@@ -57,7 +57,7 @@ class AppState {
   imageModels = $state<ModelInfo[]>([])
   imageModelsError = $state<string | null>(null)
   artifact = $state<OpenArtifact | null>(null)
-  /** Settings is a page over the chat; the chat stays mounted so drafts and scroll survive. */
+  /** Settings is a modal over the chat; the chat stays mounted so drafts and scroll survive. */
   page = $state<'chat' | 'settings'>('chat')
 
   get settingsOpen(): boolean {

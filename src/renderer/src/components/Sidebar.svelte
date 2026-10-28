@@ -105,14 +105,55 @@
     { id: 'dark', icon: 'moon', label: 'Dark' },
     { id: 'system', icon: 'monitor', label: 'System' }
   ]
+
+  // Drag the right edge to resize; the width is kept across launches. Double-click resets it.
+  const WIDTH_KEY = 'chat-v2:sidebar-width'
+  const DEFAULT_WIDTH = 252
+  const clampWidth = (px: number) => Math.round(Math.max(200, Math.min(480, window.innerWidth - 640, px)))
+  let width = $state(clampWidth(Number(localStorage.getItem(WIDTH_KEY)) || DEFAULT_WIDTH))
+  let resizing = $state(false)
+  const setWidth = (px: number) => {
+    width = clampWidth(px)
+    localStorage.setItem(WIDTH_KEY, String(width))
+  }
+
+  const startResize = (e: PointerEvent) => {
+    e.preventDefault()
+    const target = e.currentTarget as HTMLElement
+    target.setPointerCapture(e.pointerId)
+    resizing = true
+    const move = (ev: PointerEvent) => {
+      width = clampWidth(ev.clientX)
+    }
+    const up = () => {
+      resizing = false
+      setWidth(width)
+      target.removeEventListener('pointermove', move)
+      target.removeEventListener('pointerup', up)
+    }
+    target.addEventListener('pointermove', move)
+    target.addEventListener('pointerup', up)
+  }
 </script>
 
+<svelte:window onresize={() => (width = clampWidth(width))} />
+
 <aside
-  class="flex h-full shrink-0 flex-col overflow-hidden bg-side transition-[width] duration-200 ease-out"
-  style="width: {app.sidebarOpen ? 252 : 0}px"
+  class="relative flex h-full shrink-0 flex-col overflow-hidden bg-side {resizing ? 'cursor-col-resize select-none' : 'transition-[width] duration-200 ease-out'}"
+  style="width: {app.sidebarOpen ? width : 0}px"
   inert={!app.sidebarOpen}
 >
-  <div class="flex h-full w-[252px] flex-col">
+  <div
+    role="separator"
+    aria-orientation="vertical"
+    aria-label="Resize sidebar"
+    class="group absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize"
+    onpointerdown={startResize}
+    ondblclick={() => setWidth(DEFAULT_WIDTH)}
+  >
+    <span class="absolute inset-y-0 right-0 w-px transition-colors group-hover:bg-muted {resizing ? '!bg-fg-2' : ''}"></span>
+  </div>
+  <div class="flex h-full flex-col" style="width: {width}px">
     <div class="flex h-12 items-center gap-1 pr-2 pl-4">
       <Logo size={22} class="-ml-1 text-fg" />
       <span class="font-serif text-[17px] tracking-tight italic">chat</span>
