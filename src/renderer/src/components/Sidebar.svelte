@@ -154,13 +154,15 @@
     <span class="absolute inset-y-0 right-0 w-px transition-colors group-hover:bg-muted {resizing ? '!bg-fg-2' : ''}"></span>
   </div>
   <div class="flex h-full flex-col" style="width: {width}px">
-    <div class="flex h-12 items-center gap-1 pr-2 pl-4">
-      <Logo size={22} class="-ml-1 text-fg" />
-      <span class="font-serif text-[17px] tracking-tight italic">chat</span>
-      <span class="ml-auto"></span>
+    <!-- The toggle sits exactly where the closed sidebar's "Show sidebar" button does, so it never moves under the pointer. -->
+    <div class="relative flex h-12 items-start justify-between pt-3 pr-2 pl-3">
       <button class="icon-btn" use:tip={{ text: 'Hide sidebar', kbd: shortcut('B') }} onclick={() => (app.sidebarOpen = false)}>
         <Icon name="sidebar" size={17} />
       </button>
+      <div class="pointer-events-none absolute inset-x-0 top-3 flex h-[27px] items-center justify-center gap-1">
+        <Logo size={22} class="text-fg" />
+        <span class="font-serif text-[17px] tracking-tight italic">chat</span>
+      </div>
       <button class="icon-btn" use:tip={{ text: 'New chat', kbd: shortcut('N') }} onclick={() => app.newSession()}>
         <Icon name="compose" size={17} />
       </button>
