@@ -107,14 +107,13 @@
   ]
 
   // Drag the right edge to resize; the width is kept across launches. Double-click resets it.
-  const WIDTH_KEY = 'chat-v2:sidebar-width'
   const DEFAULT_WIDTH = 252
   const clampWidth = (px: number) => Math.round(Math.max(200, Math.min(480, window.innerWidth - 640, px)))
-  let width = $state(clampWidth(Number(localStorage.getItem(WIDTH_KEY)) || DEFAULT_WIDTH))
+  app.sidebarWidth = clampWidth(app.sidebarWidth)
   let resizing = $state(false)
   const setWidth = (px: number) => {
-    width = clampWidth(px)
-    localStorage.setItem(WIDTH_KEY, String(width))
+    app.sidebarWidth = clampWidth(px)
+    localStorage.setItem('chat-v2:sidebar-width', String(app.sidebarWidth))
   }
 
   const startResize = (e: PointerEvent) => {
@@ -123,24 +122,26 @@
     target.setPointerCapture(e.pointerId)
     resizing = true
     const move = (ev: PointerEvent) => {
-      width = clampWidth(ev.clientX)
+      app.sidebarWidth = clampWidth(ev.clientX)
     }
     const up = () => {
       resizing = false
-      setWidth(width)
+      setWidth(app.sidebarWidth)
       target.removeEventListener('pointermove', move)
       target.removeEventListener('pointerup', up)
+      target.removeEventListener('pointercancel', up)
     }
     target.addEventListener('pointermove', move)
     target.addEventListener('pointerup', up)
+    target.addEventListener('pointercancel', up)
   }
 </script>
 
-<svelte:window onresize={() => (width = clampWidth(width))} />
+<svelte:window onresize={() => (app.sidebarWidth = clampWidth(app.sidebarWidth))} />
 
 <aside
   class="relative flex h-full shrink-0 flex-col overflow-hidden bg-side {resizing ? 'cursor-col-resize select-none' : 'transition-[width] duration-200 ease-out'}"
-  style="width: {app.sidebarOpen ? width : 0}px"
+  style="width: {app.sidebarOpen ? app.sidebarWidth : 0}px"
   inert={!app.sidebarOpen}
 >
   <div
@@ -153,7 +154,7 @@
   >
     <span class="absolute inset-y-0 right-0 w-px transition-colors group-hover:bg-muted {resizing ? '!bg-fg-2' : ''}"></span>
   </div>
-  <div class="flex h-full flex-col" style="width: {width}px">
+  <div class="flex h-full flex-col" style="width: {app.sidebarWidth}px">
     <!-- The toggle sits exactly where the closed sidebar's "Show sidebar" button does, so it never moves under the pointer. -->
     <div class="relative flex h-12 items-start justify-between pt-3 pr-2 pl-3">
       <button class="icon-btn" use:tip={{ text: 'Hide sidebar', kbd: shortcut('B') }} onclick={() => (app.sidebarOpen = false)}>

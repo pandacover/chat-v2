@@ -184,6 +184,9 @@
     error: (r) => `${modelName(r.model!)} failed.`
   }
 
+  // Focus moves into the dialog on open, so Tab starts inside it.
+  const focusSelf = (el: HTMLElement) => el.focus()
+
   const focusSelect = (el: HTMLInputElement) => {
     el.focus()
     el.select()
@@ -257,7 +260,12 @@
 
 <div class="fixed inset-0 z-50 grid place-items-center p-6" role="dialog" aria-modal="true" aria-label="Settings">
   <button class="absolute inset-0 bg-scrim" aria-label="Close settings" transition:fade={{ duration: 150 }} onclick={close}></button>
-  <section class="relative flex h-full max-h-[780px] w-full max-w-[920px] overflow-hidden rounded-xl bg-bg shadow-[0_0_0_1px_var(--line),var(--shadow)]" transition:pop>
+  <section
+    use:focusSelf
+    tabindex="-1"
+    class="relative flex h-full max-h-[780px] w-full max-w-[920px] overflow-hidden rounded-xl bg-bg shadow-[0_0_0_1px_var(--line),var(--shadow)] outline-none"
+    transition:pop
+  >
     <nav class="flex w-52 shrink-0 flex-col overflow-y-auto bg-side px-2 pt-5 pb-3" aria-label="Settings sections">
       <h1 class="mb-3 px-2.5 font-serif text-[24px] leading-none">Settings</h1>
       {#each groups as g (g.label)}
@@ -370,7 +378,7 @@
                 Open config.json <Icon name="external" size={11} />
               </button>
             </div>
-            <p class="mt-1 text-muted">Sent with every chat. A chat can replace them with its own from the composer.</p>
+            <p class="mt-1 text-muted">Sent with every chat. A chat can replace them with its own from the button at its top right.</p>
             <textarea
               bind:value={form.systemPrompt}
               rows="7"

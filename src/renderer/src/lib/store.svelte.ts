@@ -71,6 +71,8 @@ class AppState {
   /** Message ids whose replies started streaming in this window (artifacts auto-open for these). */
   liveIds = new SvelteSet<string>()
   sidebarOpen = $state(true)
+  /** Dragged by the sidebar's edge; kept across launches. */
+  sidebarWidth = $state(Number(localStorage.getItem('chat-v2:sidebar-width')) || 252)
 
   update = $state<UpdateState | null>(null)
 
