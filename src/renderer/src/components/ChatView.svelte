@@ -106,17 +106,19 @@
 
 <div class="relative flex h-full min-w-0 flex-1 flex-col">
   <!--
-    With the sidebar open the chat is inset below a thin sidebar-coloured strip, its edge carrying on from the sidebar's,
-    and these controls sit in a notch curved out of its top-right corner. With the sidebar closed they float over the chat.
+    The chat is inset below a thin sidebar-coloured strip, its edge carrying on from the sidebar's, and these controls
+    sit in a notch curved out of its top-right corner. The inset stays when the sidebar closes, so the chat never shifts.
   -->
   <header class="absolute top-0 right-0 z-10">
-    {#if app.sidebarOpen}
-      <svg class="pointer-events-none absolute top-0 right-0" width="104" height="49" aria-hidden="true">
-        <path d="M0 0V14.5C16 14.5 16 47.5 32 47.5H104V0Z" fill="var(--side)" />
-        <path d="M0 14.5C16 14.5 16 47.5 32 47.5H104" fill="none" stroke="var(--line)" />
-      </svg>
-    {/if}
-    <div class="relative mt-2 mr-2 flex items-center gap-0.5 rounded-lg p-1 {app.sidebarOpen ? '' : 'bg-side'}">
+    <svg class="pointer-events-none absolute top-0 right-0" width="132" height="49" aria-hidden="true">
+      <path d="M0 0V14.5C16 14.5 16 47.5 32 47.5H132V0Z" fill="var(--side)" />
+      <path d="M0 14.5C16 14.5 16 47.5 32 47.5H132" fill="none" stroke="var(--line)" />
+    </svg>
+    <div class="relative mt-2 mr-2 flex items-center gap-0.5 rounded-lg p-1">
+      <button class="icon-btn relative {hasOverride ? '!text-fg' : ''}" use:tip={'Instructions for this chat'} onclick={openPrompt}>
+        <Icon name="sliders" size={16} />
+        {#if hasOverride}<span class="absolute top-1 right-1 size-1.5 rounded-full bg-fg"></span>{/if}
+      </button>
       {#if app.settings}
         {@const onTop = app.settings.settings.alwaysOnTop}
         <button
@@ -140,9 +142,7 @@
   </header>
 
   <div
-    class="flex min-h-0 flex-1 flex-col bg-bg transition-[margin] duration-200 {app.sidebarOpen
-      ? 'mt-3.5 rounded-tl-xl border-t border-l border-line'
-      : ''}"
+    class="mt-3.5 flex min-h-0 flex-1 flex-col rounded-tl-xl border-t border-l border-line bg-bg"
   >
     {#if empty}<div class="flex-1"></div>{/if}
 
@@ -168,14 +168,15 @@
       </div>
 
       {#if !pinned && !empty}
-        <button
-          class="absolute bottom-3 left-1/2 grid size-8 -translate-x-1/2 place-items-center rounded-full bg-surface text-fg-2 shadow-float hover:text-fg"
-          use:tip={'Jump to latest'}
-          transition:fly={{ y: 6, duration: 160 }}
-          onclick={() => toBottom('smooth')}
-        >
-          <Icon name="arrowDown" size={15} />
-        </button>
+        <!-- Centred by a wrapper so the fly transition's transform doesn't fight the centring. -->
+        <div class="pointer-events-none absolute inset-x-0 bottom-4 z-10 flex justify-center" transition:fly={{ y: 6, duration: 160 }}>
+          <button
+            class="pointer-events-auto flex h-8 items-center gap-1.5 rounded-full bg-surface pr-3.5 pl-3 text-[12.5px] text-fg-2 shadow-[0_0_0_1px_var(--line),var(--shadow)] transition-colors hover:text-fg"
+            onclick={() => toBottom('smooth')}
+          >
+            <Icon name="arrowDown" size={14} /> Scroll to end
+          </button>
+        </div>
       {/if}
     </div>
 
@@ -185,8 +186,6 @@
         placeholder={empty ? 'Ask anything, or drop a file' : 'Reply'}
         {model}
         onmodel={(id) => app.updateSession({ model: id })}
-        customInstructions={hasOverride}
-        oninstructions={openPrompt}
         browserEnabled={app.chat.browserEnabled}
         onbrowser={toggleBrowser}
         computerEnabled={app.chat.computerEnabled}

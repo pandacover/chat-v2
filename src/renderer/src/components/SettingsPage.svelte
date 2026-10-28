@@ -5,10 +5,10 @@
   import { CALL_TOKENS, callCost } from '@shared/estimates'
   import { money } from '@/lib/pricing'
   import { CODE_FONTS, READING_FONTS, READING_SIZES, UI_FONTS, appearance, type FontOption, type ReadingSize } from '@/lib/appearance.svelte'
-  import { fade, fly } from '@/lib/motion'
+  import { fade, pop } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
   import { theme, type ThemePref } from '@/lib/theme.svelte'
-  import Icon from './Icon.svelte'
+  import Icon, { type IconName } from './Icon.svelte'
   import Logo from './Logo.svelte'
   import ModelPicker from './ModelPicker.svelte'
 
@@ -16,18 +16,38 @@
   let keys = $state({ openRouterKey: '', elevenLabsKey: '' })
   let status = $state<'idle' | 'saving' | 'saved'>('idle')
   let scroller: HTMLDivElement | undefined = $state()
-  let active = $state('keys')
 
-  const sections = [
-    { id: 'keys', label: 'API keys' },
-    { id: 'model', label: 'Model' },
-    { id: 'instructions', label: 'Instructions' },
-    { id: 'memory', label: 'Memory' },
-    ...(window.api.computer.supported ? [{ id: 'computer', label: 'Computer use' }] : []),
-    { id: 'voice', label: 'Voice & files' },
-    { id: 'appearance', label: 'Appearance' },
-    { id: 'about', label: 'About' }
+  // One tab at a time, picked from the grouped list on the left. Without a key, the keys come first.
+  type Tab = 'model' | 'memory' | 'computer' | 'voice' | 'keys' | 'appearance' | 'about'
+  const groups: Array<{ label: string; tabs: Array<{ id: Tab; label: string; icon: IconName }> }> = [
+    {
+      label: 'Chat',
+      tabs: [
+        { id: 'model', label: 'Model & instructions', icon: 'sliders' },
+        { id: 'memory', label: 'Memory', icon: 'note' }
+      ]
+    },
+    {
+      label: 'Tools',
+      tabs: [
+        ...(window.api.computer.supported ? [{ id: 'computer' as const, label: 'Computer use', icon: 'pointer' as const }] : []),
+        { id: 'voice', label: 'Voice & files', icon: 'mic' }
+      ]
+    },
+    {
+      label: 'App',
+      tabs: [
+        { id: 'keys', label: 'API keys', icon: 'key' },
+        { id: 'appearance', label: 'Appearance', icon: 'type' },
+        { id: 'about', label: 'About', icon: 'info' }
+      ]
+    }
   ]
+  let tab = $state<Tab>(app.settings!.hasOpenRouterKey ? 'model' : 'keys')
+  const show = (id: Tab) => {
+    tab = id
+    scroller?.scrollTo({ top: 0 })
+  }
 
   // Plain settings save on their own, shortly after the last change.
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -164,27 +184,12 @@
     error: (r) => `${modelName(r.model!)} failed.`
   }
 
+  // Focus moves into the dialog on open, so Tab starts inside it.
+  const focusSelf = (el: HTMLElement) => el.focus()
+
   const focusSelect = (el: HTMLInputElement) => {
     el.focus()
     el.select()
-  }
-
-  const jump = (id: string) => {
-    active = id
-    document.getElementById(`settings-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  }
-
-  // Highlight the section nearest the top of the viewport.
-  const onscroll = () => {
-    if (!scroller) return
-    const top = scroller.getBoundingClientRect().top + 80
-    let current = sections[0]!.id
-    for (const s of sections) {
-      const el = document.getElementById(`settings-${s.id}`)
-      if (el && el.getBoundingClientRect().top <= top) current = s.id
-    }
-    if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 4) current = sections.at(-1)!.id
-    active = current
   }
 
   const field =
@@ -253,37 +258,45 @@
   </div>
 {/snippet}
 
-<section class="absolute inset-0 z-20 flex flex-col bg-side" aria-label="Settings" in:fly={{ y: 8, duration: 220 }} out:fade={{ duration: 120 }}>
-  <div
-    class="flex min-h-0 flex-1 flex-col bg-bg transition-[margin] duration-200 {app.sidebarOpen
-      ? 'mt-3.5 rounded-tl-xl border-t border-l border-line'
-      : ''}"
+<div class="fixed inset-0 z-50 grid place-items-center p-6" role="dialog" aria-modal="true" aria-label="Settings">
+  <button class="absolute inset-0 bg-scrim" aria-label="Close settings" transition:fade={{ duration: 150 }} onclick={close}></button>
+  <section
+    use:focusSelf
+    tabindex="-1"
+    class="relative flex h-full max-h-[780px] w-full max-w-[920px] overflow-hidden rounded-xl bg-bg shadow-[0_0_0_1px_var(--line),var(--shadow)] outline-none"
+    transition:pop
   >
-    <header class="flex h-12 shrink-0 items-center gap-2 pr-4 {app.sidebarOpen ? 'pl-3' : 'pl-20'}">
-      <button class="flex items-center gap-1 rounded-md py-1 pr-2.5 pl-1.5 text-[13px] text-fg-2 hover:bg-hover hover:text-fg" onclick={close}>
-        <Icon name="chevronLeft" size={15} /> Back to chat
-      </button>
-      <span class="ml-auto text-[12px] text-muted" aria-live="polite">
-        {#if status === 'saving'}<span in:fade>Saving…</span>{:else if status === 'saved'}<span class="flex items-center gap-1" in:fade><Icon name="check" size={12} /> Saved</span>{/if}
-      </span>
-    </header>
+    <nav class="flex w-52 shrink-0 flex-col overflow-y-auto bg-side px-2 pt-5 pb-3" aria-label="Settings sections">
+      <h1 class="mb-3 px-2.5 font-serif text-[24px] leading-none">Settings</h1>
+      {#each groups as g (g.label)}
+        <h2 class="px-2.5 pt-4 pb-1 text-[11.5px] text-muted">{g.label}</h2>
+        {#each g.tabs as t (t.id)}
+          <button
+            aria-current={tab === t.id ? 'page' : undefined}
+            class="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] transition-colors {tab === t.id ? 'bg-surface text-fg shadow-[0_0_0_1px_var(--line)]' : 'text-fg-2 hover:bg-hover hover:text-fg'}"
+            onclick={() => show(t.id)}
+          >
+            <Icon name={t.icon} size={14} />
+            {t.label}
+          </button>
+        {/each}
+      {/each}
+    </nav>
 
-    <div bind:this={scroller} {onscroll} class="min-h-0 flex-1 overflow-y-auto">
-      <div class="mx-auto flex max-w-[860px] gap-12 px-8 pt-6 pb-24">
-        <nav class="sticky top-6 hidden h-fit w-40 shrink-0 flex-col gap-0.5 md:flex" aria-label="Settings sections">
-          <h1 class="mb-4 px-2.5 font-serif text-[28px] leading-none">Settings</h1>
-          {#each sections as s (s.id)}
-            <button
-              class="rounded-md px-2.5 py-1.5 text-left text-[13px] transition-colors {active === s.id ? 'bg-hover text-fg' : 'text-fg-2 hover:text-fg'}"
-              onclick={() => jump(s.id)}
-            >
-              {s.label}
-            </button>
-          {/each}
-        </nav>
+    <div class="flex min-w-0 flex-1 flex-col">
+      <header class="flex h-12 shrink-0 items-center gap-2 pr-2 pl-8">
+        <span class="text-[12px] text-muted" aria-live="polite">
+          {#if status === 'saving'}<span in:fade>Saving…</span>{:else if status === 'saved'}<span class="flex items-center gap-1" in:fade><Icon name="check" size={12} /> Saved</span>{/if}
+        </span>
+        <button class="icon-btn ml-auto" use:tip={'Close'} aria-label="Close settings" onclick={close}>
+          <Icon name="x" size={16} />
+        </button>
+      </header>
 
-        <div class="min-w-0 flex-1 text-[13px]">
-          <section id="settings-keys" class="scroll-mt-6 pb-10">
+      <div bind:this={scroller} class="min-h-0 flex-1 overflow-y-auto">
+        <div class="max-w-[640px] px-8 pb-16 text-[13px]">
+          {#if tab === 'keys'}
+          <section id="settings-keys">
             <h2 class="font-serif text-[20px]">API keys</h2>
             <p class="mt-1 text-muted">Encrypted with your operating system's keychain and stored on this device only.</p>
             <div class="mt-5 space-y-5">
@@ -318,8 +331,10 @@
               {/each}
             </div>
           </section>
+          {/if}
 
-          <section id="settings-model" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
+          {#if tab === 'model'}
+          <section id="settings-model" class="pb-10">
             <h2 class="font-serif text-[20px]">Model</h2>
             <p class="mt-1 text-muted">New chats start with this model. Each chat can switch from the composer.</p>
             <div class="mt-5 max-w-md">
@@ -356,14 +371,14 @@
             </label>
           </section>
 
-          <section id="settings-instructions" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
+          <section id="settings-instructions" class="pt-8 shadow-[0_-1px_0_var(--line)]">
             <div class="flex items-baseline">
               <h2 class="font-serif text-[20px]">System instructions</h2>
               <button class="ml-auto inline-flex items-center gap-1 text-[12px] text-muted hover:text-fg" use:tip={app.settings!.configPath} onclick={() => window.api.settings.openConfigFile()}>
                 Open config.json <Icon name="external" size={11} />
               </button>
             </div>
-            <p class="mt-1 text-muted">Sent with every chat. A chat can replace them with its own from the composer.</p>
+            <p class="mt-1 text-muted">Sent with every chat. A chat can replace them with its own from the button at its top right.</p>
             <textarea
               bind:value={form.systemPrompt}
               rows="7"
@@ -386,8 +401,10 @@
               </span>
             </label>
           </section>
+          {/if}
 
-          <section id="settings-memory" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
+          {#if tab === 'memory'}
+          <section id="settings-memory">
             <h2 class="font-serif text-[20px]">Memory</h2>
             <p class="mt-1 max-w-[60ch] text-muted">
               A model reads each message you send for lasting facts about you, like your name, work or how you like answers, and keeps them on this device. Each new chat starts with them. Passwords, keys and account numbers are never kept.
@@ -505,9 +522,10 @@
               {/if}
             {/if}
           </section>
+          {/if}
 
-          {#if window.api.computer.supported}
-            <section id="settings-computer" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
+          {#if tab === 'computer' && window.api.computer.supported}
+            <section id="settings-computer">
               <h2 class="font-serif text-[20px]">Computer use</h2>
               <p class="mt-1 max-w-prose text-muted">
                 Turn on <span class="text-fg-2">Computer</span> in a chat's composer and the assistant can see your main screen and work in your apps with its own sketched cursor, while
@@ -610,7 +628,8 @@
             </section>
           {/if}
 
-          <section id="settings-voice" class="scroll-mt-6 pb-10 shadow-[0_-1px_0_var(--line)] pt-8">
+          {#if tab === 'voice'}
+          <section id="settings-voice">
             <h2 class="font-serif text-[20px]">Voice & files</h2>
             <div class="mt-5 grid max-w-md grid-cols-2 gap-3">
               <label class="block">
@@ -628,8 +647,10 @@
               <p class="mt-1.5 text-muted">{pdfEngines.find((e) => e.id === form.pdfEngine)?.hint}</p>
             </div>
           </section>
+          {/if}
 
-          <section id="settings-appearance" class="scroll-mt-6 shadow-[0_-1px_0_var(--line)] pt-8">
+          {#if tab === 'appearance'}
+          <section id="settings-appearance">
             <div class="flex items-baseline">
               <h2 class="font-serif text-[20px]">Appearance</h2>
               <button class="ml-auto text-[12px] text-muted hover:text-fg" onclick={() => appearance.reset()}>Reset fonts</button>
@@ -679,8 +700,10 @@
               {@render fontPicker(CODE_FONTS, appearance.prefs.code, (id) => appearance.set('code', id), '{ }')}
             </div>
           </section>
+          {/if}
 
-          <section id="settings-about" class="scroll-mt-6 pt-8 pb-10 shadow-[0_-1px_0_var(--line)] mt-10">
+          {#if tab === 'about'}
+          <section id="settings-about">
             <h2 class="font-serif text-[20px]">About</h2>
             <div class="mt-4 flex items-center gap-4">
               <span class="grid size-14 place-items-center rounded-xl bg-[#0b0b0c] text-white"><Logo size={44} /></span>
@@ -698,8 +721,9 @@
               </div>
             </div>
           </section>
+          {/if}
         </div>
       </div>
     </div>
-  </div>
-</section>
+  </section>
+</div>

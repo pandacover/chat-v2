@@ -3,7 +3,7 @@
   import { flip } from 'svelte/animate'
   import { SvelteSet } from 'svelte/reactivity'
   import type { Session } from '@shared/types'
-  import { ease, fade, fly } from '@/lib/motion'
+  import { ease, fade } from '@/lib/motion'
   import { shortcut } from '@/lib/keys'
   import { app } from '@/lib/store.svelte'
   import { theme, type ThemePref } from '@/lib/theme.svelte'
@@ -105,21 +105,65 @@
     { id: 'dark', icon: 'moon', label: 'Dark' },
     { id: 'system', icon: 'monitor', label: 'System' }
   ]
+
+  // Drag the right edge to resize; the width is kept across launches. Double-click resets it.
+  const DEFAULT_WIDTH = 252
+  const clampWidth = (px: number) => Math.round(Math.max(200, Math.min(480, window.innerWidth - 640, px)))
+  app.sidebarWidth = clampWidth(app.sidebarWidth)
+  let resizing = $state(false)
+  const setWidth = (px: number) => {
+    app.sidebarWidth = clampWidth(px)
+    localStorage.setItem('chat-v2:sidebar-width', String(app.sidebarWidth))
+  }
+
+  const startResize = (e: PointerEvent) => {
+    e.preventDefault()
+    const target = e.currentTarget as HTMLElement
+    target.setPointerCapture(e.pointerId)
+    resizing = true
+    const move = (ev: PointerEvent) => {
+      app.sidebarWidth = clampWidth(ev.clientX)
+    }
+    const up = () => {
+      resizing = false
+      setWidth(app.sidebarWidth)
+      target.removeEventListener('pointermove', move)
+      target.removeEventListener('pointerup', up)
+      target.removeEventListener('pointercancel', up)
+    }
+    target.addEventListener('pointermove', move)
+    target.addEventListener('pointerup', up)
+    target.addEventListener('pointercancel', up)
+  }
 </script>
 
+<svelte:window onresize={() => (app.sidebarWidth = clampWidth(app.sidebarWidth))} />
+
 <aside
-  class="flex h-full shrink-0 flex-col overflow-hidden bg-side transition-[width] duration-200 ease-out"
-  style="width: {app.sidebarOpen ? 252 : 0}px"
+  class="relative flex h-full shrink-0 flex-col overflow-hidden bg-side {resizing ? 'cursor-col-resize select-none' : 'transition-[width] duration-200 ease-out'}"
+  style="width: {app.sidebarOpen ? app.sidebarWidth : 0}px"
   inert={!app.sidebarOpen}
 >
-  <div class="flex h-full w-[252px] flex-col">
-    <div class="flex h-12 items-center gap-1 pr-2 pl-4">
-      <Logo size={22} class="-ml-1 text-fg" />
-      <span class="font-serif text-[17px] tracking-tight italic">chat</span>
-      <span class="ml-auto"></span>
+  <div
+    role="separator"
+    aria-orientation="vertical"
+    aria-label="Resize sidebar"
+    class="group absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize"
+    onpointerdown={startResize}
+    ondblclick={() => setWidth(DEFAULT_WIDTH)}
+  >
+    <span class="absolute inset-y-0 right-0 w-px transition-colors group-hover:bg-muted {resizing ? '!bg-fg-2' : ''}"></span>
+  </div>
+  <div class="flex h-full flex-col" style="width: {app.sidebarWidth}px">
+    <!-- The toggle sits exactly where the closed sidebar's "Show sidebar" button does, so it never moves under the pointer. -->
+    <div class="relative flex h-12 items-start justify-between pt-3 pr-2 pl-3">
       <button class="icon-btn" use:tip={{ text: 'Hide sidebar', kbd: shortcut('B') }} onclick={() => (app.sidebarOpen = false)}>
         <Icon name="sidebar" size={17} />
       </button>
+      <div class="pointer-events-none absolute inset-x-0 top-3 flex h-[27px] items-center justify-center gap-1">
+        <Logo size={22} class="text-fg" />
+        <span class="font-serif text-[17px] tracking-tight italic">chat</span>
+      </div>
       <button class="icon-btn" use:tip={{ text: 'New chat', kbd: shortcut('N') }} onclick={() => app.newSession()}>
         <Icon name="compose" size={17} />
       </button>
@@ -243,7 +287,12 @@
 </aside>
 
 {#if !app.sidebarOpen}
-  <div class="fixed top-2 left-2 z-30 flex items-center gap-0.5 rounded-lg bg-side p-1" in:fly={{ x: -6, duration: 180 }}>
+  <!-- A notch curved out of the chat's top-left corner, mirroring the one on the right. -->
+  <svg class="pointer-events-none fixed top-0 left-0 z-30" width="104" height="49" aria-hidden="true" in:fade={{ duration: 180 }}>
+    <path d="M104 0V14.5C88 14.5 88 47.5 72 47.5H0V0Z" fill="var(--side)" />
+    <path d="M104 14.5C88 14.5 88 47.5 72 47.5H0" fill="none" stroke="var(--line)" />
+  </svg>
+  <div class="fixed top-2 left-2 z-30 flex items-center gap-0.5 rounded-lg p-1" in:fade={{ duration: 180 }}>
     <button class="icon-btn" use:tip={{ text: 'Show sidebar', kbd: shortcut('B') }} onclick={() => (app.sidebarOpen = true)}>
       <Icon name="sidebar" size={17} />
     </button>

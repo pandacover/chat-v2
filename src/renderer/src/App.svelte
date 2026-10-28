@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import ArtifactPanel from './components/ArtifactPanel.svelte'
   import BrowserPanel from './components/BrowserPanel.svelte'
   import ChatView from './components/ChatView.svelte'
@@ -14,7 +14,14 @@
   let resizing = $state(false)
   // Pixel width so the panel can animate open without its contents reflowing.
   let panelWidth = $state(Math.round(window.innerWidth * 0.44))
-  const clampPanel = (px: number) => Math.round(Math.min(window.innerWidth - 640, Math.max(360, px)))
+  // The chat keeps at least 388px beside the sidebar, whatever width the sidebar was dragged to.
+  const clampPanel = (px: number) =>
+    Math.round(Math.min(window.innerWidth - 388 - (app.sidebarOpen ? app.sidebarWidth : 0), Math.max(360, px)))
+  $effect(() => {
+    void app.sidebarOpen
+    void app.sidebarWidth
+    panelWidth = clampPanel(untrack(() => panelWidth))
+  })
 
   const reduce = matchMedia('(prefers-reduced-motion: reduce)')
   /**
@@ -41,6 +48,8 @@
   const onkeydown = (e: KeyboardEvent) => {
     if (!modKey(e)) return
     const key = e.key.toLowerCase()
+    // Settings sits over the chat as a modal; new chat and the sidebar toggle would act unseen behind it.
+    if (app.settingsOpen && key !== ',') return
     if (key === 'n') {
       e.preventDefault()
       void app.newSession()
@@ -74,7 +83,8 @@
 <svelte:window {onkeydown} onresize={() => (panelWidth = clampPanel(panelWidth))} />
 
 {#if ready}
-  <div class="flex h-full {resizing ? 'cursor-col-resize select-none' : ''}" in:fade={{ duration: 200 }}>
+  <!-- Behind the settings modal nothing takes focus or clicks. -->
+  <div class="flex h-full {resizing ? 'cursor-col-resize select-none' : ''}" inert={app.settingsOpen} in:fade={{ duration: 200 }}>
     <Sidebar />
     <main class="relative flex min-w-0 flex-1 bg-side">
       <div class="flex min-w-0 flex-1" inert={app.page !== 'chat'}>
@@ -124,11 +134,11 @@
           </div>
         {/if}
       </div>
-      {#if app.page === 'settings' && app.settings}
-        <SettingsPage />
-      {/if}
     </main>
   </div>
+  {#if app.page === 'settings' && app.settings}
+    <SettingsPage />
+  {/if}
 {/if}
 
 

@@ -57,7 +57,7 @@ class AppState {
   imageModels = $state<ModelInfo[]>([])
   imageModelsError = $state<string | null>(null)
   artifact = $state<OpenArtifact | null>(null)
-  /** Settings is a page over the chat; the chat stays mounted so drafts and scroll survive. */
+  /** Settings is a modal over the chat; the chat stays mounted so drafts and scroll survive. */
   page = $state<'chat' | 'settings'>('chat')
 
   get settingsOpen(): boolean {
@@ -71,6 +71,8 @@ class AppState {
   /** Message ids whose replies started streaming in this window (artifacts auto-open for these). */
   liveIds = new SvelteSet<string>()
   sidebarOpen = $state(true)
+  /** Dragged by the sidebar's edge; kept across launches. */
+  sidebarWidth = $state(Number(localStorage.getItem('chat-v2:sidebar-width')) || 252)
 
   update = $state<UpdateState | null>(null)
 
