@@ -64,6 +64,20 @@ afterEach(() => {
   }
 })
 
+/**
+ * Clicks on the pretend desktop change the screen where they land, as clicking an app's "Next"
+ * would: without that, the same click again and again changed nothing, and the third was held back.
+ */
+const reacting = (desktop: FakeDesktop) => {
+  const click = desktop.ports.driver!.click
+  desktop.ports.driver!.click = async (hwnd, x, y, ...rest) => {
+    // Physical pixels to screenshot pixels on the pretend 1920×1080 display.
+    desktop.paint([{ x: x / 1.5 - 6, y: y / 1.5 - 6, w: 12, h: 12 }])
+    return click(hwnd, x, y, ...rest)
+  }
+  return desktop
+}
+
 const setup = (
   script: Script,
   dir = mkdtempSync(join(tmpdir(), 'chat-v2-')),
@@ -745,7 +759,7 @@ describe('chat', () => {
 
   test('computer use: desktop and browser tools, control handed back, old screenshots dropped', async () => {
     const tool = (id: string, name: string, args: object): ChatDelta => ({ type: 'tool', index: 0, id, name, args: JSON.stringify(args) })
-    const desktop = fakeDesktop()
+    const desktop = reacting(fakeDesktop())
     const t = setup(
       (req) => {
         const turns = req.messages.filter((m) => m.role === 'tool').length
@@ -872,9 +886,12 @@ describe('chat', () => {
     const next = t.requests[1]!.messages
     const results = next.filter((m) => m.role === 'tool').map((m) => String(m.content))
     expect(results).toHaveLength(3)
-    // The first two say they're done, and that the screen after the last is the one that follows.
-    expect(results[0]).toBe('Done. The screenshot after your last action in this turn follows instead of this one.')
-    expect(results[1]).toBe(results[0])
+    // The first two say what they changed and that they're done, and that the screen after the
+    // last is the one that follows.
+    const done = 'Done. The screenshot after your last action in this turn follows instead of this one.'
+    expect(results[0]).toStartWith('After this action: Nothing on the screen changed, not even where you clicked (100,100).')
+    expect(results[0]).toEndWith(done)
+    expect(results[1]).toBe(`After this action: Nothing on the screen changed. If you meant to type into a field, it didn't have the keyboard: click in it first.\n${done}`)
     expect(results[2]).toContain('The screenshot after this action follows as an image.')
     const shot = next.at(-1)!
     expect(shot.role).toBe('user')
@@ -963,7 +980,9 @@ describe('chat', () => {
     // Only File was clicked: Save As would have been a guess at a menu the model never saw.
     expect(desktop.input).toEqual(['click 1 15,15 left'])
     const results = t.requests[1]!.messages.filter((m) => m.role === 'tool').map((m) => String(m.content))
-    expect(results[0]).toStartWith('Done.')
+    // The click says the menu opened, and that the screen after it follows later.
+    expect(results[0]).toStartWith('After this action: a menu opened.')
+    expect(results[0]).toEndWith('Done. The screenshot after your last action in this turn follows instead of this one.')
     expect(results[1]).toStartWith('Not done: a menu came up at that point since the screenshot you planned this on')
     expect(results[1]).toContain('Windows, front to back:')
     expect(results[2]).toStartWith('Not run: the computer_click before this')
@@ -976,7 +995,7 @@ describe('chat', () => {
   })
 
   test('computer use: only the newest screenshot is sent, and each request starts with the one before except where its screenshot was', async () => {
-    const desktop = fakeDesktop()
+    const desktop = reacting(fakeDesktop())
     const t = setup(
       (req) => {
         const turns = req.messages.filter((m) => m.role === 'tool').length

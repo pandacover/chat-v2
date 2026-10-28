@@ -4,8 +4,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Effect, Fiber, Layer, ManagedRuntime } from 'effect'
 import {
+  type ShotDiff,
+  changedNear,
+  changedRegions,
+  changedShare,
   fitShot,
   hiddenRegions,
+  ignoreCells,
   makeFrame,
   parseKeys,
   protectedAppName,
@@ -17,12 +22,14 @@ import {
   toOverlay,
   toPhysical,
   toShot,
-  windowAt
+  windowAt,
+  windowChanges
 } from '../src/shared/computer'
 import { MAX_BATCH, computerInstructions, computerTools, readMarks, runComputerTool } from '../src/main/computerTools'
 import { AppPaths } from '../src/main/services/AppPaths'
-import { ANNOTATE_MS, Computer, GLIDE_MS, OPEN_QUIET_MS, OPEN_SETTLE_MAX_MS, SETTLE_MAX_MS, THINKING_LABEL, WAIT_QUIET_MS, screenChanged } from '../src/main/services/Computer'
+import { ANNOTATE_MS, Computer, GLIDE_MS, OPEN_QUIET_MS, OPEN_SETTLE_MAX_MS, SETTLE_MAX_MS, SETTLE_REACT_MS, THINKING_LABEL, WAIT_QUIET_MS, screenChanged } from '../src/main/services/Computer'
 import { SettingsStore } from '../src/main/services/SettingsStore'
+import { HELPER_SCRIPT, HELPER_SOURCE } from '../src/main/winHelper'
 import { SELF_PID, fakeDesktop, still, win } from './fakeDesktop'
 
 const ctx = { selfPid: SELF_PID, extra: [] as string[] }
@@ -470,6 +477,19 @@ describe('computer service', () => {
     expect(mac.desktop.prepared).toBe(0)
   })
 
+  test("windows on another display are listed as out of reach, and switching to one says it can't be seen", async () => {
+    const spotify = win({ hwnd: 5, pid: 600, exe: 'Spotify.exe', title: 'Spotify Premium', x: 2100, y: 100, w: 1200, h: 800 })
+    const desktop = fakeDesktop([win({}), spotify])
+    desktop.ports.screen.others = () => [{ x: 1920, y: 0, w: 2560, h: 1440 }]
+    const t = service(desktop)
+    await t.run(Computer.use((c) => c.begin('r')))
+    const look = await t.tool('computer_screenshot')
+    expect(look.text).toContain("On another display, where you can't see or click them; to work in one, ask the user to move it to the main display:\n- \"Spotify Premium\" (Spotify.exe)")
+    expect(look.text).not.toContain('"Spotify Premium" (Spotify.exe) at')
+    const out = await t.tool('computer_focus_window', { title: 'spotify' })
+    expect(out.text).toStartWith("Spotify Premium is on another display, where you can't see it or click in it: ask the user to move it to the main display.")
+  })
+
   test('saved tips come back when their app is in front', async () => {
     const t = service(fakeDesktop([win({ hwnd: 4, exe: 'Resolve.exe', title: 'DaVinci Resolve - Project 1' })]))
     await t.run(Computer.use((c) => c.begin('r')))
@@ -513,7 +533,9 @@ describe('actions sent together', () => {
     ] as const) {
       const out = await t.tool(name, args)
       expect(out.step.ok).toBe(true)
-      expect(out.brief).toStartWith('Done.')
+      // What it changed stays in the brief: only the screenshot goes.
+      expect(out.brief).toEndWith('Done. The screenshot after your last action in this turn follows instead of this one.')
+      expect(out.brief).toStartWith('After this action:')
     }
     expect(t.desktop.input).toHaveLength(4)
   })
@@ -694,7 +716,8 @@ describe('a batch of actions', () => {
     const capped = await t.tool('computer_batch', { actions: long })
     expect(capped.steps).toHaveLength(MAX_BATCH)
     expect(capped.text).toContain(`Not run: the last 3 actions you sent, since a batch takes at most ${MAX_BATCH}.`)
-  })
+    // Each key on a still screen gives the app its time to answer before the next.
+  }, 15_000)
 
   test('the model is offered it on both systems, menus by name only on a Mac', () => {
     const batch = (os: 'win32' | 'darwin') => computerTools(os).find((t) => t.function.name === 'computer_batch')!.function.parameters as any
@@ -740,6 +763,203 @@ describe('what the assistant says', () => {
   })
 })
 
+describe('what an action changed', () => {
+  test('the screen comparison finds where it changed, as touching areas, largest first', () => {
+    const grid = (cells: number[]): ShotDiff => {
+      const changed = new Uint8Array(80 * 45)
+      for (const i of cells) changed[i] = 1
+      return { w: 1280, h: 720, cell: 16, cols: 80, rows: 45, changed }
+    }
+    // Cells 0-2 of the top row, one cell diagonally below the last, and one alone far away.
+    const d = grid([0, 1, 2, 83, 80 * 30 + 40])
+    expect(changedRegions(d)).toEqual([
+      { x: 0, y: 0, w: 64, h: 32 },
+      { x: 640, y: 480, w: 16, h: 16 }
+    ])
+    expect(changedNear(d, 70, 40, 10)).toBe(true)
+    expect(changedNear(d, 300, 300, 40)).toBe(false)
+    expect(changedShare(d)).toBeCloseTo(5 / 3600)
+    // Under the user's pointer doesn't count.
+    expect(changedRegions(ignoreCells(d, [{ x: 630, y: 470, w: 40, h: 48 }]))).toEqual([{ x: 0, y: 0, w: 64, h: 32 }])
+  })
+
+  test('window changes read as plain news: what opened and has the front, closed, came forward or was renamed', () => {
+    const screen = { x: 0, y: 0, w: 1920, h: 1080 }
+    const reasonOf = (w: { exe: string }) => (w.exe === 'SecHealthUI.exe' ? 'Windows Security' : null)
+    const notepad = win({ hwnd: 1, title: 'notes.txt - Notepad' })
+    const find = win({ hwnd: 2, title: 'Find', w: 400, h: 200 })
+    const paint = win({ hwnd: 3, pid: 200, exe: 'mspaint.exe', title: 'Untitled - Paint' })
+    const before = { cursor: { x: 0, y: 0 }, foreground: 1, windows: [notepad, find, paint] }
+    const saveAs = win({ hwnd: 4, title: 'Save As', w: 800, h: 500 })
+    const after = {
+      cursor: { x: 0, y: 0 },
+      foreground: 4,
+      windows: [saveAs, win({ hwnd: 5, cls: '#32768', title: '' }), win({ hwnd: 6, exe: 'SecHealthUI.exe', title: 'Windows Security' }), { ...notepad, title: '*notes.txt - Notepad' }, paint, win({ hwnd: 7, pid: SELF_PID, title: 'chat-v2' })]
+    }
+    expect(windowChanges(before, after, { screen, selfPid: SELF_PID, reasonOf })).toEqual([
+      '"Save As" (notepad.exe) opened and is in front.',
+      'a menu opened.',
+      'a protected window (Windows Security) opened.',
+      '"Find" (notepad.exe) closed.',
+      '"notes.txt - Notepad" (notepad.exe) is now titled "*notes.txt - Notepad".'
+    ])
+    // Paint coming forward on its own is news too; a window off the screen isn't.
+    const later = { ...before, foreground: 3, windows: [...before.windows, win({ hwnd: 8, title: 'Elsewhere', x: 3000 })] }
+    expect(windowChanges(before, later, { screen, selfPid: SELF_PID, reasonOf })).toEqual(['"Untitled - Paint" (mspaint.exe) came to the front.'])
+    // The chat leaving the front as the first action starts isn't news: Notepad was only under it.
+    const glance = { ...before, foreground: 7 }
+    expect(windowChanges(glance, before, { screen, selfPid: SELF_PID, reasonOf })).toEqual([])
+    // A Mac's pop-up menu is a menu too.
+    const popup = { ...before, windows: [win({ hwnd: 9, title: '', cls: 'layer 101', w: 200, h: 300 }), ...before.windows] }
+    expect(windowChanges(before, popup, { screen, selfPid: SELF_PID, reasonOf })).toEqual(['a menu opened.'])
+  })
+
+  test('each action says what it changed: nothing, the place it clicked, elsewhere, or a window', async () => {
+    const desktop = fakeDesktop()
+    const t = service(desktop)
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    const nothing = await t.tool('computer_click', { x: 100, y: 100, target: 'Label' })
+    expect(nothing.text).toStartWith(
+      "After this action: Nothing on the screen changed, not even where you clicked (100,100). The click did nothing you can see: it missed what you meant, or the app didn't take it."
+    )
+    const click = desktop.ports.driver!.click
+    // The checkbox ticks, right where it clicked.
+    desktop.ports.driver!.click = async (...args) => {
+      desktop.paint([{ x: 296, y: 296, w: 12, h: 12 }])
+      return click(...args)
+    }
+    const ticked = await t.tool('computer_click', { x: 300, y: 300, target: 'Checkbox' })
+    expect(ticked.text).toStartWith('After this action: The screen changed where you clicked (300,300).\n')
+    // A panel opens across the screen, but the button itself stays as it was.
+    desktop.ports.driver!.click = async (...args) => {
+      desktop.paint([{ x: 800, y: 100, w: 400, h: 500 }])
+      return click(...args)
+    }
+    const panel = await t.tool('computer_click', { x: 100, y: 600, target: 'Show panel' })
+    expect(panel.text).toStartWith('After this action: Nothing changed where you clicked (100,600). Elsewhere, the screen changed at 800,96 400×512.')
+    // A dialog opens and takes the front.
+    desktop.ports.driver!.click = async (...args) => {
+      desktop.state.windows = [win({ hwnd: 9, title: 'Save As', x: 400, y: 200, w: 900, h: 600 }), ...desktop.state.windows]
+      desktop.state.foreground = 9
+      desktop.paint([{ x: 266, y: 133, w: 600, h: 400 }])
+      return click(...args)
+    }
+    const dialog = await t.tool('computer_click', { x: 600, y: 650, target: 'Save' })
+    expect(dialog.text).toStartWith('After this action: "Save As" (notepad.exe) opened and is in front.')
+    // Only the clock ticked, far away: the click still did nothing, and the clock is only summed up.
+    desktop.ports.driver!.click = async (...args) => {
+      desktop.paint([{ x: 1240, y: 700, w: 16, h: 16 }])
+      return click(...args)
+    }
+    const clock = await t.tool('computer_click', { x: 500, y: 300, target: 'Apply' })
+    expect(clock.text).toStartWith(
+      "After this action: Nothing changed where you clicked (500,300). Elsewhere, only small spots changed (at 1248,704). The click did nothing you can see: it missed what you meant, or the app didn't take it."
+    )
+    desktop.ports.driver!.click = click
+    // Typing that went nowhere says why that may be.
+    const typed = await t.tool('computer_type', { text: 'hello' })
+    expect(typed.text).toContain("Nothing on the screen changed. If you meant to type into a field, it didn't have the keyboard: click in it first.")
+    // A screenshot asked for says whether anything changed since the last one.
+    expect((await t.tool('computer_screenshot')).text).toStartWith('Since your last screenshot: Nothing on the screen has changed.')
+  })
+
+  test('a click that did nothing goes again with the real pointer, and a third time is held back', async () => {
+    const desktop = fakeDesktop()
+    const t = service(desktop)
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    await t.tool('computer_click', { x: 200, y: 200, target: 'Save' })
+    const again = await t.tool('computer_click', { x: 204, y: 197, target: 'Save' })
+    expect(again.step.ok).toBe(true)
+    expect(again.text).toStartWith('Your last click here changed nothing, so this one was made with the real pointer, borrowed for a moment and put back.')
+    const third = await t.tool('computer_click', { x: 201, y: 202, target: 'Save' })
+    expect(third.step).toEqual({ tool: 'computer_click', label: 'Held back a click that already did nothing twice', ok: false })
+    expect(third.text).toContain('you clicked here (201, 202) twice already and nothing on the screen changed either time')
+    expect(third.halt).toBeUndefined()
+    expect(desktop.input).toEqual(['click 1 300,300 left', 'pointer click 1 306,296 left'])
+    // A double-click there, or a click a little way off, is something else.
+    await t.tool('computer_click', { x: 200, y: 200, target: 'Save', clicks: 2 })
+    await t.tool('computer_click', { x: 240, y: 200, target: 'Save' })
+    expect(desktop.input).toHaveLength(4)
+    // Once the screen has changed much, it's a new screen: the old clicks are forgotten.
+    desktop.paint([{ x: 0, y: 0, w: 1280, h: 400 }])
+    await t.tool('computer_screenshot')
+    await t.tool('computer_click', { x: 200, y: 200, target: 'Save' })
+    expect(desktop.input.at(-1)).toBe('click 1 300,300 left')
+  })
+
+  test('when something came up at the point just before the real pointer went, the click is held back with the screen as it is', async () => {
+    const desktop = fakeDesktop()
+    const t = service(desktop)
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    desktop.ports.driver!.click = async () => {
+      throw new Error('Something else is at that point now')
+    }
+    const out = await t.tool('computer_click', { x: 200, y: 200, target: 'Save' })
+    expect(out.step.label).toBe('Held back: the screen changed first')
+    expect(out.text).toStartWith('Not done: something else came up at that point since the screenshot you planned this on')
+    expect(out.image).toBeDefined()
+  })
+
+  test('with borrowing the pointer turned off, the second click says so, and the pointer is never used', async () => {
+    const desktop = fakeDesktop()
+    const t = service(desktop, { computerBorrowPointer: false })
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    await t.tool('computer_click', { x: 200, y: 200, target: 'Save' })
+    const again = await t.tool('computer_click', { x: 200, y: 200, target: 'Save' })
+    expect(again.text).toStartWith('Your last click here changed nothing either.')
+    expect(again.text).toContain('the user has turned off borrowing it. Use the keyboard instead')
+    expect(desktop.input).toEqual(['click 1 300,300 left', 'click 1 300,300 left'])
+    expect((await t.tool('computer_click', { x: 200, y: 200, target: 'Save' })).step.ok).toBe(false)
+  })
+})
+
+describe('windows helper source', () => {
+  /** A method of the C# helper, from its declaration to its closing brace. */
+  const method = (name: string) => {
+    const from = HELPER_SOURCE.search(new RegExp(`static \\w+ ${name}\\(`))
+    return HELPER_SOURCE.slice(from, HELPER_SOURCE.indexOf('\n  }\n', from))
+  }
+
+  test('the real pointer goes only where the checked window is what the mouse would hit, and comes back', () => {
+    for (const name of ['RealClick', 'RealWheel', 'BorrowDrag']) {
+      const body = method(name)
+      expect(body.indexOf('StillThere(top')).toBeGreaterThan(-1)
+      expect(body.indexOf('StillThere(top')).toBeLessThan(body.indexOf('GetCursorPos(out home)'))
+      expect(body).toContain('SetCursorPos(home.X, home.Y)')
+    }
+    expect(method('StillThere')).toContain('WindowFromPoint(')
+    // Moving, pressing and letting go are one SendInput, so the user's own moves can't come between.
+    expect(method('RealClick')).toContain('Send(inputs)')
+  })
+
+  test('a click borrows the pointer only when asked, or for content that ignores posted clicks, when allowed', () => {
+    const via = method('ClickVia')
+    expect(via).toContain('if (mode == "pointer" || (mode == "auto" && ignores))')
+    for (const cls of ['"Windows.UI."', '"Microsoft.UI."', '"HwndWrapper["']) expect(method('IgnoresPosted')).toContain(cls)
+    // Without "auto" or "pointer" (borrowing off), it posts, as before.
+    expect(HELPER_SOURCE).toContain('a.Length > 7 ? a[7] : "post"')
+  })
+
+  test('keys carry their scan codes, which apps reading the physical key need', () => {
+    expect(method('Keys').match(/MapVirtualKey\(/g)).toHaveLength(2)
+  })
+
+  test('what a click landed on comes from UI Automation, and never holds the click up for long', () => {
+    expect(method('ElementAt')).toContain('task.Wait(400)')
+    // Only the clicked window's own elements: never an overlay over it (chat-v2's own included).
+    expect(method('ElementAt')).toContain('if (info.ProcessId != (int)want && (hosted == 0 || info.ProcessId != (int)hosted)) return ""')
+    expect(HELPER_SCRIPT).toContain('-ReferencedAssemblies UIAutomationClient, UIAutomationTypes, WindowsBase')
+  })
+
+  test('the source is plain ASCII: PowerShell reads the script file as ANSI', () => {
+    expect([...HELPER_SOURCE].filter((c) => c.charCodeAt(0) > 127)).toEqual([])
+  })
+})
+
 describe('zoom', () => {
   test('captures the region at full resolution, magnified, without changing the frame', async () => {
     const desktop = fakeDesktop()
@@ -774,16 +994,56 @@ describe('settling', () => {
   })
 
   test('a click waits only until the screen stops changing, and says the screenshot is current', async () => {
-    const t = service()
+    const desktop = fakeDesktop()
+    const t = service(desktop)
     await t.run(Computer.use((c) => c.begin('r')))
     await t.tool('computer_screenshot')
+    // A menu opens at once: the glide, at least 150 before looking, and two still looks 80 apart.
+    let opened = false
+    desktop.look = () => still(opened ? 200 : 10)
+    const click = desktop.ports.driver!.click
+    desktop.ports.driver!.click = async (...args) => {
+      opened = true
+      return click(...args)
+    }
     const started = performance.now()
     const out = await t.tool('computer_click', { x: 100, y: 100, target: 'File' })
     const took = performance.now() - started
-    // The glide, then at least 150 before looking and two still looks 80 apart: well under the old 970.
     expect(took).toBeGreaterThanOrEqual(GLIDE_MS + 150 + 160 - 5)
-    expect(took).toBeLessThan(800)
+    expect(took).toBeLessThan(GLIDE_MS + SETTLE_REACT_MS)
     expect(out.text).toContain('It is current: it was taken once the screen stopped changing.')
+  })
+
+  test("a click waits for the app to react before it looks, so the screenshot isn't of the screen before the click", async () => {
+    const desktop = fakeDesktop()
+    const t = service(desktop)
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    // The app draws its answer 400 ms after the click reaches it: well after two still looks.
+    let level = 10
+    desktop.look = () => still(level)
+    const click = desktop.ports.driver!.click
+    desktop.ports.driver!.click = async (...args) => {
+      const note = await click(...args)
+      setTimeout(() => (level = 200), 400)
+      return note
+    }
+    const capture = desktop.ports.screen.capture
+    let shown = -1
+    desktop.ports.screen.capture = async (...args) => {
+      shown = level
+      return capture(...args)
+    }
+    await t.tool('computer_click', { x: 100, y: 100, target: 'Open' })
+    expect(shown).toBe(200)
+
+    // A click the app never answers waits that long for it, then looks anyway.
+    const started = performance.now()
+    desktop.ports.driver!.click = click
+    await t.tool('computer_click', { x: 300, y: 100, target: 'Label' })
+    const took = performance.now() - started
+    expect(took).toBeGreaterThanOrEqual(GLIDE_MS + SETTLE_REACT_MS - 5)
+    expect(took).toBeLessThan(GLIDE_MS + SETTLE_REACT_MS + 400)
   })
 
   test('while the screen keeps changing, the click waits for it, and gives up at the cap saying so', async () => {

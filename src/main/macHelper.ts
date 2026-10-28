@@ -9,7 +9,7 @@ import { helperProcess } from './helperProcess'
 // macOS input and window inspection for computer use, without native modules: one long-lived
 // osascript process runs JavaScript for Automation, which reaches CoreGraphics, AppKit and the
 // Accessibility API through its Objective-C bridge. Same line protocol as the Windows helper:
-//   <id> state | click win x y left|right|middle count borrow | hover win x y | drag win x0 y0 x1 y1 borrow
+//   <id> state | click win x y left|right|middle count borrow pointer | hover win x y | drag win x0 y0 x1 y1 borrow
 //   <id> wheel win x y dx dy | text <base64 utf-8> | keys keycode flags mods | focus win
 //   <id> menu win <base64 JSON path>
 // `win` is a CGWindowID. Coordinates here are points (macOS's global display coordinates); the
@@ -272,24 +272,52 @@ var TEXT_ROLES = ['AXTextField', 'AXTextArea', 'AXComboBox', 'AXSearchField']
 var PICKED_ROLES = ['AXRow', 'AXCell', 'AXOutlineRow', 'AXRadioButton', 'AXTab']
 var STOP_ROLES = ['AXWindow', 'AXApplication', 'AXSheet', 'AXDrawer']
 
-// Presses whatever is at the point, or the nearest thing above it that can be pressed (text
-// inside a button, an icon inside a row). Says what it did, or null when nothing there responds.
+// kAXErrorCannotComplete: the app didn't answer in time. After a press, that is an app busy with
+// what the press did, not a press that didn't happen: a pop-up button's press returns only once
+// its menu closes, and a button that runs a dialog returns once the dialog does.
+var AX_BUSY = -25204
+// How long a press may take before the app counts as busy with it, in seconds. Waiting out the
+// default (6 seconds) and then pressing the next thing up, or with the real pointer, pressed twice:
+// the menu the first press opened closed again, and every try took seconds.
+var PRESS_TIMEOUT = 0.5
+// How far up from what's at the point a press may go: text inside a button, an icon in a row.
+// Further up is a container, and pressing it presses something the model didn't aim at.
+var PRESS_DEPTH = 3
+
+// An Accessibility action, given PRESS_TIMEOUT: 'done', 'busy' (it went through and the app is
+// still busy with it), or null when it didn't happen.
+function perform(el, action) {
+  try { $.AXUIElementSetMessagingTimeout(el, PRESS_TIMEOUT) } catch (e) {}
+  var err = $.AXUIElementPerformAction(el, $(action))
+  return err === 0 ? 'done' : err === AX_BUSY ? 'busy' : null
+}
+
+// Presses whatever is at the point, or the nearest thing just above it that can be pressed (text
+// inside a button, an icon inside a row). A double-click opens (a press would only select) and a
+// right-click shows the element's menu; neither is done any other way, so the real pointer can.
+// Says what it did, or null when nothing there responds.
 function axClick(pid, x, y, which, count) {
   var cur = axHit(pid, x, y)
-  for (var depth = 0; depth < 6 && cur; depth++) {
+  for (var depth = 0; depth < PRESS_DEPTH && cur; depth++) {
     var role = axString(cur, 'AXRole')
     if (STOP_ROLES.indexOf(role) >= 0) break
     var acts = axActions(cur)
     at('pressing ' + role)
     if (which === 'right') {
-      if (acts.indexOf('AXShowMenu') >= 0 && $.AXUIElementPerformAction(cur, $('AXShowMenu')) === 0) return 'Opened the menu of the ' + axName(cur) + ' through Accessibility.'
+      if (acts.indexOf('AXShowMenu') >= 0 && perform(cur, 'AXShowMenu')) return 'Opened the menu of the ' + axName(cur) + ' through Accessibility.'
+    } else if (count >= 2) {
+      if (acts.indexOf('AXOpen') >= 0 && perform(cur, 'AXOpen')) return 'Opened the ' + axName(cur) + ' through Accessibility.'
     } else {
       if (TEXT_ROLES.indexOf(role) >= 0 && $.AXUIElementSetAttributeValue(cur, $('AXFocused'), $.NSNumber.numberWithBool(true)) === 0) {
         return 'Put the text cursor in the ' + axName(cur) + ' through Accessibility.'
       }
-      var tries = count >= 2 ? ['AXOpen', 'AXPress', 'AXConfirm', 'AXPick'] : ['AXPress', 'AXPick', 'AXConfirm', 'AXOpen']
+      var tries = ['AXPress', 'AXPick', 'AXConfirm', 'AXOpen']
       for (var k = 0; k < tries.length; k++) {
-        if (acts.indexOf(tries[k]) >= 0 && $.AXUIElementPerformAction(cur, $(tries[k])) === 0) return 'Pressed the ' + axName(cur) + ' through Accessibility.'
+        if (acts.indexOf(tries[k]) < 0) continue
+        var how = perform(cur, tries[k])
+        if (how === 'done') return 'Pressed the ' + axName(cur) + ' through Accessibility.'
+        // Anything more now (another action, the real pointer) would press it twice.
+        if (how === 'busy') return 'Pressed the ' + axName(cur) + " through Accessibility; the app is still busy with it (it may be showing a menu or a dialog)."
       }
       if (PICKED_ROLES.indexOf(role) >= 0 && $.AXUIElementSetAttributeValue(cur, $('AXSelected'), $.NSNumber.numberWithBool(true)) === 0) {
         return 'Selected the ' + axName(cur) + ' through Accessibility.'
@@ -452,7 +480,13 @@ function borrowClick(win, x, y, which, count) {
   return 'Nothing there responds to Accessibility, so I clicked with the real pointer, borrowed for a moment and put back.'
 }
 
-function click(win, x, y, which, count, borrow) {
+function click(win, x, y, which, count, borrow, pointer) {
+  // The same click a moment ago went through Accessibility or as posted events and did nothing:
+  // this time the real pointer makes it (the app says why).
+  if (pointer && borrow) {
+    borrowClick(win, x, y, which, count)
+    return null
+  }
   var pid = windowById(win).kCGWindowOwnerPID
   var done = null
   var refused = false
@@ -564,7 +598,7 @@ function op(a) {
   var n = function (i) { return Number(a[i]) }
   switch (a[1]) {
     case 'state': return state()
-    case 'click': return { done: true, note: click(n(2), n(3), n(4), a[5], n(6), a[7] === '1') }
+    case 'click': return { done: true, note: click(n(2), n(3), n(4), a[5], n(6), a[7] === '1', a[8] === '1') }
     case 'hover': postMouse(windowById(n(2)).kCGWindowOwnerPID, n(2), 5, n(3), n(4), 0, 0); return { done: true }
     case 'drag': return { done: true, note: a[7] === '1' ? borrowDrag(n(2), n(3), n(4), n(5), n(6)) : drag(n(2), n(3), n(4), n(5), n(6)) }
     case 'wheel': return { done: true, note: wheel(n(2), n(3), n(4), n(5), n(6)) }
@@ -588,6 +622,10 @@ function run() {
   }
   var trusted = false
   try { trusted = !!$.AXIsProcessTrusted() } catch (e) {}
+  // For every Accessibility call this process makes (set on the system-wide element, it's the
+  // process's default; nothing is hit-tested system-wide): a busy app answers within this or
+  // counts as busy, rather than holding a click up for the default 6 seconds.
+  try { $.AXUIElementSetMessagingTimeout($.AXUIElementCreateSystemWide(), 1.5) } catch (e) {}
   send({ ready: true, postToPid: has.postToPid, trusted: trusted, has: has })
   var buf = ''
   while (true) {
@@ -742,7 +780,7 @@ export const macDriver = (scriptFile: string, display: () => { w: number; h: num
       const cursor = r.cursor as DesktopState['cursor']
       return { cursor: { x: px(cursor.x), y: px(cursor.y) }, foreground: r.foreground as number, windows }
     },
-    click: async (win, x, y, button, count, opts) => note(await request('click', win, pt(x), pt(y), button, count, opts?.borrow ? 1 : 0)),
+    click: async (win, x, y, button, count, opts) => note(await request('click', win, pt(x), pt(y), button, count, opts?.borrow ? 1 : 0, opts?.pointer ? 1 : 0)),
     hover: async (win, x, y) => void (await request('hover', win, pt(x), pt(y))),
     drag: async (win, from, to, opts) => note(await request('drag', win, pt(from.x), pt(from.y), pt(to.x), pt(to.y), opts?.borrow ? 1 : 0)),
     // A wheel notch is three lines, as on Windows.

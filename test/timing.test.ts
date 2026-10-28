@@ -200,13 +200,14 @@ describe('timing', () => {
     // Getting ready waits only for the chat window to leave the window list, not for its animation.
     expect(Object.keys(begin!.phases).sort()).toEqual(['readState'])
     expect(begin!.totalMs).toBeLessThan(100)
-    // A plain look straight after lets the screen settle first, in case the chat is still minimising.
-    expect(Object.keys(look!.phases).sort()).toEqual(['capture', 'capture.cover', 'capture.encode', 'capture.hide', 'capture.sources', 'readState', 'settle'])
+    // A plain look straight after lets the screen settle first, in case the chat is still minimising;
+    // it's compared with the glance's screenshot, to say what changed since.
+    expect(Object.keys(look!.phases).sort()).toEqual(['capture', 'capture.cover', 'capture.encode', 'capture.hide', 'capture.sources', 'compare', 'readState', 'settle'])
     // The screen port's own part timings come through as they were reported.
     expect(look!.phases).toMatchObject({ 'capture.sources': 3, 'capture.cover': 1, 'capture.encode': 2 })
     expect(look!.phases['capture.hide']).toBeGreaterThanOrEqual(0)
-    // A click: the glide, the input, the wait for the screen to settle, then a fresh look.
-    expect(Object.keys(click!.phases).sort()).toEqual(['capture', 'capture.cover', 'capture.encode', 'capture.hide', 'capture.sources', 'driver', 'glide', 'readState', 'settle'])
+    // A click: the glide, the input, the wait for the screen to settle, then a fresh look, compared with the one before.
+    expect(Object.keys(click!.phases).sort()).toEqual(['capture', 'capture.cover', 'capture.encode', 'capture.hide', 'capture.sources', 'compare', 'driver', 'glide', 'readState', 'settle'])
     expect(click!.phases.glide).toBeGreaterThanOrEqual(GLIDE_MS - 5)
     // The fake screen is still: at least 150 ms, then two looks 80 ms apart that match.
     expect(click!.phases.settle).toBeGreaterThanOrEqual(150 + 160 - 5)
@@ -234,7 +235,7 @@ describe('timing', () => {
     await t.send('Wait for it', true)
     const rs = await t.records()
     const wait = actions(rs).find((a) => a.tool === 'computer_wait')!
-    expect(Object.keys(wait.phases).sort()).toEqual(['capture', 'capture.cover', 'capture.encode', 'capture.hide', 'capture.sources', 'readState', 'wait'])
+    expect(Object.keys(wait.phases).sort()).toEqual(['capture', 'capture.cover', 'capture.encode', 'capture.hide', 'capture.sources', 'compare', 'readState', 'wait'])
     expect(wait.phases.wait).toBeGreaterThanOrEqual(400 + WAIT_QUIET_MS - 5)
     expect(wait.phases.wait).toBeLessThan(1500)
     expect(wait.totalMs).toBeLessThan(2000)

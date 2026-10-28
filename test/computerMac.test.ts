@@ -96,10 +96,34 @@ describe('mac helper script', () => {
     expect(callers.sort()).toEqual(['borrowClick', 'borrowDrag'])
     expect(MAC_HELPER_SCRIPT.match(/CGWarpMouseCursorPosition/g)).toHaveLength(1)
     expect(body('borrowed')).toContain('CGWarpMouseCursorPosition(point(home.x, home.y))')
-    // A click borrows the pointer only after Accessibility and System Events found nothing to press, and only if allowed.
+    // A click borrows the pointer only after Accessibility and System Events found nothing to
+    // press, or when the same click already did nothing that way; and only if allowed.
     const click = body('click')
     expect(click.indexOf('axClick(')).toBeLessThan(click.indexOf('systemEventsClick('))
     expect(click.indexOf('systemEventsClick(')).toBeLessThan(click.indexOf('if (borrow) return borrowClick('))
+    expect(click.match(/borrowClick\(/g)).toHaveLength(2)
+    expect(click).toContain('if (pointer && borrow) {\n    borrowClick(')
+  })
+
+  test("presses don't hang on a menu or dialog they open, don't press twice, and stay near the point", () => {
+    const body = (name: string) => {
+      const from = MAC_HELPER_SCRIPT.indexOf(`function ${name}(`)
+      return MAC_HELPER_SCRIPT.slice(from, MAC_HELPER_SCRIPT.indexOf('\nfunction ', from + 1))
+    }
+    // Every action goes through perform(), with a short timeout, and "busy" counts as pressed.
+    expect(body('perform')).toContain('AXUIElementSetMessagingTimeout(el, PRESS_TIMEOUT)')
+    expect(body('perform')).toContain("err === AX_BUSY ? 'busy'")
+    expect(MAC_HELPER_SCRIPT).toContain('var AX_BUSY = -25204')
+    const ax = body('axClick')
+    expect(ax).not.toContain('AXUIElementPerformAction')
+    expect(ax).toContain("if (how === 'busy') return")
+    // Only a few levels up from what's at the point, never the whole window.
+    expect(ax).toContain('depth < PRESS_DEPTH')
+    expect(MAC_HELPER_SCRIPT).toContain('var PRESS_DEPTH = 3')
+    // A double-click opens or goes to the real pointer: a press would only select.
+    const double = ax.slice(ax.indexOf('} else if (count >= 2) {'), ax.indexOf('} else {', ax.indexOf('} else if (count >= 2) {')))
+    expect(double).toContain("'AXOpen'")
+    expect(double).not.toContain("'AXPress'")
   })
 
   test('never releases what the bridge owns (a double free crashed the helper on a real Mac)', () => {
@@ -120,8 +144,11 @@ describe('mac helper script', () => {
     expect(click.indexOf('axClick(')).toBeLessThan(click.indexOf('postMouse('))
     const wheel = MAC_HELPER_SCRIPT.slice(MAC_HELPER_SCRIPT.indexOf('function wheel('))
     expect(wheel.indexOf('axScroll(')).toBeLessThan(wheel.indexOf('CGEventPostToPid('))
-    // Hit-testing is done within the app the guard checked, never system-wide.
-    expect(MAC_HELPER_SCRIPT).not.toContain('AXUIElementCreateSystemWide')
+    // Hit-testing is done within the app the guard checked, never system-wide: the system-wide
+    // element is only where the process's Accessibility timeout is set.
+    expect(MAC_HELPER_SCRIPT.match(/AXUIElementCreateSystemWide/g)).toHaveLength(1)
+    expect(MAC_HELPER_SCRIPT).toContain('AXUIElementSetMessagingTimeout($.AXUIElementCreateSystemWide(), 1.5)')
+    expect(MAC_HELPER_SCRIPT).toContain('AXUIElementCopyElementAtPosition(axApp(pid), x, y, ref)')
   })
 
   test('the script survives being embedded: escapes are still escapes', () => {
@@ -188,6 +215,18 @@ describe('mac computer service', () => {
     await t.tool('computer_screenshot')
     const out = await t.tool('computer_click', { x: 100, y: 100, target: 'Canvas' })
     expect(out.text.startsWith('Nothing there responds to Accessibility')).toBe(true)
+  })
+
+  test('a click on the menu bar is pointed to computer_menu, not left at "no window there"', async () => {
+    const t = service()
+    t.desktop.state.windows = [win({ hwnd: 1, pid: 100, exe: 'TextEdit', title: 'Untitled', y: 50, h: 900 })]
+    await t.run(Computer.use((c) => c.begin('r')))
+    await t.tool('computer_screenshot')
+    const out = await t.tool('computer_click', { x: 40, y: 8, target: 'File menu' })
+    expect(out.step.ok).toBe(false)
+    expect(out.text).toContain('That is the menu bar')
+    expect(out.text).toContain('computer_menu')
+    expect(t.desktop.input).toEqual([])
   })
 
   test('a missing permission stops it before it starts, with what to allow', async () => {

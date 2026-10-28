@@ -79,6 +79,11 @@ export interface ToolOutcome {
    * after it instead (only the last of a turn's screenshots goes to the model).
    */
   brief?: string
+  /**
+   * What a desktop result shrinks to once later ones have told the model about the screen: how it
+   * went and what it changed, without the window list then (see pruneDesktop in Chat.ts).
+   */
+  stale?: string
   step: Step
   /** The steps it took, shown in its place where it took several (computer_batch). */
   steps?: Step[]

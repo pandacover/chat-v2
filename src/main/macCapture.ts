@@ -22,6 +22,10 @@ export interface MacCaptureDeps {
   cursor: ScreenPort['cursor']
   /** A capture without the stream (desktopCapturer.getSources), which has the overlay in it. */
   fallback: ScreenPort['capture']
+  /** Compares two screenshots (ScreenPort.diff). */
+  diff?: ScreenPort['diff']
+  /** The other displays (ScreenPort.others). */
+  others?: ScreenPort['others']
   /** Keeps the overlay out of a capture that would show it (OverlayPort.hiddenWhile). */
   hiddenWhile: <A>(capture: () => Promise<A>) => Promise<A>
   /** This app's process: the stream leaves its windows out. */
@@ -211,6 +215,8 @@ export const macCaptureScreen = (deps: MacCaptureDeps): MacCapturePort => {
   return {
     display: deps.display,
     cursor: deps.cursor,
+    ...(deps.diff ? { diff: deps.diff } : {}),
+    ...(deps.others ? { others: deps.others } : {}),
     keepsOverlayOut: true,
     live,
     keepsAppOut: () => live() && appOut,
@@ -232,7 +238,7 @@ export const macCaptureScreen = (deps: MacCaptureDeps): MacCapturePort => {
           // (when the app wasn't listed yet) may not, so then the overlay is hidden as before.
           const r = appOut ? await grab() : await deps.hiddenWhile(grab)
           const ms = (r.ms ?? {}) as Record<string, number>
-          return { dataUrl: `data:image/jpeg;base64,${String(r.jpeg)}`, w: Number(r.w), h: Number(r.h), ms: { sck: performance.now() - t, ...ms } }
+          return { dataUrl: `data:image/jpeg;base64,${String(r.jpeg)}`, w: Number(r.w), h: Number(r.h), ms: { sck: performance.now() - t, ...ms }, via: 'sck' }
         } catch (e) {
           failed(e)
         }
