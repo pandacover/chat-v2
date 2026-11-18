@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tip } from '@/lib/tooltip'
   import { tick } from 'svelte'
+  import { isClaudeModel } from '@shared/models'
   import { fade, fly, pop } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
   import Composer from './Composer.svelte'
@@ -18,7 +19,8 @@
 
   const view = $derived(app.view)
   const empty = $derived(!view || view.path.length === 0)
-  const model = $derived(app.chat.model ?? app.settings?.settings.defaultModel ?? '')
+  // A chat from before Claude keeps its old model id; it now runs on the default.
+  const model = $derived(isClaudeModel(app.chat.model) ? app.chat.model : (app.settings?.settings.defaultModel ?? ''))
   const hasOverride = $derived(app.chat.systemPrompt != null)
 
   const greeting = (() => {
@@ -79,8 +81,6 @@
     await app.updateSession({ browserEnabled: next })
     if (!next) return
     app.openBrowser()
-    const info = app.models.find((m) => m.id === model)
-    if (info && !info.supportsTools) app.toast(`${info.name} can't use tools, so it can't drive the browser. Pick a model marked "tools".`)
   }
 
   const toggleComputer = async () => {
@@ -149,9 +149,9 @@
           <div class="mx-auto max-w-[720px] px-6 pb-6 text-center" in:fade={{ duration: 260 }}>
             <Logo size={64} class="mx-auto mb-5 text-fg" />
             <h2 class="font-serif text-[34px] leading-tight font-[420] tracking-[-0.015em]">{greeting}.</h2>
-            {#if app.settings && !app.settings.hasOpenRouterKey}
+            {#if app.settings && app.settings.settings.auth === 'apiKey' && !app.settings.hasAnthropicKey}
               <button class="mt-3 text-[14px] text-fg-2 underline decoration-muted underline-offset-4 hover:decoration-fg" onclick={() => (app.settingsOpen = true)}>
-                Add an OpenRouter key to begin
+                Add your Anthropic API key to begin
               </button>
             {/if}
           </div>

@@ -1,20 +1,21 @@
-import { join } from 'node:path'
-import { Cause, Context, Effect, Exit, FiberMap, Layer, Semaphore, Stream } from 'effect'
+import { randomUUID } from 'node:crypto'
+import { Cause, Context, Effect, Exit, FiberMap, Layer, Semaphore } from 'effect'
 import { ARTIFACT_INSTRUCTIONS } from '@shared/artifacts'
 import { makeLineBuffer } from '@shared/lines'
-import type { MemoryRun, Message, MessageStatus, Session, SessionView, StreamEvent, Usage } from '@shared/types'
-import { type DbError, InvalidInput, type NotFound, errorMessage } from '../errors'
-import { WRITING_GUIDELINES } from '../guidelines'
-import { BROWSER_INSTRUCTIONS, BROWSER_TOOLS, MAX_AGENT_STEPS, type ToolOutcome, runTool } from '../agent'
-import { MEMORY_INSTRUCTIONS, askedQuestion, memoryPrompt, memorySource, parseMemoryReply, profileBlock } from '../memory'
+import { isClaudeModel } from '@shared/models'
 import { stepLine, summarizeSteps } from '@shared/steps'
-import { type ReasoningDetail, mergeReasoning } from '../sse'
-import { AppPaths } from './AppPaths'
+import type { MemoryRun, Message, MessageStatus, NewAttachmentInput, Session, SessionView, Settings, StreamEvent, Usage } from '@shared/types'
+import { type ConfigError, type DbError, InvalidInput, type MissingApiKey, type NotFound, ProviderError, errorMessage } from '../errors'
+import { WRITING_GUIDELINES } from '../guidelines'
+import { MEMORY_INSTRUCTIONS, askedQuestion, memoryPrompt, memorySource, parseMemoryReply, profileBlock } from '../memory'
+import { browserModule } from '../agent/browser'
+import { Agent, type Auth, MAX_TURNS, type PromptBlock, type ReplyHooks } from '../agent/driver'
+import { HISTORY_NOTE, type TurnPlan, continueNote, planTurn, transcriptText } from '../agent/history'
+import type { ToolModuleFactory } from '../agent/module'
 import { Attachments } from './Attachments'
-import { Db } from './Db'
-import { type ChatMessage, type ChatRequest, type ContentPart, OpenRouter } from './OpenRouter'
 import { Browser } from './Browser'
-import { SettingsStore, toolModel } from './SettingsStore'
+import { Db } from './Db'
+import { SettingsStore } from './SettingsStore'
 
 /** Pushes stream events to every open window. */
 export class Broadcaster extends Context.Service<Broadcaster, { readonly send: (event: StreamEvent) => void }>()(
@@ -22,34 +23,6 @@ export class Broadcaster extends Context.Service<Broadcaster, { readonly send: (
 ) {}
 
 export const NEW_SESSION_TITLE = 'New chat'
-
-/**
- * What a run's screenshot turns into once a newer one comes: only the newest stays in the request
- * (each is about 1,350 tokens, and some models answer later the more images they get). The one
- * replaced was the end of the previous request, so everything before it is unchanged and the
- * provider can serve it from its cache.
- */
-export const DROPPED_SCREENSHOT = '[An earlier screenshot, removed to save space.]'
-export const DROPPED_SNAPSHOT = '[An earlier page snapshot, removed to save space. Its refs no longer apply.]'
-/**
- * How much stale page snapshot text a run carries before it is pruned. Each snapshot sits in a
- * tool result, where the cache breakpoint is, so dropping them one at a time would re-send the
- * run uncached at every step; dropping them in a batch costs that once per batch.
- */
-export const STALE_SNAPSHOT_CHARS = 24000
-
-/** Turns every stale snapshot into a note once together they pass STALE_SNAPSHOT_CHARS. */
-export const pruneSnapshots = (snapshots: ChatMessage[]) => {
-  const stale = snapshots.slice(0, -1)
-  const chars = stale.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0)
-  if (chars <= STALE_SNAPSHOT_CHARS) return
-  for (const m of stale) m.content = DROPPED_SNAPSHOT
-  snapshots.splice(0, stale.length)
-}
-
-/** Continuing a reply: the partial reply goes back as the assistant's turn, and this asks for the rest. */
-export const CONTINUE_NOTE =
-  "Your reply above was cut off. Continue it from exactly where it stopped: don't repeat anything you already wrote, don't start over, and don't say that you are continuing."
 
 export const titleFrom = (text: string): string => {
   const line = text.replace(/\s+/g, ' ').trim()
@@ -74,6 +47,24 @@ export const cleanTitle = (reply: string): string | null => {
   for (let i = 0; i < 2; i++) title = title.trim().replace(TITLE_WRAPPING, '').replace(/[.:;,。]+$/, '')
   return title.trim() ? titleFrom(title) : null
 }
+
+/** The model a chat's new reply runs on: the chat's, unless that is one from before Claude. */
+const chatModel = (session: Session, settings: Settings | null) =>
+  isClaudeModel(session.model) ? session.model : (settings?.defaultModel ?? null)
+
+const sumUsage = (a: Usage | null, b: Usage): Usage =>
+  a
+    ? {
+        promptTokens: a.promptTokens + b.promptTokens,
+        completionTokens: a.completionTokens + b.completionTokens,
+        totalTokens: a.totalTokens + b.totalTokens,
+        cachedTokens: a.cachedTokens + b.cachedTokens,
+        cacheWriteTokens: (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0),
+        reasoningTokens: a.reasoningTokens + b.reasoningTokens,
+        cost: a.cost === null && b.cost === null ? null : (a.cost ?? 0) + (b.cost ?? 0),
+        requests: a.requests + b.requests
+      }
+    : b
 
 type ChatError = DbError | NotFound | InvalidInput
 
@@ -110,10 +101,13 @@ export class Chat extends Context.Service<
     Effect.gen(function* () {
       const db = yield* Db
       const settingsStore = yield* SettingsStore
-      const openRouter = yield* OpenRouter
+      const agent = yield* Agent
       const attachments = yield* Attachments
       const broadcaster = yield* Broadcaster
       const browser = yield* Browser
+
+      /** The tool sets a reply in `session` gets, built afresh for each reply. Computer use plugs in here. */
+      const toolSets = (session: Session): ToolModuleFactory[] => [...(session.browserEnabled ? [browserModule(browser)] : [])]
 
       // One fiber per streaming assistant message. Closing the layer (app quit)
       // interrupts them all, which marks their messages `interrupted`.
@@ -125,14 +119,18 @@ export class Chat extends Context.Service<
       // so each sees the facts the previous one saved and none adds the same fact twice.
       const remembering = yield* FiberMap.make<string>()
       const memoryLock = yield* Semaphore.make(1)
-      /** Memory models that refused to answer without thinking, so they aren't asked that way again. */
-      const mustThink = new Set<string>()
       let lastMemoryRun: MemoryRun | null = null
       /** Records how a memory check went and tells open windows (a toast when something changed). */
       const reportMemory = (sessionId: string, run: Omit<MemoryRun, 'at' | 'added' | 'removed' | 'dropped'> & Partial<MemoryRun>) => {
         lastMemoryRun = { at: Date.now(), added: [], removed: [], dropped: [], ...run }
         broadcaster.send({ type: 'memory', sessionId, added: lastMemoryRun.added, removed: lastMemoryRun.removed })
       }
+
+      /** The Claude Code sign-in, or the API key Settings ask for. */
+      const authFor = (settings: Settings): Effect.Effect<Auth, MissingApiKey | ConfigError> =>
+        settings.auth === 'apiKey'
+          ? settingsStore.apiKey('anthropic').pipe(Effect.map((key): Auth => ({ kind: 'apiKey', key })))
+          : Effect.succeed({ kind: 'login' })
 
       const view = Effect.fn('Chat.view')(function* (sessionId: string) {
         const session = yield* db.require('Session', (d) => d.getSession(sessionId))
@@ -147,52 +145,26 @@ export class Chat extends Context.Service<
         return message
       })
 
-      /** Builds the OpenRouter request from the lineage that ends at `parentId`. */
-      const buildRequest = Effect.fn('Chat.buildRequest')(function* (assistant: Message, partial: string | null) {
-        const settings = yield* settingsStore.get
-        const session = yield* db.require('Session', (d) => d.getSession(assistant.sessionId))
-        const history = yield* db.use((d) => d.lineage(assistant.parentId!))
-        const stored = yield* db.use((d) => d.storedAttachmentsFor(history.map((m) => m.id)))
-        // The profile as it was when this chat first asked, so it is sent once per chat.
-        const facts = settings.memoryModel
-          ? yield* db.use((d) => d.liveFacts(d.sessionMemoryRev(session.id)))
-          : []
-
-        // User instructions first so they win any conflict; the writing guideline is hidden from Settings.
-        const system = [
-          session.systemPrompt ?? settings.systemPrompt,
-          WRITING_GUIDELINES,
-          settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : '',
-          session.browserEnabled ? BROWSER_INSTRUCTIONS : '',
-          profileBlock(facts)
-        ]
-          .map((s) => s.trim())
-          .filter(Boolean)
-          .join('\n\n')
-        const messages: ChatMessage[] = system ? [{ role: 'system', content: system }] : []
-        let hasPdf = false
-        for (const m of history) {
-          if (m.role === 'user') {
-            const files = yield* attachments.toParts(stored.get(m.id) ?? [])
-            hasPdf ||= files.hasPdf
-            const parts: ContentPart[] = [...files.parts, { type: 'text', text: m.content }]
-            messages.push({ role: 'user', content: files.parts.length > 0 ? parts : m.content })
-          } else if (m.role === 'assistant' && m.content.trim() !== '') {
-            messages.push({ role: 'assistant', content: summarizeSteps(m.content) })
-          }
+      /**
+       * The user message the reply gets: the turns its session doesn't have, then the message
+       * itself. Continuing, a note asking for the rest comes last.
+       */
+      const promptFor = Effect.fn('Chat.promptFor')(function* (plan: TurnPlan, partial: string | null) {
+        const stored = yield* db.use((d) => d.storedAttachmentsFor(plan.turns.map((m) => m.id)))
+        const blocks: PromptBlock[] = []
+        const last = partial === null ? plan.turns.length - 1 : -1
+        for (const [i, m] of plan.turns.entries()) {
+          if (m.role === 'user') blocks.push(...(yield* attachments.toBlocks(stored.get(m.id) ?? [])))
+          const text = i === last ? m.content : transcriptText(m)
+          if (text?.trim()) blocks.push({ type: 'text', text })
         }
-        // Continuing: the partial reply goes back as the assistant's turn, and a note asks for the
-        // rest. (Not a prefill, a request ending on the assistant's turn: newer Claude models reject
-        // those, and the rest vary.)
-        if (partial) messages.push({ role: 'assistant', content: summarizeSteps(partial).trimEnd() }, { role: 'user', content: CONTINUE_NOTE })
-        const request = {
-          model: assistant.model ?? session.model ?? settings.defaultModel,
-          messages,
-          temperature: settings.temperature,
-          ...(hasPdf ? { plugins: [{ id: 'file-parser', pdf: { engine: settings.pdfEngine } }] } : {}),
-          ...(session.browserEnabled ? { tools: BROWSER_TOOLS } : {})
-        } satisfies ChatRequest as ChatRequest
-        return request
+        if (partial !== null) {
+          // Continued from its own session, the reply is there up to its checkpoint; the end is quoted.
+          const own = plan.turns.length === 0
+          if (!own) blocks.push({ type: 'text', text: transcriptText({ role: 'assistant', content: partial } as Message) ?? '' })
+          blocks.push({ type: 'text', text: continueNote(own ? partial : null) })
+        }
+        return blocks.filter((b) => b.type !== 'text' || b.text !== '')
       })
 
       const finish = (
@@ -214,44 +186,13 @@ export class Chat extends Context.Service<
             Effect.ignore
           )
 
-      /** Whether a model accepts images, from OpenRouter's list (unknown models are assumed to). */
-      const seesImages = (model: string) =>
-        openRouter.listModels.pipe(
-          Effect.map((models) => models.find((m) => m.id === model)?.inputModalities.includes('image') ?? true),
-          Effect.orElseSucceed(() => true)
-        )
-
-      const hasImages = (messages: ChatMessage[]) =>
-        messages.some((m) => Array.isArray(m.content) && m.content.some((p) => p.type === 'image_url'))
-
-      /**
-       * The model for one request: `own`, unless the request carries images it can't see: then the first of the vision
-       * model and the chat's model that can. If none can, `own` gets them anyway.
-       */
-      const modelFor = (own: string, chatModel: string, vision: string, messages: ChatMessage[]) =>
-        Effect.gen(function* () {
-          const choices = [...new Set([own, vision, chatModel].filter(Boolean))]
-          if (choices.length < 2 || !hasImages(messages)) return own
-          for (const m of choices) if (yield* seesImages(m)) return m
-          return own
-        })
-
       /** Saves a file a tool made for the user (a screenshot) on the reply, and shows it in open windows. */
-      const attachToReply = (messageId: string, outcome: ToolOutcome) =>
+      const attachToReply = (messageId: string, file: NewAttachmentInput) =>
         Effect.gen(function* () {
-          const attachment = yield* attachments.add(outcome.attach!)
+          const attachment = yield* attachments.add(file)
           yield* db.use((d) => d.bindAttachments([attachment.id], messageId))
           broadcaster.send({ type: 'attachment', messageId, attachment: { ...attachment, messageId } })
-          return outcome
-        }).pipe(
-          Effect.catch((e) =>
-            Effect.succeed<ToolOutcome>({
-              ...outcome,
-              text: `${outcome.text}\nBut it could not be attached to your reply: ${e.message}`,
-              step: { ...outcome.step, ok: false, detail: `Could not attach it: ${e.message}` }
-            })
-          )
-        )
+        })
 
       /**
        * Streams a reply into `assistant`, durably: every completed line is appended
@@ -278,114 +219,70 @@ export class Chat extends Context.Service<
         }
         // Flushes a half-finished text line so a step line never lands in the middle of it.
         const endLine = Effect.suspend(() => Effect.forEach(buffer.flush(), emit, { discard: true }))
-        let usedBrowser = false
         // A continued reply keeps counting from what it already used.
         let usage: Usage | null = assistant.usage ? { ...assistant.usage } : null
-        let answeredBy: string | null = null
-        const addUsage = (u: Omit<Usage, 'requests'>) => {
-          const prev = usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, reasoningTokens: 0, cost: null, requests: 0 }
-          usage = {
-            promptTokens: prev.promptTokens + u.promptTokens,
-            completionTokens: prev.completionTokens + u.completionTokens,
-            totalTokens: prev.totalTokens + u.totalTokens,
-            cachedTokens: prev.cachedTokens + u.cachedTokens,
-            reasoningTokens: prev.reasoningTokens + u.reasoningTokens,
-            cost: u.cost === null ? prev.cost : (prev.cost ?? 0) + u.cost,
-            requests: prev.requests + 1
-          }
-        }
+        let model = assistant.model
 
         return Effect.gen(function* () {
-          const request = yield* buildRequest(assistant, partial)
-          const chatModel = request.model
-          const settings = yield* settingsStore.get.pipe(Effect.orElseSucceed(() => null))
-          const refs = new Map<string, string>()
-          // Runs with tools never go to the auto-router: it could pick another model at every step.
-          const actingModel = request.tools ? toolModel(chatModel) : chatModel
-          // The newest screenshot message this run added; the one before it is dropped when it comes.
-          let lastShot: ChatMessage | null = null
-          // Page snapshots this run added, oldest first; all but the newest are stale.
-          const snapshots: ChatMessage[] = []
-          for (let step = 0; ; step++) {
-            const calls = new Map<number, { id: string; name: string; args: string }>()
-            let text = ''
-            // The model's thinking, which goes back with its tool calls so the next step builds on it.
-            let thought = ''
-            const reasoning: ReasoningDetail[] = []
-            request.model = yield* modelFor(actingModel, actingModel, settings?.visionModel ?? '', request.messages)
-            // Once another model has answered, the reply is saved (and timed) as the last one's.
-            if (request.model !== chatModel || answeredBy !== null) answeredBy = request.model
-            yield* openRouter.streamChat(request).pipe(
-              Stream.runForEach((delta) => {
-                if (delta.type === 'usage') {
-                  addUsage(delta.usage)
-                  return Effect.void
-                }
-                if (delta.type === 'reasoning') {
-                  if (delta.text) thought += delta.text
-                  if (delta.details) mergeReasoning(reasoning, delta.details)
-                  return Effect.void
-                }
-                if (delta.type === 'text') {
-                  text += delta.text
-                  return Effect.forEach(buffer.push(delta.text), emit, { discard: true })
-                }
-                const call = calls.get(delta.index) ?? { id: '', name: '', args: '' }
-                if (delta.id) call.id = delta.id
-                if (delta.name) call.name += delta.name
-                if (delta.args) call.args += delta.args
-                calls.set(delta.index, call)
-                return Effect.void
-              })
-            )
-            if (calls.size === 0 || !request.tools) return
-            if (step >= MAX_AGENT_STEPS) {
-              yield* endLine
-              yield* emit(`Stopped after ${MAX_AGENT_STEPS} steps. Ask me to keep going if you want me to continue.`)
-              return
-            }
-
-            yield* endLine
-            const toolCalls = [...calls.values()].map((c, i) => ({
-              id: c.id || `call_${step}_${i}`,
-              type: 'function' as const,
-              function: { name: c.name, arguments: c.args || '{}' }
-            }))
-            request.messages.push({
-              role: 'assistant',
-              content: text || null,
-              tool_calls: toolCalls,
-              // Structured blocks as they came (signed or encrypted ones must match exactly), else the plain text.
-              ...(reasoning.length > 0 ? { reasoning_details: reasoning } : thought ? { reasoning: thought } : {})
+          const settings = yield* settingsStore.get
+          const session = yield* db.require('Session', (d) => d.getSession(assistant.sessionId))
+          const runOn = isClaudeModel(assistant.model) ? assistant.model : settings.defaultModel
+          model = runOn
+          const auth = yield* authFor(settings)
+          const lineage = yield* db.use((d) => d.lineage(assistant.parentId!))
+          const plan = yield* db.use((d) =>
+            planTurn(lineage, assistant, partial !== null, {
+              point: d.agentPoint,
+              tip: d.agentTip,
+              cost: d.agentCost,
+              exists: agent.hasSession
             })
-            const images: string[] = []
-            for (const call of toolCalls) {
-              usedBrowser = true
-              let outcome = yield* runTool(browser, refs, call.function.name, call.function.arguments)
-              if (outcome.attach) outcome = yield* attachToReply(assistant.id, outcome)
-              yield* emit(stepLine(outcome.step))
-              const result: ChatMessage = { role: 'tool', tool_call_id: call.id, content: outcome.text }
-              request.messages.push(result)
-              if (outcome.snapshot) snapshots.push(result)
-              if (outcome.image) images.push(outcome.image)
-            }
-            pruneSnapshots(snapshots)
-            // Tool results are text-only on most providers, so screenshots follow as a user turn.
-            if (images.length > 0) {
-              const heading = images.length > 1 ? 'Images from this step, in the order they were taken:' : 'Screenshot of the browser viewport you asked for:'
-              const shot: ChatMessage = {
-                role: 'user',
-                content: [{ type: 'text', text: heading }, ...images.map((url) => ({ type: 'image_url' as const, image_url: { url } }))]
-              }
-              request.messages.push(shot)
-              // Only the newest screenshot is worth its tokens; the one before becomes a note.
-              if (lastShot) lastShot.content = DROPPED_SCREENSHOT
-              lastShot = shot
-            }
+          )
+          const prompt = yield* promptFor(plan, partial)
+          // The profile as it was when this chat first asked, so the system prompt stays the same.
+          const facts = settings.memoryModel ? yield* db.use((d) => d.liveFacts(d.sessionMemoryRev(session.id))) : []
+          // User instructions first so they win any conflict; the writing guideline is hidden from Settings.
+          const instructions = [session.systemPrompt ?? settings.systemPrompt, WRITING_GUIDELINES, settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : '', HISTORY_NOTE]
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .join('\n\n')
+          // Resumed in place, the session keeps its id; a fork or a fresh session gets a new one.
+          // Claimed before it runs, so a reply started meanwhile from the same place forks.
+          const sessionId = plan.resume && !plan.resume.fork ? plan.resume.session : randomUUID()
+          yield* db.use((d) => d.claimAgentSession(assistant.id, sessionId))
+          const hooks: ReplyHooks = {
+            text: (delta) => Effect.runSync(Effect.forEach(buffer.push(delta), emit, { discard: true })),
+            step: (step) => Effect.runPromise(endLine.pipe(Effect.andThen(emit(stepLine(step))))),
+            attach: (file) => Effect.runPromise(attachToReply(assistant.id, file)),
+            checkpoint: (uuid) => Effect.runSync(db.use((d) => d.checkpoint(assistant.id, uuid)).pipe(Effect.ignore))
+          }
+          const result = yield* Effect.tryPromise({
+            try: (signal) =>
+              agent.reply(
+                {
+                  sessionId: session.id,
+                  messageId: assistant.id,
+                  model: runOn,
+                  effort: settings.effort,
+                  instructions,
+                  profile: profileBlock(facts),
+                  prompt,
+                  session: { id: sessionId, resume: plan.resume, baseCost: plan.baseCost },
+                  modules: toolSets(session),
+                  auth
+                },
+                hooks,
+                signal
+              ),
+            catch: (e) => new ProviderError({ provider: 'Claude', message: errorMessage(e) })
+          })
+          if (result.usage) usage = sumUsage(usage, result.usage)
+          if (result.sessionCost !== null) yield* db.use((d) => d.setAgentCost(assistant.id, result.sessionCost!))
+          if (result.maxTurns) {
+            yield* endLine
+            yield* emit(`Stopped after ${MAX_TURNS} steps. Ask me to keep going if you want me to continue.`)
           }
         }).pipe(
-          // Hand the browser back however the reply ends (done, error, Stop).
-          Effect.ensuring(Effect.suspend(() => (usedBrowser ? browser.release : Effect.void))),
           Effect.onExit((exit) =>
             Effect.gen(function* () {
               // The unfinished line is kept (and marked partial) so nothing received is lost.
@@ -393,11 +290,11 @@ export class Chat extends Context.Service<
               yield* Effect.forEach(tail, emit, { discard: true }).pipe(Effect.ignore)
               const partial = tail.length > 0
               const stopped = stopRequested.delete(assistant.id)
-              if (Exit.isSuccess(exit)) return yield* finish(assistant.id, 'complete', null, false, usage, answeredBy)
+              if (Exit.isSuccess(exit)) return yield* finish(assistant.id, 'complete', null, false, usage, model)
               if (Cause.hasInterruptsOnly(exit.cause))
-                return yield* finish(assistant.id, stopped ? 'stopped' : 'interrupted', null, partial, usage, answeredBy)
+                return yield* finish(assistant.id, stopped ? 'stopped' : 'interrupted', null, partial, usage, model)
               const error = Cause.squash(exit.cause)
-              return yield* finish(assistant.id, 'error', errorMessage(error), partial, usage, answeredBy)
+              return yield* finish(assistant.id, 'error', errorMessage(error), partial, usage, model)
             })
           )
         )
@@ -408,6 +305,16 @@ export class Chat extends Context.Service<
           Effect.asVoid
         )
 
+      /** A one-off question to a small model (a title, a memory read), with the chat's sign-in. */
+      const ask = (model: string, system: string, prompt: string, timeout: `${number} seconds`) =>
+        Effect.gen(function* () {
+          const auth = yield* authFor(yield* settingsStore.get)
+          return yield* Effect.tryPromise({
+            try: (signal) => agent.ask({ model, system, prompt, auth }, signal),
+            catch: (e) => new ProviderError({ provider: 'Claude', message: errorMessage(e) })
+          }).pipe(Effect.timeout(timeout))
+        })
+
       /**
        * Asks the title model to name a new chat. `placeholder` is the title it has meanwhile
        * (the start of the first message), which stays if the request fails.
@@ -415,23 +322,7 @@ export class Chat extends Context.Service<
       const nameSession = (input: { sessionId: string; placeholder: string; model: string; text: string; files: string[] }) =>
         Effect.gen(function* () {
           const attached = input.files.length > 0 ? `\n[Attached: ${input.files.join(', ')}]` : ''
-          const reply = yield* openRouter
-            .streamChat({
-              model: input.model,
-              messages: [
-                { role: 'system', content: TITLE_INSTRUCTIONS },
-                { role: 'user', content: `<message>\n${input.text.slice(0, TITLE_SOURCE_CHARS)}${attached}\n</message>` }
-              ],
-              temperature: 0.3,
-              max_tokens: 40
-            })
-            .pipe(
-              Stream.runFold(
-                () => '',
-                (acc, delta) => (delta.type === 'text' ? acc + delta.text : acc)
-              ),
-              Effect.timeout('30 seconds')
-            )
+          const reply = yield* ask(input.model, TITLE_INSTRUCTIONS, `<message>\n${input.text.slice(0, TITLE_SOURCE_CHARS)}${attached}\n</message>`, '30 seconds')
           const title = cleanTitle(reply)
           if (!title) return
           if (yield* db.use((d) => d.retitle(input.sessionId, input.placeholder, title)))
@@ -444,36 +335,7 @@ export class Chat extends Context.Service<
           .withPermit(
             Effect.gen(function* () {
               const facts = yield* db.use((d) => d.liveFacts())
-              const ask = (request: Partial<ChatRequest>) =>
-                openRouter
-                  .streamChat({
-                    model: input.model,
-                    messages: [
-                      { role: 'system', content: MEMORY_INSTRUCTIONS },
-                      { role: 'user', content: memoryPrompt(facts, input.source, input.previous) }
-                    ],
-                    temperature: 0,
-                    ...request
-                  })
-                  .pipe(
-                    Stream.runFold(
-                      () => '',
-                      (acc, delta) => (delta.type === 'text' ? acc + delta.text : acc)
-                    )
-                  )
-              // Thinking would spend the token budget (and money) on a one-line JSON reply, so it
-              // is turned off. Models that must think reject that request; they get a budget to
-              // think in, from then on. Any other failure (rate limit, outage) isn't retried.
-              const thinking = () => ask({ max_tokens: 4000 })
-              const reply = yield* (
-                mustThink.has(input.model)
-                  ? thinking()
-                  : ask({ max_tokens: 400, reasoning: { effort: 'none' } }).pipe(
-                      Effect.catchTag('ProviderError', (e) =>
-                        e.status === 400 || e.status === 422 ? Effect.sync(() => mustThink.add(input.model)).pipe(Effect.andThen(thinking())) : Effect.fail(e)
-                      )
-                    )
-              ).pipe(Effect.timeout('45 seconds'))
+              const reply = yield* ask(input.model, MEMORY_INSTRUCTIONS, memoryPrompt(facts, input.source, input.previous), '45 seconds')
               const run = { message: input.message, model: input.model }
               const reading = parseMemoryReply(reply, facts, input.source)
               if (!reading)
@@ -497,10 +359,10 @@ export class Chat extends Context.Service<
               Cause.hasInterruptsOnly(cause)
                 ? Effect.void
                 : Effect.gen(function* () {
-                const detail = errorMessage(Cause.squash(cause))
-                yield* Effect.logWarning(`Memory check failed with ${input.model}: ${detail}`)
-                reportMemory(input.sessionId, { message: input.message, model: input.model, outcome: 'error', detail })
-              })
+                    const detail = errorMessage(Cause.squash(cause))
+                    yield* Effect.logWarning(`Memory check failed with ${input.model}: ${detail}`)
+                    reportMemory(input.sessionId, { message: input.message, model: input.model, outcome: 'error', detail })
+                  })
             )
           )
 
@@ -533,7 +395,7 @@ export class Chat extends Context.Service<
             role: 'assistant',
             content: '',
             status: 'streaming',
-            model: session.model ?? settings?.defaultModel ?? null
+            model: chatModel(session, settings)
           })
           const parent = d.getMessage(input.parentId)
           return {
@@ -598,7 +460,7 @@ export class Chat extends Context.Service<
             role: 'assistant',
             content: '',
             status: 'streaming',
-            model: session.model ?? settings?.defaultModel ?? null
+            model: chatModel(session, settings)
           })
         )
         yield* start(assistant)

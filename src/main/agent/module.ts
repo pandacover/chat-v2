@@ -35,3 +35,6 @@ export interface ToolModule {
   /** Called once when the reply ends, however it ends. */
   readonly end?: () => Promise<void>
 }
+
+/** Builds a tool set for one reply. The driver calls each factory once per reply it runs. */
+export type ToolModuleFactory = (ctx: RunContext) => ToolModule

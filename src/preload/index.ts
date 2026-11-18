@@ -54,9 +54,6 @@ const api: Api = {
     update: (patch) => call('settings:update', patch),
     openConfigFile: () => call('settings:openConfigFile')
   },
-  models: {
-    list: () => call('models:list')
-  },
   stt: {
     microphone: () => call('stt:microphone'),
     transcribe: (audio, mime) => call('stt:transcribe', audio, mime)

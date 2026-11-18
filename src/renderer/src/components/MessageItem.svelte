@@ -2,6 +2,7 @@
   import { tip } from '@/lib/tooltip'
   import { untrack } from 'svelte'
   import { parseContent, type ContentBlock } from '@shared/artifacts'
+  import { modelName } from '@shared/models'
   import { splitSteps, type Step } from '@shared/steps'
   import StepList from './StepList.svelte'
   import type { Attachment, PathNode } from '@shared/types'
@@ -283,7 +284,7 @@
           <Icon name="branch" size={14} />
         </button>
         <BranchSwitcher {node} disabled={busy} />
-        {#if message.model}<span class="ml-2 truncate text-[11.5px] text-muted">{message.model}</span>{/if}
+        {#if message.model}<span class="ml-2 truncate text-[11.5px] text-muted">{modelName(message.model)}</span>{/if}
         {#if message.usage}
           <span class="px-0.5 text-[11.5px] text-muted/60" aria-hidden="true">·</span>
           <span class="shrink-0 text-[11.5px] text-muted tabular-nums" use:tip={usageDetail(message.usage)} in:fade={{ duration: 200 }}>{usageLabel(message.usage)}</span>

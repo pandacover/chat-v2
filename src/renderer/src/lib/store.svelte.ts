@@ -6,7 +6,6 @@ import type {
   BrowserEvent,
   MemoryView,
   Message,
-  ModelInfo,
   Session,
   SessionPatch,
   SessionView,
@@ -52,8 +51,6 @@ class AppState {
   sessions = $state<Session[]>([])
   view = $state<SessionView | null>(null)
   settings = $state<SettingsView | null>(null)
-  models = $state<ModelInfo[]>([])
-  modelsError = $state<string | null>(null)
   artifact = $state<OpenArtifact | null>(null)
   /** Settings is a modal over the chat; the chat stays mounted so drafts and scroll survive. */
   page = $state<'chat' | 'settings'>('chat')
@@ -258,7 +255,6 @@ class AppState {
     // An unsent new chat is where the user left off; otherwise reopen the latest chat.
     const first = this.sessions[0]
     if (first && !this.drafts.has('')) await this.open(first.id)
-    void this.loadModels()
   }
 
   toast(text: string, kind: Toast['kind'] = 'error') {
@@ -295,15 +291,6 @@ class AppState {
   async setPinned(on: boolean) {
     const view = await this.attempt(() => api.settings.update({ settings: { alwaysOnTop: on } }))
     if (view) this.settings = view
-  }
-
-  async loadModels() {
-    try {
-      this.models = await api.models.list()
-      this.modelsError = null
-    } catch (e) {
-      this.modelsError = describe(e)
-    }
   }
 
   /** Installs a fresh view and catches up any replies that are still streaming. */

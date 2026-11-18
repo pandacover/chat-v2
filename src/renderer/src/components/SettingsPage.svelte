@@ -2,8 +2,7 @@
   import { tip } from '@/lib/tooltip'
   import { onDestroy, onMount } from 'svelte'
   import type { MemoryRevision, MemoryRun, Settings } from '@shared/types'
-  import { CALL_TOKENS, callCost } from '@shared/estimates'
-  import { money } from '@/lib/pricing'
+  import { modelName } from '@shared/models'
   import { CODE_FONTS, READING_FONTS, READING_SIZES, UI_FONTS, appearance, type FontOption, type ReadingSize } from '@/lib/appearance.svelte'
   import { fade, pop } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
@@ -13,12 +12,12 @@
   import ModelPicker from './ModelPicker.svelte'
 
   let form = $state<Settings>({ ...app.settings!.settings })
-  let keys = $state({ openRouterKey: '', elevenLabsKey: '' })
+  let keys = $state({ anthropicKey: '', elevenLabsKey: '' })
   let status = $state<'idle' | 'saving' | 'saved'>('idle')
   let scroller: HTMLDivElement | undefined = $state()
 
-  // One tab at a time, picked from the grouped list on the left. Without a key, the keys come first.
-  type Tab = 'model' | 'memory' | 'voice' | 'keys' | 'appearance' | 'about'
+  // One tab at a time, picked from the grouped list on the left. Missing the API key it needs, the account comes first.
+  type Tab = 'model' | 'memory' | 'voice' | 'account' | 'appearance' | 'about'
   const groups: Array<{ label: string; tabs: Array<{ id: Tab; label: string; icon: IconName }> }> = [
     {
       label: 'Chat',
@@ -29,18 +28,18 @@
     },
     {
       label: 'Tools',
-      tabs: [{ id: 'voice', label: 'Voice & files', icon: 'mic' }]
+      tabs: [{ id: 'voice', label: 'Voice', icon: 'mic' }]
     },
     {
       label: 'App',
       tabs: [
-        { id: 'keys', label: 'API keys', icon: 'key' },
+        { id: 'account', label: 'Account & keys', icon: 'key' },
         { id: 'appearance', label: 'Appearance', icon: 'type' },
         { id: 'about', label: 'About', icon: 'info' }
       ]
     }
   ]
-  let tab = $state<Tab>(app.settings!.hasOpenRouterKey ? 'model' : 'keys')
+  let tab = $state<Tab>(app.settings!.settings.auth === 'apiKey' && !app.settings!.hasAnthropicKey ? 'account' : 'model')
   const show = (id: Tab) => {
     tab = id
     scroller?.scrollTo({ top: 0 })
@@ -78,23 +77,25 @@
     }
   })
 
+  type KeyId = 'anthropicKey' | 'elevenLabsKey'
   const keyRows = $derived([
-    { id: 'openRouterKey' as const, label: 'OpenRouter', has: app.settings!.hasOpenRouterKey, link: 'https://openrouter.ai/keys', hint: 'sk-or-…', use: 'Chat replies and the model list.' },
+    ...(form.auth === 'apiKey'
+      ? [{ id: 'anthropicKey' as const, label: 'Anthropic', has: app.settings!.hasAnthropicKey, link: 'https://console.anthropic.com/settings/keys', hint: 'sk-ant-…', use: 'Chat replies, titles and memory.' }]
+      : []),
     { id: 'elevenLabsKey' as const, label: 'ElevenLabs', has: app.settings!.hasElevenLabsKey, link: 'https://elevenlabs.io/app/settings/api-keys', hint: 'Paste your key', use: 'Voice input.' }
   ])
 
-  const saveKey = async (id: 'openRouterKey' | 'elevenLabsKey') => {
+  const saveKey = async (id: KeyId) => {
     const value = keys[id].trim()
     if (!value) return
     const view = await app.attempt(() => window.api.settings.update({ [id]: value }))
     if (!view) return
     app.settings = view
     keys[id] = ''
-    app.toast(`${id === 'openRouterKey' ? 'OpenRouter' : 'ElevenLabs'} key saved`, 'info')
-    if (id === 'openRouterKey') void app.loadModels()
+    app.toast(`${id === 'anthropicKey' ? 'Anthropic' : 'ElevenLabs'} key saved`, 'info')
   }
 
-  const clearKey = async (id: 'openRouterKey' | 'elevenLabsKey') => {
+  const clearKey = async (id: KeyId) => {
     const view = await app.attempt(() => window.api.settings.update({ [id]: '' }))
     if (view) app.settings = view
   }
@@ -138,21 +139,6 @@
 
   const when = (at: number) => new Date(at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 
-  // OpenRouter names start with the provider ("Google: Gemini 2.5 Flash"); the picker shows it apart.
-  const shortName = (name: string) => name.replace(/^[^:]{1,40}:\s*/, '')
-  const modelName = (id: string) => shortName(app.models.find((m) => m.id === id)?.name ?? id)
-
-  /** What the picked model costs per call, from OpenRouter's current prices. */
-  const costLine = (id: string, kind: keyof typeof CALL_TOKENS, per: string) => {
-    const info = app.models.find((m) => m.id === id)
-    if (!info) return app.models.length ? `OpenRouter doesn't list a price for ${id}.` : ''
-    const cost = callCost(info.pricing, kind)
-    const name = shortName(info.name)
-    if (cost === null) return `${name}'s price depends on the model OpenRouter routes to.`
-    if (cost === 0) return `${name} is free.`
-    return `${name} costs about ${money(cost)} ${per} (${money(cost * 1000)} per thousand).`
-  }
-
   const OUTCOMES: Record<MemoryRun['outcome'], (r: MemoryRun) => string> = {
     skipped: () => "Skipped before the model: it doesn't say anything about you.",
     nothing: (r) => `${modelName(r.model!)} found nothing to keep.`,
@@ -172,10 +158,16 @@
   const field =
     'h-9 w-full rounded-md bg-surface px-3 text-[13px] shadow-[0_0_0_1px_var(--line)] outline-none transition-shadow placeholder:text-muted focus:shadow-[0_0_0_1px_var(--muted)]'
 
-  const pdfEngines = [
-    { id: 'cloudflare-ai', label: 'Text', hint: 'Extracts the text layer. Free.' },
-    { id: 'mistral-ocr', label: 'OCR', hint: 'Reads scanned pages. Billed per page by OpenRouter.' },
-    { id: 'native', label: 'Native', hint: 'Sends the file to the model. Needs a model that reads PDFs.' }
+  const auths = [
+    { id: 'login', label: 'Claude sign-in', hint: '' },
+    { id: 'apiKey', label: 'API key', hint: '' }
+  ]
+  const efforts = [
+    { id: 'low', label: 'Low', hint: 'Answers quickly and thinks little. Cheapest.' },
+    { id: 'medium', label: 'Medium', hint: 'Thinks where it helps. The default.' },
+    { id: 'high', label: 'High', hint: 'Thinks longer before it answers, for harder questions.' },
+    { id: 'xhigh', label: 'Higher', hint: 'Thinks much longer. Slower and costs more.' },
+    { id: 'max', label: 'Max', hint: 'Thinks as long as it needs. The slowest and most expensive.' }
   ]
   const themes = [
     { id: 'system', label: 'System' },
@@ -266,11 +258,23 @@
 
       <div bind:this={scroller} class="min-h-0 flex-1 overflow-y-auto">
         <div class="max-w-[640px] px-8 pb-16 text-[13px]">
-          {#if tab === 'keys'}
-          <section id="settings-keys">
-            <h2 class="font-serif text-[20px]">API keys</h2>
-            <p class="mt-1 text-muted">Encrypted with your operating system's keychain and stored on this device only.</p>
-            <div class="mt-5 space-y-5">
+          {#if tab === 'account'}
+          <section id="settings-account">
+            <h2 class="font-serif text-[20px]">Account</h2>
+            <p class="mt-1 max-w-[60ch] text-muted">Replies run on Claude Code, which comes with the app. It needs your Claude sign-in or an Anthropic API key.</p>
+            <div class="mt-5 max-w-md">
+              {@render segmented(auths, form.auth, (v) => (form.auth = v as Settings['auth']))}
+              <p class="mt-1.5 text-muted">
+                {#if form.auth === 'login'}
+                  Uses the account you signed in to Claude Code with, and its plan's usage. To sign in, run <code class="font-mono text-fg-2">claude</code> in a terminal and type <code class="font-mono text-fg-2">/login</code>.
+                {:else}
+                  Billed to your Anthropic Console account. The ANTHROPIC_API_KEY environment variable also works.
+                {/if}
+              </p>
+            </div>
+            <h3 class="mt-8 font-medium text-fg">API keys</h3>
+            <p class="mt-0.5 text-muted">Encrypted with your operating system's keychain and stored on this device only.</p>
+            <div class="mt-4 space-y-5">
               {#each keyRows as k (k.id)}
                 <div>
                   <div class="mb-1.5 flex items-baseline gap-2">
@@ -312,29 +316,17 @@
               <ModelPicker block value={form.defaultModel} onchange={(id) => (form.defaultModel = id)} />
             </div>
             <div class="mt-5 max-w-md">
-              <span class="mb-1.5 block font-medium text-fg">Vision model</span>
-              <ModelPicker
-                block
-                value={form.visionModel}
-                onchange={(id) => (form.visionModel = id)}
-                filter={(m) => m.inputModalities.includes('image')}
-                noneLabel="None: keep the chat's model"
-              />
-              <p class="mt-1.5 text-muted">Answers messages that include images, such as uploads or browser screenshots, when the chat's model can't see images.</p>
+              <span class="mb-1.5 block font-medium text-fg">Thinking</span>
+              {@render segmented(efforts, form.effort, (v) => (form.effort = v as Settings['effort']))}
+              <p class="mt-1.5 text-muted">{efforts.find((e) => e.id === form.effort)?.hint} Models that don't think ignore this.</p>
             </div>
             <div class="mt-5 max-w-md">
               <span class="mb-1.5 block font-medium text-fg">Title model</span>
               <ModelPicker block value={form.titleModel} onchange={(id) => (form.titleModel = id)} noneLabel="None: use the first message" />
               <p class="mt-1.5 text-muted">
-                Names each new chat from its first message. A small model is enough.
-                {form.titleModel ? costLine(form.titleModel, 'title', 'a title') : ''}
+                Names each new chat from its first message. Haiku is enough, and a title costs a fraction of a cent.
               </p>
             </div>
-            <label class="mt-5 block max-w-md">
-              <span class="mb-1.5 flex justify-between"><span class="font-medium text-fg">Temperature</span><span class="text-fg-2 tabular-nums">{form.temperature.toFixed(1)}</span></span>
-              <input type="range" min="0" max="2" step="0.1" bind:value={form.temperature} class="w-full accent-[var(--fg-2)]" />
-              <span class="mt-0.5 flex justify-between text-[11.5px] text-muted"><span>Focused</span><span>Varied</span></span>
-            </label>
           </section>
 
           <section id="settings-instructions" class="pt-8 shadow-[0_-1px_0_var(--line)]">
@@ -380,7 +372,7 @@
               <ModelPicker block value={form.memoryModel} onchange={(id) => (form.memoryModel = id)} noneLabel="None: memory off" />
               <p class="mt-1.5 text-muted">
                 {#if form.memoryModel}
-                  {costLine(form.memoryModel, 'memory', 'for each message it reads')} Messages that don't talk about you are skipped first, for free.
+                  Messages that don't talk about you are skipped first, for free.
                 {:else}
                   Nothing is learned, and chats start without the facts below.
                 {/if}
@@ -492,7 +484,7 @@
 
           {#if tab === 'voice'}
           <section id="settings-voice">
-            <h2 class="font-serif text-[20px]">Voice & files</h2>
+            <h2 class="font-serif text-[20px]">Voice</h2>
             <div class="mt-5 grid max-w-md grid-cols-2 gap-3">
               <label class="block">
                 <span class="mb-1.5 block font-medium text-fg">Speech model</span>
@@ -502,11 +494,6 @@
                 <span class="mb-1.5 block font-medium text-fg">Language</span>
                 <input bind:value={form.sttLanguage} placeholder="Detect automatically" class={field} />
               </label>
-            </div>
-            <div class="mt-5 max-w-md">
-              <span class="mb-1.5 block font-medium text-fg">PDF reading</span>
-              {@render segmented(pdfEngines, form.pdfEngine, (v) => (form.pdfEngine = v as Settings['pdfEngine']))}
-              <p class="mt-1.5 text-muted">{pdfEngines.find((e) => e.id === form.pdfEngine)?.hint}</p>
             </div>
           </section>
           {/if}

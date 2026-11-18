@@ -67,7 +67,7 @@ describe('streamed lines', () => {
   })
 })
 
-describe('attachment parts', () => {
+describe('attachment blocks', () => {
   test('encoded once and kept, until the attachment is discarded', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'chat-v2-att-'))
     dirs.push(dir)
@@ -82,14 +82,14 @@ describe('attachment parts', () => {
     try {
       const added = await run(Attachments.use((a) => a.add({ name: 'shot.png', mime: 'image/png', data: new Uint8Array([137, 80, 78, 71]).buffer })))
       const stored = (await run(Db.use((db) => db.use((d) => d.getAttachment(added.id)))))!
-      const first = await run(Attachments.use((a) => a.toParts([stored])))
-      expect(first.parts).toEqual([{ type: 'image_url', image_url: { url: 'data:image/png;base64,iVA=' } }])
-      // The file is gone, but the part was kept: nothing is read or encoded again.
+      const first = await run(Attachments.use((a) => a.toBlocks([stored])))
+      expect(first).toEqual([{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVA=' } }])
+      // The file is gone, but the block was kept: nothing is read or encoded again.
       rmSync(stored.path)
-      expect((await run(Attachments.use((a) => a.toParts([stored])))).parts).toEqual(first.parts)
+      expect(await run(Attachments.use((a) => a.toBlocks([stored])))).toEqual(first)
       expect(shrunk).toBe(1)
       await run(Attachments.use((a) => a.discard(added.id)))
-      expect(await run(Effect.flip(Attachments.use((a) => a.toParts([stored]))))).toMatchObject({ _tag: 'FileError' })
+      expect(await run(Effect.flip(Attachments.use((a) => a.toBlocks([stored]))))).toMatchObject({ _tag: 'FileError' })
     } finally {
       await runtime.dispose()
     }

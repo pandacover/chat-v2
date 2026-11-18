@@ -1,5 +1,8 @@
+import { mkdirSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
+import { query } from '@anthropic-ai/claude-agent-sdk'
 import { BrowserWindow, type WebContents, WebContentsView, app, autoUpdater as nativeUpdater, nativeTheme, safeStorage, session, shell, webContents } from 'electron'
 import { Effect, Layer, ManagedRuntime } from 'effect'
 import { adUrlPatterns } from '@shared/blocklist'
@@ -14,9 +17,9 @@ import { Attachments } from './services/Attachments'
 import { shrinkImage } from './images'
 import { Browser } from './services/Browser'
 import { Broadcaster, Chat } from './services/Chat'
+import { Agent, type AgentDeps, type QueryFn } from './agent/driver'
 import { Db } from './services/Db'
 import { ElevenLabs } from './services/ElevenLabs'
-import { OpenRouter } from './services/OpenRouter'
 import { type SecretCipher, SettingsStore } from './services/SettingsStore'
 
 registerSchemes()
@@ -129,13 +132,43 @@ const stopWorkersAfterClose = () =>
       })
   }, 1000)
 
+const load = createRequire(__filename)
+
+/**
+ * The Claude Code binary of a packaged app. The SDK looks for it beside itself, inside app.asar,
+ * where nothing can run; electron-builder unpacks it next to the archive (asarUnpack).
+ */
+const claudeBinary = () =>
+  load
+    .resolve(`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/claude${process.platform === 'win32' ? '.exe' : ''}`)
+    .replace(/app\.asar([\\/])/, 'app.asar.unpacked$1')
+
+const agentDeps = (root: string): AgentDeps => {
+  const configDir = join(root, 'claude')
+  mkdirSync(configDir, { recursive: true })
+  return {
+    // CHAT_V2_FAKE_QUERY (tests only): a module whose `query` stands in for the SDK's.
+    query: process.env.CHAT_V2_FAKE_QUERY ? (load(process.env.CHAT_V2_FAKE_QUERY) as { query: QueryFn }).query : query,
+    configDir,
+    cwd: root,
+    clientApp: `chat-v2/${app.getVersion()}`,
+    ...(app.isPackaged ? { executable: claudeBinary() } : {}),
+    // Started as the SDK would, but tracked, so quitting ends every Claude Code process.
+    spawn: (o) => {
+      const child = trackChild(spawn(o.command, o.args, { cwd: o.cwd, env: o.env, signal: o.signal, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }))
+      child.stderr.on('data', (chunk: Buffer) => console.warn(`[claude] ${chunk.toString().trimEnd()}`))
+      return child
+    }
+  }
+}
+
 const makeRuntime = () => {
   const root = app.getPath('userData')
   const paths = AppPaths.layer(root)
   const db = Db.layer(join(root, 'chat.db'))
   const settings = SettingsStore.layer(cipher).pipe(Layer.provide(paths))
   const base = Layer.mergeAll(db, settings, paths)
-  const providers = Layer.mergeAll(OpenRouter.layer, ElevenLabs.layer, Attachments.layerWith(shrinkImage), Browser.layer(emitBrowser, (id) => webContents.fromId(id))).pipe(
+  const providers = Layer.mergeAll(Agent.layer(agentDeps(root)), ElevenLabs.layer, Attachments.layerWith(shrinkImage), Browser.layer(emitBrowser, (id) => webContents.fromId(id))).pipe(
     Layer.provideMerge(base)
   )
   const chat = Chat.layer.pipe(

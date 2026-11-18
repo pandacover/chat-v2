@@ -35,16 +35,25 @@ export interface Attachment {
   analysis: AudioAnalysis | null
 }
 
-/** Tokens and OpenRouter credits for one reply, summed over every request it made. */
+/**
+ * Tokens and dollars for one reply, summed over every model call it made. Replies from before
+ * Claude (OpenRouter) have no cacheWriteTokens, and their cost is in OpenRouter credits, which
+ * were dollars too.
+ */
 export interface Usage {
+  /** Every input token, cached or not. */
   promptTokens: number
   completionTokens: number
   totalTokens: number
+  /** Input read from the prompt cache. */
   cachedTokens: number
+  /** Input written to the prompt cache. */
+  cacheWriteTokens?: number
+  /** Thinking, counted in completionTokens. */
   reasoningTokens: number
-  /** OpenRouter credits charged; null when the provider did not report a cost. */
+  /** US dollars, as Claude Code estimates them; null when not reported (a stopped reply). */
   cost: number | null
-  /** Model calls behind the reply (more than one when it used the browser). */
+  /** Model calls behind the reply (more than one when it used tools). */
   requests: number
 }
 
@@ -146,16 +155,18 @@ export interface SessionView {
   path: PathNode[]
 }
 
+/** How hard Claude thinks before it answers; higher is slower and costs more. */
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
 export interface Settings {
   defaultModel: string
   systemPrompt: string
-  temperature: number
+  effort: Effort
+  /** Replies run on the Claude Code sign-in (`claude`, then /login), or on an Anthropic API key. */
+  auth: 'login' | 'apiKey'
   sttModel: string
   sttLanguage: string
-  pdfEngine: 'cloudflare-ai' | 'mistral-ocr' | 'native'
   artifactsEnabled: boolean
-  /** Answers requests that contain images when the chat's model cannot see them; '' turns this off. */
-  visionModel: string
   /** Names new chats from their first message; '' keeps the start of the message as the title. */
   titleModel: string
   /** Picks facts about the user out of their messages; '' turns memory off (nothing learned or sent). */
@@ -166,7 +177,7 @@ export interface Settings {
 
 export interface SettingsView {
   settings: Settings
-  hasOpenRouterKey: boolean
+  hasAnthropicKey: boolean
   hasElevenLabsKey: boolean
   configPath: string
 }
@@ -174,19 +185,8 @@ export interface SettingsView {
 export interface SettingsPatch {
   settings?: Partial<Settings>
   /** `undefined` leaves the key untouched, `''` clears it. */
-  openRouterKey?: string
+  anthropicKey?: string
   elevenLabsKey?: string
-}
-
-export interface ModelInfo {
-  id: string
-  name: string
-  contextLength: number | null
-  inputModalities: string[]
-  /** Whether OpenRouter lists tool calling for this model (needed for browser control). */
-  supportsTools: boolean
-  /** USD per million tokens; null when unknown or variable (routers). */
-  pricing: { input: number | null; output: number | null; cacheRead: number | null; cacheWrite: number | null }
 }
 
 export type StreamEvent =
@@ -274,9 +274,6 @@ export interface Api {
     get(): Promise<SettingsView>
     update(patch: SettingsPatch): Promise<SettingsView>
     openConfigFile(): Promise<void>
-  }
-  models: {
-    list(): Promise<ModelInfo[]>
   }
   stt: {
     /** Asks for microphone access where the OS requires it (macOS); false when it is off. */

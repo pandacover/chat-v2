@@ -4,8 +4,8 @@ import type { ShrinkImage } from './services/Attachments'
 
 /**
  * The longest edge an image goes to a model at. Claude scales anything larger down to about
- * this itself, and other providers bill by tiles, so more pixels cost tokens and upload time
- * for nothing. A Retina screenshot is often three times this.
+ * this itself, so more pixels cost upload time for nothing. A Retina screenshot is often three
+ * times this.
  */
 export const MAX_IMAGE_EDGE = 1568
 

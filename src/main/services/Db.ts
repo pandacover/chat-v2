@@ -103,7 +103,13 @@ const MIGRATIONS: string[] = [
     primary key (message_id, idx)
   ) without rowid;`,
   // Mood boards are gone: they drew their sketches with image models, which Claude has none of.
-  `drop table boards;`
+  `drop table boards;`,
+  // Where each reply is in Claude Code's sessions (see agent/history.ts): the session it wrote to,
+  // the last entry it wrote there, and Claude Code's running total for the session after it.
+  `alter table messages add column agent_session text;
+  alter table messages add column agent_uuid text;
+  alter table messages add column agent_cost real;
+  create index messages_agent_session on messages(agent_session);`
 ]
 
 /** At most this many facts are kept; past it, new ones are dropped until some are removed. */
@@ -584,15 +590,22 @@ export const makeDb = (file: string) => {
       )
     })
 
-  /** Deletes a session and returns attachment files no other row references. */
-  const deleteSession = (id: string): string[] =>
+  /** Deletes a session; returns the attachment files and Claude Code sessions nothing else refers to. */
+  const deleteSession = (id: string): { files: string[]; agentSessions: string[] } =>
     transaction(() => {
       const paths = all<{ path: string }>(
         `select distinct a.path from attachments a join messages m on m.id = a.message_id where m.session_id = ?`,
         id
       ).map((r) => r.path)
+      const agentSessions = all<{ s: string }>(
+        'select distinct agent_session as s from messages where session_id = ? and agent_session is not null',
+        id
+      ).map((r) => r.s)
       run('delete from sessions where id = ?', id)
-      return paths.filter((p) => !one('select 1 from attachments where path = ?', p))
+      return {
+        files: paths.filter((p) => !one('select 1 from attachments where path = ?', p)),
+        agentSessions: agentSessions.filter((s) => !one('select 1 from messages where agent_session = ?', s))
+      }
     })
 
   return {
@@ -672,6 +685,34 @@ export const makeDb = (file: string) => {
     setModel: (messageId: string, model: string) => {
       run('update messages set model = ? where id = ?', model, messageId)
     },
+    /** Where a reply is in Claude Code's sessions, or null for a reply that never ran there. */
+    agentPoint: (messageId: string): { session: string; uuid: string | null } | null => {
+      const row = one<{ agent_session: string | null; agent_uuid: string | null }>('select agent_session, agent_uuid from messages where id = ?', messageId)
+      return row?.agent_session ? { session: row.agent_session, uuid: row.agent_uuid } : null
+    },
+    /**
+     * A reply starts writing to `session`. Its checkpoint stays only if it was already in that
+     * session (a reply continued in place); in another one it means nothing.
+     */
+    claimAgentSession: (messageId: string, session: string) => {
+      run(
+        'update messages set agent_uuid = case when agent_session = ? then agent_uuid end, agent_session = ? where id = ?',
+        session,
+        session,
+        messageId
+      )
+    },
+    checkpoint: (messageId: string, uuid: string) => {
+      run('update messages set agent_uuid = ? where id = ?', uuid, messageId)
+    },
+    setAgentCost: (messageId: string, cost: number) => {
+      run('update messages set agent_cost = ? where id = ?', cost, messageId)
+    },
+    /** The reply that last started writing to a session. Chat forks copy no session, so it is always its own chat's. */
+    agentTip: (session: string): string | null =>
+      one<{ id: string }>('select id from messages where agent_session = ? order by seq desc limit 1', session)?.id ?? null,
+    agentCost: (session: string): number =>
+      one<{ cost: number | null }>('select max(agent_cost) as cost from messages where agent_session = ?', session)?.cost ?? 0,
     /**
      * Before continuing a reply that ended mid-line, takes the partial last line back
      * out of the row so the continuation can complete it. Returns that line, or null.

@@ -9,13 +9,13 @@ import { publishArtifact } from './protocols'
 import { Attachments } from './services/Attachments'
 import { Browser } from './services/Browser'
 import { Chat, NEW_SESSION_TITLE } from './services/Chat'
+import { Agent } from './agent/driver'
 import { Db, type DbApi } from './services/Db'
 import { isSensitive } from './memory'
 import { ElevenLabs } from './services/ElevenLabs'
-import { OpenRouter } from './services/OpenRouter'
 import { SettingsStore } from './services/SettingsStore'
 
-export type MainServices = Db | Chat | Attachments | SettingsStore | OpenRouter | ElevenLabs | Browser
+export type MainServices = Db | Chat | Attachments | SettingsStore | Agent | ElevenLabs | Browser
 
 type Handler = (...args: any[]) => Effect.Effect<unknown, { readonly _tag: string; readonly message: string }, MainServices>
 
@@ -113,8 +113,9 @@ const handlers: Record<string, Handler> = {
       const db = yield* Db
       const chat = yield* Chat
       for (const messageId of yield* db.use((d) => d.streamingIds(str(id, 'id')))) yield* chat.stop(messageId)
-      const orphanFiles = yield* db.use((d) => d.deleteSession(id))
-      yield* (yield* Attachments).removeFiles(orphanFiles)
+      const orphans = yield* db.use((d) => d.deleteSession(id))
+      yield* (yield* Attachments).removeFiles(orphans.files)
+      yield* Agent.use((a) => Effect.sync(() => a.forget(orphans.agentSessions)))
     }),
   'sessions:fork': (sessionId, messageId) =>
     Effect.gen(function* () {
@@ -204,8 +205,6 @@ const handlers: Record<string, Handler> = {
       const view = yield* (yield* SettingsStore).view
       yield* Effect.promise(() => shell.openPath(view.configPath))
     }),
-
-  'models:list': () => OpenRouter.use((o) => o.listModels),
 
   'stt:microphone': () => Effect.promise(microphoneAccess),
   'stt:transcribe': (audio: ArrayBuffer, mime) =>

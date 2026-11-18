@@ -1,62 +1,50 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { Context, Effect, Layer } from 'effect'
-import type { Settings, SettingsPatch, SettingsView } from '@shared/types'
+import { DEFAULT_MODEL, SMALL_MODEL, isClaudeModel } from '@shared/models'
+import type { Effort, Settings, SettingsPatch, SettingsView } from '@shared/types'
 import { ConfigError, MissingApiKey, errorMessage } from '../errors'
 import { AppPaths } from './AppPaths'
-
-/**
- * OpenRouter's auto-router, the default before DEFAULT_MODEL. It can route each request of one
- * reply to a different model, so nothing is cached between steps.
- */
-export const AUTO_ROUTER = 'openrouter/auto'
-
-/**
- * A fixed, inexpensive model that sees screenshots and takes tools. DeepSeek caches the unchanged
- * start of each request on its own, so every step reads the steps before it from the cache.
- */
-export const DEFAULT_MODEL = 'deepseek/deepseek-v4.1-flash'
-
-/** The model a reply that uses tools runs on: the chat's, unless that is the auto-router. */
-export const toolModel = (model: string) => (model === AUTO_ROUTER ? DEFAULT_MODEL : model)
 
 export const DEFAULT_SETTINGS: Settings = {
   defaultModel: DEFAULT_MODEL,
   systemPrompt: 'You are a helpful, concise assistant. Format answers with Markdown.',
-  temperature: 0.7,
+  effort: 'medium',
+  auth: 'login',
   sttModel: 'scribe_v2',
   sttLanguage: '',
-  pdfEngine: 'cloudflare-ai',
   artifactsEnabled: true,
-  visionModel: '',
-  // About $0.00001 per title.
-  titleModel: 'mistralai/mistral-nemo',
-  // Reads messages that talk about the user for facts; about $0.0003 a message, thinking off.
-  // Small models (Mistral NeMo) made facts up and missed ones said in passing.
-  memoryModel: 'google/gemini-2.5-flash',
+  titleModel: SMALL_MODEL,
+  memoryModel: SMALL_MODEL,
   alwaysOnTop: false
 }
 
-const PDF_ENGINES: ReadonlyArray<Settings['pdfEngine']> = ['cloudflare-ai', 'mistral-ocr', 'native']
+const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 
-/** Merges whatever is in config.json over the defaults, ignoring values of the wrong type. */
+/**
+ * Merges whatever is in config.json over the defaults. Values of the wrong type fall back to the
+ * default, and keys the app doesn't know (OpenRouter's, from before) are dropped.
+ */
 export const normalizeSettings = (raw: unknown): Settings => {
   const input = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
   const str = (k: keyof Settings, fallback: string) => (typeof input[k] === 'string' ? (input[k] as string) : fallback)
-  const temperature = typeof input.temperature === 'number' ? Math.min(2, Math.max(0, input.temperature)) : undefined
-  const pdfEngine = PDF_ENGINES.find((e) => e === input.pdfEngine)
+  const bool = (k: keyof Settings, fallback: boolean) => (typeof input[k] === 'boolean' ? (input[k] as boolean) : fallback)
+  // '' turns titles or memory off; a model that isn't Claude's (OpenRouter's) is replaced.
+  const optionalModel = (k: 'titleModel' | 'memoryModel') => {
+    const v = str(k, DEFAULT_SETTINGS[k]).trim()
+    return v === '' || isClaudeModel(v) ? v : DEFAULT_SETTINGS[k]
+  }
+  const model = str('defaultModel', '').trim()
   return {
-    defaultModel: str('defaultModel', DEFAULT_SETTINGS.defaultModel).trim() || DEFAULT_SETTINGS.defaultModel,
+    defaultModel: isClaudeModel(model) ? model : DEFAULT_SETTINGS.defaultModel,
     systemPrompt: str('systemPrompt', DEFAULT_SETTINGS.systemPrompt),
-    temperature: temperature ?? DEFAULT_SETTINGS.temperature,
+    effort: EFFORTS.find((e) => e === input.effort) ?? DEFAULT_SETTINGS.effort,
+    auth: input.auth === 'apiKey' ? 'apiKey' : 'login',
     sttModel: str('sttModel', DEFAULT_SETTINGS.sttModel).trim() || DEFAULT_SETTINGS.sttModel,
     sttLanguage: str('sttLanguage', DEFAULT_SETTINGS.sttLanguage).trim(),
-    pdfEngine: pdfEngine ?? DEFAULT_SETTINGS.pdfEngine,
-    artifactsEnabled:
-      typeof input.artifactsEnabled === 'boolean' ? input.artifactsEnabled : DEFAULT_SETTINGS.artifactsEnabled,
-    visionModel: str('visionModel', DEFAULT_SETTINGS.visionModel).trim(),
-    titleModel: str('titleModel', DEFAULT_SETTINGS.titleModel).trim(),
-    memoryModel: str('memoryModel', DEFAULT_SETTINGS.memoryModel).trim(),
-    alwaysOnTop: typeof input.alwaysOnTop === 'boolean' ? input.alwaysOnTop : DEFAULT_SETTINGS.alwaysOnTop
+    artifactsEnabled: bool('artifactsEnabled', DEFAULT_SETTINGS.artifactsEnabled),
+    titleModel: optionalModel('titleModel'),
+    memoryModel: optionalModel('memoryModel'),
+    alwaysOnTop: bool('alwaysOnTop', DEFAULT_SETTINGS.alwaysOnTop)
   }
 }
 
@@ -66,32 +54,18 @@ export interface SecretCipher {
   decrypt(cipher: string): string
 }
 
-export type KeyName = 'openrouter' | 'elevenlabs'
+export type KeyName = 'anthropic' | 'elevenlabs'
 
-const ENV_KEYS: Record<KeyName, string> = { openrouter: 'OPENROUTER_API_KEY', elevenlabs: 'ELEVENLABS_API_KEY' }
-const LABELS: Record<KeyName, string> = { openrouter: 'OpenRouter', elevenlabs: 'ElevenLabs' }
+const KEY_NAMES: readonly KeyName[] = ['anthropic', 'elevenlabs']
+const ENV_KEYS: Record<KeyName, string> = { anthropic: 'ANTHROPIC_API_KEY', elevenlabs: 'ELEVENLABS_API_KEY' }
+const LABELS: Record<KeyName, string> = { anthropic: 'Anthropic', elevenlabs: 'ElevenLabs' }
 
 const writeAtomic = (file: string, data: string) => {
   writeFileSync(`${file}.tmp`, data, 'utf8')
   renameSync(`${file}.tmp`, file)
 }
 
-/**
- * The version of config.json itself, kept in the file next to the settings. A file older than
- * this is brought up to date once, at startup (MIGRATIONS), and every write stamps this version,
- * so a migration never runs twice.
- */
-export const CONFIG_VERSION = 2
-
-/** What reaching each version changes in the file as it was. Files from before versions are 1. */
-const MIGRATIONS: Record<number, (raw: Record<string, unknown>) => void> = {
-  // The default moved off the auto-router. Choosing it again later is kept: the file is version 2 by then.
-  2: (raw) => {
-    if (raw.defaultModel === AUTO_ROUTER) raw.defaultModel = DEFAULT_MODEL
-  }
-}
-
-const configText = (settings: object) => JSON.stringify({ configVersion: CONFIG_VERSION, ...settings }, null, 2) + '\n'
+const configText = (settings: Settings) => JSON.stringify(settings, null, 2) + '\n'
 
 export class SettingsStore extends Context.Service<
   SettingsStore,
@@ -114,17 +88,6 @@ export class SettingsStore extends Context.Service<
             catch: (cause) => new ConfigError({ message: `${what}: ${errorMessage(cause)}`, cause })
           })
 
-        // Once, at startup: an older config.json is brought up to date, keeping everything else in
-        // it as it was. A file that can't be read is left alone (reading it says why).
-        yield* attempt('Could not update config.json', () => {
-          if (!existsSync(paths.configFile)) return
-          const { configVersion, ...raw } = JSON.parse(readFileSync(paths.configFile, 'utf8')) as Record<string, unknown>
-          const from = typeof configVersion === 'number' ? configVersion : 1
-          if (from >= CONFIG_VERSION) return
-          for (let v = from + 1; v <= CONFIG_VERSION; v++) MIGRATIONS[v]?.(raw)
-          writeAtomic(paths.configFile, configText(raw))
-        }).pipe(Effect.catch((e) => Effect.logWarning(e.message)))
-
         // config.json is meant to be hand-editable, so it is re-read on every access.
         const readConfig = attempt('Could not read config.json', () => {
           if (!existsSync(paths.configFile)) {
@@ -138,7 +101,7 @@ export class SettingsStore extends Context.Service<
           if (!existsSync(paths.secretsFile)) return {}
           const raw = JSON.parse(readFileSync(paths.secretsFile, 'utf8')) as Record<string, unknown>
           const out: Partial<Record<KeyName, string>> = {}
-          for (const name of ['openrouter', 'elevenlabs'] as const) {
+          for (const name of KEY_NAMES) {
             const value = raw[name]
             if (typeof value === 'string' && value) out[name] = cipher.decrypt(value)
           }
@@ -153,7 +116,7 @@ export class SettingsStore extends Context.Service<
           const secrets = yield* readSecrets
           return {
             settings,
-            hasOpenRouterKey: resolveKey(secrets, 'openrouter') !== '',
+            hasAnthropicKey: resolveKey(secrets, 'anthropic') !== '',
             hasElevenLabsKey: resolveKey(secrets, 'elevenlabs') !== '',
             configPath: paths.configFile
           } satisfies SettingsView
@@ -163,14 +126,12 @@ export class SettingsStore extends Context.Service<
           if (patch.settings) {
             const current = yield* readConfig
             const next = normalizeSettings({ ...current, ...patch.settings })
-            yield* attempt('Could not write config.json', () =>
-              writeAtomic(paths.configFile, configText(next))
-            )
+            yield* attempt('Could not write config.json', () => writeAtomic(paths.configFile, configText(next)))
           }
-          if (patch.openRouterKey !== undefined || patch.elevenLabsKey !== undefined) {
+          if (patch.anthropicKey !== undefined || patch.elevenLabsKey !== undefined) {
             const secrets = yield* readSecrets
             const next: Partial<Record<KeyName, string>> = { ...secrets }
-            if (patch.openRouterKey !== undefined) next.openrouter = patch.openRouterKey.trim()
+            if (patch.anthropicKey !== undefined) next.anthropic = patch.anthropicKey.trim()
             if (patch.elevenLabsKey !== undefined) next.elevenlabs = patch.elevenLabsKey.trim()
             yield* attempt('Could not write secrets.json', () => {
               const encrypted: Record<string, string> = {}

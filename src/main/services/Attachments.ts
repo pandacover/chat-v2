@@ -5,7 +5,7 @@ import { Context, Effect, Layer } from 'effect'
 import type { Attachment, AttachmentKind, NewAttachmentInput } from '@shared/types'
 import { type DbError, FileError, InvalidInput, NotFound, errorMessage } from '../errors'
 import { describeAudio } from '@shared/audio-prompt'
-import type { ContentPart } from './OpenRouter'
+import type { PromptBlock } from '../agent/driver'
 import { AppPaths } from './AppPaths'
 import { Db, type StoredAttachment } from './Db'
 
@@ -45,9 +45,10 @@ const looksBinary = (bytes: Uint8Array) => bytes.subarray(0, 8000).includes(0)
 export type ShrinkImage = (data: Buffer, mime: string) => { data: Buffer; mime: string } | null
 
 /**
- * Characters of encoded attachments kept in memory. Every reply sends the whole chat again, and
- * reading and base64-encoding each image and PDF in it every time (a 20 MB PDF is a 27 MB string)
- * was most of the work of building a request. The files never change, so their parts are kept.
+ * Characters of encoded attachments kept in memory. A reply usually sends only its own message's
+ * files (the session has the rest), but one that starts a session sends the whole chat's, and
+ * reading and base64-encoding a 20 MB PDF makes a 27 MB string. The files never change, so their
+ * blocks are kept.
  */
 const PART_CACHE_CHARS = 96 * 1024 * 1024
 
@@ -57,9 +58,8 @@ export class Attachments extends Context.Service<
     readonly add: (input: NewAttachmentInput) => Effect.Effect<Attachment, InvalidInput | FileError | DbError>
     readonly discard: (id: string) => Effect.Effect<void, DbError>
     readonly read: (id: string) => Effect.Effect<{ data: Uint8Array<ArrayBuffer>; mime: string }, NotFound | FileError | DbError>
-    readonly toParts: (
-      attachments: readonly StoredAttachment[]
-    ) => Effect.Effect<{ parts: ContentPart[]; hasPdf: boolean }, FileError>
+    /** The files as content blocks: images and PDFs as the model reads them, text files inline. */
+    readonly toBlocks: (attachments: readonly StoredAttachment[]) => Effect.Effect<PromptBlock[], FileError>
     readonly removeFiles: (paths: readonly string[]) => Effect.Effect<void>
   }
 >()('chat-v2/Attachments') {
@@ -71,8 +71,8 @@ export class Attachments extends Context.Service<
         const paths = yield* AppPaths
         const db = yield* Db
 
-        /** Encoded parts by attachment id, least recently used first. */
-        const cache = new Map<string, { part: ContentPart; chars: number }>()
+        /** Encoded blocks by attachment id, least recently used first. */
+        const cache = new Map<string, { block: PromptBlock; chars: number }>()
         let cachedChars = 0
         const forget = (id: string) => {
           const entry = cache.get(id)
@@ -80,10 +80,10 @@ export class Attachments extends Context.Service<
           cache.delete(id)
           cachedChars -= entry.chars
         }
-        const keep = (id: string, part: ContentPart, chars: number) => {
+        const keep = (id: string, block: PromptBlock, chars: number) => {
           // Room for the largest file allowed (25 MB is 35 M characters of base64), twice over.
           if (chars > PART_CACHE_CHARS / 2) return
-          cache.set(id, { part, chars })
+          cache.set(id, { block, chars })
           cachedChars += chars
           for (const [old] of cache) {
             if (cachedChars <= PART_CACHE_CHARS) break
@@ -132,53 +132,51 @@ export class Attachments extends Context.Service<
           return { data: Uint8Array.from(data), mime: a.mime }
         })
 
-        const toParts = Effect.fn('Attachments.toParts')(function* (
-          attachments: readonly StoredAttachment[]
-        ) {
-          const parts: ContentPart[] = []
-          let hasPdf = false
+        const toBlocks = Effect.fn('Attachments.toBlocks')(function* (attachments: readonly StoredAttachment[]) {
+          const blocks: PromptBlock[] = []
           for (const a of attachments) {
             // Audio goes to the model as its measurements, so the file is never read here.
             if (a.kind === 'audio') {
-              parts.push({ type: 'text', text: describeAudio(a.name, a.analysis) })
+              blocks.push({ type: 'text', text: describeAudio(a.name, a.analysis) })
               continue
             }
-            if (a.kind === 'pdf') hasPdf = true
             const known = cache.get(a.id)
             if (known) {
               // Used just now, so it goes to the back of the line.
               cache.delete(a.id)
               cache.set(a.id, known)
-              parts.push(known.part)
+              blocks.push(known.block)
               continue
             }
             const data = yield* Effect.tryPromise({
               try: () => readFile(a.path),
               catch: fileError(`Attachment ${a.name} is missing`)
             })
-            let part: ContentPart
+            let block: PromptBlock
+            let chars: number
             if (a.kind === 'image') {
               const image = shrink(data, a.mime) ?? { data, mime: a.mime }
-              part = { type: 'image_url', image_url: { url: `data:${image.mime};base64,${image.data.toString('base64')}` } }
-              keep(a.id, part, part.image_url.url.length)
+              const encoded = image.data.toString('base64')
+              block = { type: 'image', source: { type: 'base64', media_type: image.mime as 'image/png', data: encoded } }
+              chars = encoded.length
             } else if (a.kind === 'pdf') {
-              part = {
-                type: 'file',
-                file: { filename: a.name, file_data: `data:application/pdf;base64,${data.toString('base64')}` }
-              }
-              keep(a.id, part, part.file.file_data.length)
+              // Claude reads the PDF itself: its text, and its pages as images.
+              const encoded = data.toString('base64')
+              block = { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: encoded }, title: a.name }
+              chars = encoded.length
             } else {
               let text = data.toString('utf8')
               if (text.length > MAX_TEXT_CHARS) text = `${text.slice(0, MAX_TEXT_CHARS)}\n…[truncated]`
-              part = { type: 'text', text: `<file name="${a.name.replace(/"/g, "'")}">\n${text}\n</file>` }
-              keep(a.id, part, part.text.length)
+              block = { type: 'text', text: `<file name="${a.name.replace(/"/g, "'")}">\n${text}\n</file>` }
+              chars = block.text.length
             }
-            parts.push(part)
+            keep(a.id, block, chars)
+            blocks.push(block)
           }
-          return { parts, hasPdf }
+          return blocks
         })
 
-        return Attachments.of({ add, discard, read, toParts, removeFiles })
+        return Attachments.of({ add, discard, read, toBlocks, removeFiles })
       })
     )
   }

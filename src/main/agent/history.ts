@@ -1,0 +1,90 @@
+// Which Claude Code session a reply continues, and which messages its prompt has to carry.
+//
+// Chats are trees (edits, regenerations, forks and Continue add messages), and Claude Code keeps
+// a chat's history as sessions. Every reply records its session and the last entry it wrote
+// there (its checkpoint). A new turn resumes the session of the reply it answers at that
+// checkpoint: in place when that reply is still the newest in its session, on a copy (a fork) when
+// the chat has since branched from there. The user message is then all the prompt carries, and
+// Claude Code sends the earlier turns, tool calls and results included, as they were, so they come
+// from the prompt cache.
+//
+// Measured with Haiku 5.5 on a chat whose first turn pasted ~10k tokens: the third turn cost
+// $0.000118 resumed (62 tokens written to the cache) against $0.000188 with the earlier turns
+// sent again as text in a fresh session (about 440 written: Claude Code puts its environment
+// block after the user's text, so each turn's cache entry starts over from the newest message).
+// Both took 2.6 to 3.4 s, most of it starting Claude Code. A fresh session is still the fallback
+// when there is no session to resume: chats from before Claude, and replies that failed before
+// writing anything. Its user message then carries the earlier turns as a transcript.
+import { summarizeSteps } from '@shared/steps'
+import type { Message } from '@shared/types'
+
+/** Where a reply is in Claude Code's sessions. */
+export interface AgentPoint {
+  session: string
+  /** The last entry the reply wrote; null until it wrote one. */
+  uuid: string | null
+}
+
+export interface SessionLookup {
+  point(messageId: string): AgentPoint | null
+  /** The reply that started in or last continued the session. */
+  tip(session: string): string | null
+  /** Claude Code's running total for the session, in dollars. */
+  cost(session: string): number
+  /** Whether the session's file is still there to resume. */
+  exists(session: string): boolean
+}
+
+export interface TurnPlan {
+  resume: { session: string; at: string; fork: boolean } | null
+  baseCost: number
+  /** The messages the prompt carries, oldest first. The last is the user message being answered, unless continuing from the reply's own checkpoint. */
+  turns: Message[]
+}
+
+/**
+ * Plans the reply to the user message that ends `lineage` (root first). `reply` is the
+ * assistant message being written; `continuing` when it already has text to carry on from.
+ */
+export const planTurn = (lineage: readonly Message[], reply: Message, continuing: boolean, look: SessionLookup): TurnPlan => {
+  const resumable = (m: Message) => {
+    if (m.role !== 'assistant') return null
+    const p = look.point(m.id)
+    return p?.uuid && look.exists(p.session) ? { session: p.session, at: p.uuid } : null
+  }
+  const from = (m: Message, p: { session: string; at: string }) => ({
+    resume: { ...p, fork: look.tip(p.session) !== m.id },
+    baseCost: look.cost(p.session)
+  })
+  // A reply cut off after its first checkpoint: its own session has everything up to there.
+  const own = continuing ? resumable(reply) : null
+  if (own) return { ...from(reply, own), turns: [] }
+  for (let i = lineage.length - 1; i >= 0; i--) {
+    const p = resumable(lineage[i]!)
+    if (p) return { ...from(lineage[i]!, p), turns: lineage.slice(i + 1) }
+  }
+  return { resume: null, baseCost: 0, turns: [...lineage] }
+}
+
+/** In every system prompt, so it never changes between turns (which would miss the cache). */
+export const HISTORY_NOTE =
+  "If a message starts with earlier turns of this chat inside <user> and <assistant> tags, those are turns you don't have in your history. Answer only what comes after them."
+
+/** An earlier turn written into a prompt, or null when it has nothing to show. */
+export const transcriptText = (m: Message): string | null => {
+  if (m.role === 'user') return `<user>\n${m.content}\n</user>`
+  const text = summarizeSteps(m.content).trim()
+  return text ? `<assistant>\n${text}\n</assistant>` : null
+}
+
+/** How much of a cut-off reply's end is quoted back when continuing it from its own session. */
+const TAIL_CHARS = 1500
+
+/** Continuing a reply: asks for the rest. `tail` is quoted when the session may not have it all. */
+export const continueNote = (tail: string | null) => {
+  const ask =
+    "Continue it from exactly where it stopped: don't repeat anything you already wrote, don't start over, and don't say that you are continuing."
+  if (tail === null) return `Your reply above was cut off. ${ask}`
+  const end = summarizeSteps(tail).trimEnd().slice(-TAIL_CHARS)
+  return `Your reply was cut off. What you had written ends with:\n<cut_off>\n${end}\n</cut_off>\n${ask}`
+}

@@ -198,17 +198,3 @@ describe('sessions', () => {
     db.close()
   })
 })
-
-describe('memory cost', () => {
-  test('the per-message estimate in Settings covers the prompt', async () => {
-    const { CALL_TOKENS, callCost } = await import('../src/shared/estimates')
-    const { MEMORY_INSTRUCTIONS } = await import('../src/main/memory')
-    // About 4 characters a token, plus a few facts, the assistant's last lines and a message.
-    const typical = MEMORY_INSTRUCTIONS.length / 4 + 250
-    expect(CALL_TOKENS.memory.input).toBeGreaterThanOrEqual(typical)
-    expect(CALL_TOKENS.memory.input).toBeLessThan(typical * 1.5)
-    // Claude Haiku 4.5 at $1 in and $5 out per million tokens.
-    expect(callCost({ input: 1, output: 5, cacheRead: null, cacheWrite: null }, 'memory')).toBeCloseTo(0.00105, 8)
-    expect(callCost({ input: null, output: null, cacheRead: null, cacheWrite: null }, 'memory')).toBeNull()
-  })
-})
