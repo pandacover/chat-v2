@@ -57,20 +57,10 @@ jobs:
       - name: Set version
         run: npm pkg set version=${{ env.VERSION }}
       - run: bun run build
-      # The macOS screen capture helper (Swift), rebuilt only when its source or Xcode changes.
-      - name: Xcode version
-        id: xcode
+      # Each Mac build ships the Claude Code binary for its own processor; bun installs only this one's.
+      - name: Install the Claude Code binary for the other Mac processor
         if: runner.os == 'macOS'
-        run: echo "version=$(xcodebuild -version | shasum | cut -c1-12)" >>"$GITHUB_OUTPUT"
-      - name: Cache the capture helper
-        id: helper
-        if: runner.os == 'macOS'
-        uses: actions/cache@v6
-        with:
-          path: native/mac-capture/out
-          key: mac-capture-${{ steps.xcode.outputs.version }}-${{ hashFiles('native/mac-capture/main.swift', 'scripts/build-mac-capture.ts') }}
-      - if: runner.os == 'macOS' && steps.helper.outputs.cache-hit != 'true'
-        run: bun run build:mac-capture
+        run: bun scripts/claude-binaries.ts
       - name: Build and upload the Windows installer (draft release)
         if: runner.os == 'Windows'
         run: bunx electron-builder --publish always
@@ -92,19 +82,18 @@ jobs:
           # Only the identity named above, never another one found on the runner.
           CSC_IDENTITY_AUTO_DISCOVERY: false
       # Signed with the release certificate, with the designated requirement every version shares,
-      # and the capture helper signed and working (scripts/ci-mac-verify.sh). Failing here leaves
+      # and the Claude Code binary signed and working (scripts/ci-mac-verify.sh). Failing here leaves
       # the release a draft, which the cleanup job deletes. The zips are checked too: they are what
       # Squirrel.Mac installs.
       - name: Check the macOS signatures
         if: runner.os == 'macOS'
         run: |
-          for app in dist/mac/chat-v2.app dist/mac-arm64/chat-v2.app; do
-            bash scripts/ci-mac-verify.sh "$app" self-signed
-          done
+          bash scripts/ci-mac-verify.sh dist/mac/chat-v2.app self-signed x64
+          bash scripts/ci-mac-verify.sh dist/mac-arm64/chat-v2.app self-signed arm64
           for arch in arm64 x64; do
             unzipped="$RUNNER_TEMP/zip-$arch"
             ditto -x -k "dist/chat-v2-${VERSION}-${arch}.zip" "$unzipped"
-            bash scripts/ci-mac-verify.sh "$unzipped/chat-v2.app" self-signed
+            bash scripts/ci-mac-verify.sh "$unzipped/chat-v2.app" self-signed "$arch"
           done
       # Apps from before the per-processor builds download "-universal.dmg". The Intel DMG runs on
       # both (through Rosetta on Apple silicon), and their next update moves them to arm64. Drop

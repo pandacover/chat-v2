@@ -1,5 +1,5 @@
-# Checks a branch before it reaches main: builds the macOS capture helper (Swift, which only
-# builds on a Mac), checks it, and runs the tests there. main itself is checked by release.yml.
+# Checks a branch before it reaches main: runs the tests on a Mac, builds the app, and checks it
+# quits and packages signed. main itself is checked by release.yml.
 name: Check
 
 on:
@@ -20,51 +20,18 @@ jobs:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
-      # Rebuilt only when its source or Xcode changes.
-      - name: Xcode version
-        id: xcode
-        run: echo "version=$(xcodebuild -version | shasum | cut -c1-12)" >>"$GITHUB_OUTPUT"
-      - name: Cache the capture helper
-        id: helper
-        uses: actions/cache@v6
-        with:
-          path: native/mac-capture/out
-          key: mac-capture-${{ steps.xcode.outputs.version }}-${{ hashFiles('native/mac-capture/main.swift', 'scripts/build-mac-capture.ts') }}
-      - if: steps.helper.outputs.cache-hit != 'true'
-        run: bun run build:mac-capture
-      # Both architectures, ScreenCaptureKit linked, and it starts: --selftest only reports what
-      # is available (no capture, no permission prompt).
-      - name: Check the capture helper
-        run: |
-          helper=native/mac-capture/out/chat-v2-capture
-          lipo -info "$helper"
-          lipo "$helper" -verify_arch arm64 x86_64
-          otool -L "$helper" | grep -q ScreenCaptureKit.framework
-          otool -l "$helper" | grep -A3 LC_BUILD_VERSION | grep -q 'minos 13.0'
-          "$helper" --selftest | tee selftest.json
-          grep -q '"selftest":true' selftest.json
-      # A real stream, screenshot, close-up and change reports: the runners allow Screen
-      # Recording. The pictures are kept to look at.
-      - name: Capture the screen with the helper
-        run: bun scripts/mac-capture-smoke.ts --out smoke
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: capture-smoke
-          path: smoke/
-          if-no-files-found: ignore
       - run: bun run typecheck
       - run: bun test
       - run: bun run build
       # The app quits within seconds of app.quit(), even when closing its services hangs, and
-      # leaves no helper process behind (hidden: no window is shown).
+      # leaves no child process behind (hidden: no window is shown).
       - name: Quit the app
         run: bun scripts/quit-smoke.ts
-      # The installers' app bundles, unpublished, to check the app and the helper are signed and
-      # the helper ships in each. Ad-hoc: branches and forks have no access to the release
+      # The installers' app bundles, unpublished, to check each is signed and ships the Claude
+      # Code binary for its processor. Ad-hoc: branches and forks have no access to the release
       # certificate (release.yml checks the self-signed signature).
       - name: Package the app (no installers)
-        run: bunx electron-builder --mac dir --arm64 --x64 --publish never
+        run: bun scripts/claude-binaries.ts && bunx electron-builder --mac dir --arm64 --x64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
           # electron-builder skips signing on pull-request builds by default; this one is ad-hoc
@@ -72,6 +39,5 @@ jobs:
           CSC_FOR_PULL_REQUEST: true
       - name: Check the packaged apps
         run: |
-          for app in dist/mac/chat-v2.app dist/mac-arm64/chat-v2.app; do
-            bash scripts/ci-mac-verify.sh "$app" adhoc
-          done
+          bash scripts/ci-mac-verify.sh dist/mac/chat-v2.app adhoc x64
+          bash scripts/ci-mac-verify.sh dist/mac-arm64/chat-v2.app adhoc arm64

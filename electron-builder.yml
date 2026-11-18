@@ -10,7 +10,15 @@ files:
   - out/**
   - package.json
   - "!out-test/**"
+  # The Claude Agent SDK is the one package outside out/ (see electron.vite.config.ts), and it
+  # starts Claude Code, a native binary of about 370 MB per platform: each build ships only the
+  # one for its own platform and processor.
+  - "!node_modules/@anthropic-ai/claude-agent-sdk-*/**"
+  - "node_modules/@anthropic-ai/claude-agent-sdk-${platform}-${arch}/**"
 asar: true
+# Outside the archive, where it can run; src/main/index.ts starts it from there.
+asarUnpack:
+  - "node_modules/@anthropic-ai/claude-agent-sdk-*/**"
 # The UI is English-only, so Chromium's other locale packs (about 48 MB) are left out.
 # "en-US" also keeps macOS's en.lproj.
 electronLanguages: [en-US]

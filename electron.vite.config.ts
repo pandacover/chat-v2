@@ -6,9 +6,10 @@ import tailwindcss from '@tailwindcss/vite'
 const shared = { '@shared': resolve(__dirname, 'src/shared') }
 
 export default defineConfig({
-  // Every package is a devDependency, so it is bundled into out/ and electron-builder
-  // ships no node_modules. (A package under "dependencies" is left external and copied
-  // in whole: effect alone was 41 MB of app.asar.)
+  // Every package but one is a devDependency, so it is bundled into out/. (A package under
+  // "dependencies" is left external and copied in whole: effect alone was 41 MB of app.asar.)
+  // The one is the Claude Agent SDK, kept external on purpose: it finds and starts Claude Code,
+  // a native binary in its platform package, which electron-builder unpacks beside app.asar.
   main: {
     resolve: { alias: shared }
   },
