@@ -3,7 +3,7 @@
 // steps answered from the chat or the overlay, and what a reply's end releases.
 import { afterEach, describe, expect, test } from 'bun:test'
 import { isDesktopRun } from '@shared/steps'
-import { BUILTIN_TOOLS, MAX_TASK_TOOLS, STOPPED_TEXT, builtinStep, effortFor, isReadOnlyCommand, modeTag, teachAnswer, type Waiting } from '../../src/main/computer'
+import { BUILTIN_TOOLS, MAX_TASK_TOOLS, STOPPED_TEXT, builtinStep, decideMode, effortFor, handsOver, isReadOnlyCommand, modeTag, teachAnswer, type Waiting } from '../../src/main/computer'
 import { formatElements } from '../../src/main/computer/tools'
 import { disposeAll, harness, sleep, textOf, until } from './fakes'
 
@@ -201,7 +201,7 @@ describe('policy', () => {
     const r = await h.reply()
     for (const name of ['click', 'type_text', 'press_keys', 'scroll', 'drag', 'open', 'focus_window']) {
       const res = (await r.tool(name, {})) as { denied?: string }
-      expect(res.denied).toContain('Show-me mode is on')
+      expect(res.denied).toContain('The user wants to learn this')
     }
     expect(textOf(await r.tool('look_at_screen'))).toContain('Screenshot 1024x576px')
     h.setMode('do')
@@ -330,6 +330,32 @@ describe('what the driver gets', () => {
     expect(r.mod.instructions).toContain('ms-settings:')
     expect(r.mod.instructions).not.toMatch(/spoken|aloud|voice|Tomo/i)
     expect(modeTag('teach', 'show me dark mode')).toBe('[mode: teach] show me dark mode')
+  })
+
+  test('the mode is read from each message', () => {
+    const cases: Array<[string, 'do' | 'teach', 'do' | 'teach']> = [
+      ['Show me how to draw a cat in excalidraw', 'do', 'teach'],
+      ['draw me a cat in excalidraw', 'teach', 'do'],
+      ['How do I turn on night light?', 'do', 'teach'],
+      ['how to change my wallpaper', 'do', 'teach'],
+      ['Can you show me where the Bluetooth setting is?', 'do', 'teach'],
+      ['Walk me through setting up a printer', 'do', 'teach'],
+      ['Teach me to use layers in Paint', 'do', 'teach'],
+      ['Show me the files in Downloads', 'teach', 'do'],
+      ['Can you turn on dark mode', 'teach', 'do'],
+      ['Open Spotify and play my liked songs please', 'teach', 'do'],
+      ['Just do it', 'teach', 'do'],
+      ['Show me how, then just do it for me', 'do', 'do'],
+      ['next', 'teach', 'teach'],
+      ['ok what now?', 'teach', 'teach'],
+      ['Where is the ellipse tool?', 'teach', 'teach'],
+      ['Where is the ellipse tool?', 'do', 'do'],
+      ['and then the tail', 'teach', 'teach'],
+      ['Delete the old screenshots', 'teach', 'do']
+    ]
+    for (const [text, previous, mode] of cases) expect([text, decideMode(text, previous)]).toEqual([text, mode])
+    expect(handsOver('just do it for me')).toBe(true)
+    expect(handsOver("There's no Night light in my menu")).toBe(false)
   })
 
   test('effort: low for the fast models, medium for Opus', () => {

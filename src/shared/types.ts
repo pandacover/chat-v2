@@ -88,7 +88,10 @@ export interface Session {
   browserEnabled: boolean
   /** When on, the model can see the screen and use the user's apps (Windows and macOS). */
   computerEnabled: boolean
-  /** Computer use operates the computer (do) or shows each step for the user to do (teach, "Show me"). */
+  /**
+   * What the chat's last message was read as: operate the computer (do), or show each step for the
+   * user to do (teach). Decided from each message; a follow-up like "next" keeps it.
+   */
   computerMode: ComputerMode
   /** When the chat was pinned to the top of the sidebar; null when it isn't. */
   pinnedAt: number | null
@@ -143,7 +146,6 @@ export interface SessionPatch {
   systemPrompt?: string | null
   browserEnabled?: boolean
   computerEnabled?: boolean
-  computerMode?: ComputerMode
   pinned?: boolean
 }
 

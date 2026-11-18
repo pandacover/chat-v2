@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tip } from '@/lib/tooltip'
   import { untrack } from 'svelte'
-  import { type ComputerMode, stopShortcutLabel } from '@shared/computer'
+  import { stopShortcutLabel } from '@shared/computer'
   import type { Attachment } from '@shared/types'
   import { isMac, modKey, shortcut } from '@/lib/keys'
   import { fade, pop } from '@/lib/motion'
@@ -19,9 +19,7 @@
     browserEnabled = false,
     onbrowser,
     computerEnabled = false,
-    oncomputer,
-    computerMode = 'do',
-    onmode
+    oncomputer
   }: {
     placeholder?: string
     model: string
@@ -30,8 +28,6 @@
     onbrowser: () => void
     computerEnabled?: boolean
     oncomputer: () => void
-    computerMode?: ComputerMode
-    onmode: (mode: ComputerMode) => void
   } = $props()
 
   let text = $state('')
@@ -159,11 +155,6 @@
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault()
       void submit()
-    }
-    // Tab switches Do it and Show me, unless it just nested a list item.
-    if (e.key === 'Tab' && computerOn && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && !e.defaultPrevented) {
-      e.preventDefault()
-      onmode(computerMode === 'do' ? 'teach' : 'do')
     }
   }
 
@@ -386,24 +377,6 @@
       >
         <Icon name="monitor" size={14} /><span class="hidden @sm:inline">Computer</span>
       </button>
-      {#if computerEnabled}
-        <div
-          class="ml-0.5 flex h-7 items-center rounded-full p-0.5 text-[12.5px] shadow-[inset_0_0_0_1px_var(--line)]"
-          role="radiogroup"
-          aria-label="Computer mode"
-          use:tip={{ text: 'Do it: the assistant uses your computer. Show me: it shows you each step to do yourself.', kbd: 'Tab' }}
-          in:fade={{ duration: 120 }}
-        >
-          {#each [['do', 'Do it'], ['teach', 'Show me']] as const as [mode, label] (mode)}
-            <button
-              class="h-6 rounded-full px-2 transition-colors {computerMode === mode ? 'bg-hover text-fg' : 'text-muted hover:text-fg'}"
-              role="radio"
-              aria-checked={computerMode === mode}
-              onclick={() => onmode(mode)}>{label}</button
-            >
-          {/each}
-        </div>
-      {/if}
     {/if}
     <span class="ml-auto"></span>
     <ModelPicker placement="up" value={model} onchange={onmodel} />

@@ -111,7 +111,7 @@ const MIGRATIONS: string[] = [
   alter table messages add column agent_uuid text;
   alter table messages add column agent_cost real;
   create index messages_agent_session on messages(agent_session);`,
-  // A computer chat's mode: 'do' (the model operates the computer) or 'teach' (Show me).
+  // What a computer chat's last message was read as: 'do' (operate the computer) or 'teach' (show me how).
   `alter table sessions add column computer_mode text not null default 'do';`
 ]
 

@@ -759,12 +759,11 @@ describe('browser', () => {
 })
 
 describe('computer use', () => {
-  const computerChat = (mode: 'do' | 'teach' = 'do') =>
-    Effect.gen(function* () {
-      const s = yield* newSession
-      yield* (yield* Db).use((d) => d.updateSession(s.id, { computerEnabled: true, computerMode: mode }))
-      return s
-    })
+  const computerChat = Effect.gen(function* () {
+    const s = yield* newSession
+    yield* (yield* Db).use((d) => d.updateSession(s.id, { computerEnabled: true }))
+    return s
+  })
   const withComputer = (script: Script, over: Partial<Platform> = {}) => {
     const fake = fakePlatform(over)
     const overlay = fakeOverlay()
@@ -783,7 +782,7 @@ describe('computer use', () => {
       yield* t.text('Done.')
       yield t.result()
     })
-    const s = await t.run(computerChat())
+    const s = await t.run(computerChat)
     await t.run(sendTo(s, s.rootId, 'Click the thing'))
     await t.waitForDone(1)
 
@@ -814,7 +813,7 @@ describe('computer use', () => {
 
   test('with the browser on too, the prompt says which to use for what', async () => {
     const t = withComputer(reply)
-    const s = await t.run(computerChat())
+    const s = await t.run(computerChat)
     await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { browserEnabled: true }))))
     await t.run(sendTo(s, s.rootId, 'Hi'))
     await t.waitForDone(1)
@@ -825,7 +824,7 @@ describe('computer use', () => {
 
   test('without a platform (Linux) a computer chat replies without computer use', async () => {
     const t = setup(reply)
-    const s = await t.run(computerChat())
+    const s = await t.run(computerChat)
     await t.run(sendTo(s, s.rootId, 'Hi'))
     await t.waitForDone(1)
     expect(t.calls[0]!.prompt).toEqual([{ type: 'text', text: 'Hi' }])
@@ -844,7 +843,7 @@ describe('computer use', () => {
       yield* t.text('Deleted.')
       yield t.result()
     })
-    const s = await t.run(computerChat())
+    const s = await t.run(computerChat)
     const view = await t.run(sendTo(s, s.rootId, 'Clean up and send it'))
     const id = view.path[1]!.message.id
     await settle(() => t.lastWait()?.kind === 'approval')
@@ -879,7 +878,7 @@ describe('computer use', () => {
       yield* t.text('That was it.')
       yield t.result()
     })
-    const s = await t.run(computerChat('teach'))
+    const s = await t.run(computerChat)
     const view = await t.run(sendTo(s, s.rootId, 'Show me how to turn on night light'))
     const id = view.path[1]!.message.id
     const atStep = (n: number) => () => {
@@ -898,7 +897,7 @@ describe('computer use', () => {
     await t.run(sendTo(s, id, 'done'))
     await t.waitForDone(1)
 
-    expect(denied).toContain('Show-me mode is on')
+    expect(denied).toContain('The user wants to learn this')
     expect(results).toEqual([
       'The user did it. Look at the screen before the next step.',
       `The user said: "There's no Night light in my menu"`,
@@ -919,6 +918,45 @@ describe('computer use', () => {
     await t.runtime.dispose()
   })
 
+  test('each message picks the mode: "show me how" teaches, "just do it" mid-step hands over, a follow-up keeps the mode', async () => {
+    let click = ''
+    const t = withComputer(async function* (t) {
+      if (t.call.prompt.some((b) => b.text?.includes('Show me how'))) {
+        yield* t.tool('mcp__computer__look_at_screen')
+        yield* t.tool('mcp__computer__teach_step', { instruction: 'Click Display', step: 1, total: 2, x: 100, y: 100 })
+        const p = (yield* t.tool('mcp__computer__click', { x: 1, y: 1 })).permission
+        click = p.behavior === 'deny' ? p.message : p.behavior
+      }
+      yield* t.text('Ok.')
+      yield t.result()
+    })
+    const s = await t.run(computerChat)
+    const lastId = async () => (await t.run(Chat.use((c) => c.view(s.id)))).path.at(-1)!.message.id
+    const tagOf = (n: number) => t.calls[n]!.prompt.at(-1)!.text!.match(/^\[mode: (\w+)\]/)?.[1]
+    const modeSaved = async () => (await t.run(Chat.use((c) => c.view(s.id)))).session.computerMode
+
+    await t.run(sendTo(s, s.rootId, 'Show me how to turn on dark mode'))
+    await settle(() => t.lastWait()?.kind === 'teach')
+    expect(tagOf(0)).toBe('teach')
+    await t.run(sendTo(s, await lastId(), 'Just do it for me'))
+    await t.waitForDone(1)
+    expect(click).toBe('allow')
+    expect(await modeSaved()).toBe('do')
+
+    const asks: Array<[string, string]> = [
+      ['How do I change the wallpaper?', 'teach'],
+      ['ok, next', 'teach'],
+      ['Draw me a cat in Excalidraw', 'do'],
+      ['What did you draw?', 'do']
+    ]
+    for (const [i, [text, mode]] of asks.entries()) {
+      await t.run(sendTo(s, await lastId(), text))
+      await t.waitForDone(i + 2)
+      expect([text, tagOf(i + 1)]).toEqual([text, mode])
+    }
+    await t.runtime.dispose()
+  })
+
   test('Stop cuts off typing in progress, and the next reply may act again', async () => {
     const t = withComputer(async function* (t) {
       if (t.call.prompt.some((b) => b.text?.includes('again'))) {
@@ -931,7 +969,7 @@ describe('computer use', () => {
       yield* t.text('Typed.')
       yield t.result()
     })
-    const s = await t.run(computerChat())
+    const s = await t.run(computerChat)
     const view = await t.run(sendTo(s, s.rootId, 'Type a lot'))
     const id = view.path[1]!.message.id
     await settle(() => t.fake.calls.some((c) => c.startsWith('type ')))
@@ -955,7 +993,7 @@ describe('computer use', () => {
       yield* t.text('Bought.')
       yield t.result()
     })
-    const s = await t.run(computerChat())
+    const s = await t.run(computerChat)
     await t.run(sendTo(s, s.rootId, 'Buy it'))
     await settle(() => t.lastWait()?.kind === 'approval')
     t.overlay.pressStopKey()

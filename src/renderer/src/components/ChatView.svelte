@@ -180,8 +180,6 @@
         onbrowser={toggleBrowser}
         computerEnabled={app.chat.computerEnabled}
         oncomputer={() => app.updateSession({ computerEnabled: !app.chat.computerEnabled })}
-        computerMode={app.chat.computerMode}
-        onmode={(computerMode) => app.updateSession({ computerMode })}
       />
     </div>
 

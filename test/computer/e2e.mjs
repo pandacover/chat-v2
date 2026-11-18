@@ -1,8 +1,8 @@
 // End to end: computer use in the real app, hidden (CHAT_V2_HEADLESS=1), with a scripted model
 // (e2e-query.ts) and a fake platform (e2e-platform.ts), so nothing reaches the desktop. It drives
-// the chat window: Do it with an approval (clicked, denied with Esc, approved with Ctrl+Enter
-// once armed), Show me (the overlay's Done, the chat's Done, a typed answer), and Stop in the
-// middle of typing. Captures of the cards go to <outDir>.
+// the chat window: a task with an approval (clicked, denied with Esc, approved with Ctrl+Enter
+// once armed), "show me how" (the overlay's Done, the chat's Done, a typed answer), and Stop in
+// the middle of typing. Captures of the cards go to <outDir>.
 //
 //   bun run build
 //   node test/computer/e2e.mjs <playwright-core dir> <outDir>
@@ -79,10 +79,10 @@ const send = async (text) => {
 const lastReply = () => page.locator('[data-reply-scope]').last()
 
 try {
-  // Do it: the switch and the mode control.
+  // The switch. There is no mode control: each message is read for doing or showing.
   await page.getByRole('switch', { name: 'Computer' }).click()
-  await page.getByRole('radiogroup', { name: 'Computer mode' }).waitFor()
-  ok((await page.getByRole('radio', { name: 'Do it' }).getAttribute('aria-checked')) === 'true', 'a new computer chat starts in Do it')
+  await page.getByRole('switch', { name: 'Computer', checked: true }).waitFor()
+  ok((await page.getByRole('radiogroup', { name: 'Computer mode' }).count()) + (await page.getByRole('radio', { name: 'Show me' }).count()) === 0, 'the composer has no Do it / Show me control')
 
   // 1. An approval, clicked.
   await send('Delete the old files in Downloads')
@@ -113,10 +113,7 @@ try {
   await page.keyboard.press('Control+Enter')
   await until(async () => (await lastReply().innerText()).includes('Deleted them.'), 'Ctrl+Enter approves once armed')
 
-  // Show me, switched with Tab in the composer.
-  await composer.focus()
-  await page.keyboard.press('Tab')
-  await until(async () => (await page.getByRole('radio', { name: 'Show me' }).getAttribute('aria-checked')) === 'true', 'Tab switches to Show me')
+  // Show me, from the message alone.
   await send('Show me how to turn on night light')
   const step = page.locator('[data-computer-wait="teach"]')
   await step.waitFor()
@@ -174,7 +171,6 @@ try {
   await capture('show-me-done')
 
   // Stop in the middle of typing.
-  await page.getByRole('radio', { name: 'Do it' }).click()
   await send('Please type a lot')
   await until(async () => fake('type').length > 0, 'typing started')
   const stop = page.getByRole('button', { name: 'Stop', exact: true })

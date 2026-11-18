@@ -12,7 +12,7 @@ import { browserModule } from '../agent/browser'
 import { Agent, type Auth, MAX_TURNS, type PromptBlock, type ReplyHooks } from '../agent/driver'
 import { HISTORY_NOTE, type TurnPlan, continueNote, planTurn, transcriptText } from '../agent/history'
 import type { ToolModuleFactory } from '../agent/module'
-import { ComputerUse, type Mode, effortFor, modeTag, teachAnswer } from '../computer'
+import { ComputerUse, type Mode, decideMode, effortFor, handsOver, modeTag, teachAnswer } from '../computer'
 import { Attachments } from './Attachments'
 import { Browser } from './Browser'
 import { Db } from './Db'
@@ -117,17 +117,25 @@ export class Chat extends Context.Service<
       yield* Effect.addFinalizer(() => Effect.sync(unsubscribe))
 
       const computerOn = (session: Session) => session.computerEnabled && computer.supported
-      /** The chat's mode as it is now: switching it in the composer counts from the next tool call. */
-      const modeOf = (sessionId: string): Mode =>
+      /** What the chat's last message was read as (do it, or show me how); a follow-up like "next" keeps it. */
+      const lastMode = (sessionId: string): Mode =>
         Effect.runSync(db.use((d) => d.getSession(sessionId)?.computerMode ?? 'do').pipe(Effect.orElseSucceed(() => 'do' as const)))
-      /** Replies running with computer use, which the chat's Stop also stops computer use for. */
-      const computerReplies = new Set<string>()
+      const saveMode = (sessionId: string, mode: Mode) =>
+        Effect.runSync(db.use((d) => d.updateSession(sessionId, { computerMode: mode })).pipe(Effect.ignore))
+      /**
+       * The mode of each reply running with computer use, which the chat's Stop also stops computer
+       * use for. "Just do it" typed during a Show-me step switches it.
+       */
+      const computerReplies = new Map<string, Mode>()
 
       /** The tool sets a reply in `session` gets, built afresh for each reply. */
       const toolSets = (session: Session): ToolModuleFactory[] => [
         ...(session.browserEnabled ? [browserModule(browser)] : []),
         ...(computerOn(session)
-          ? [(ctx: Parameters<ToolModuleFactory>[0]) => computer.module(ctx, { mode: () => modeOf(session.id), stop: () => void Effect.runFork(stop(ctx.messageId)) })]
+          ? [
+              (ctx: Parameters<ToolModuleFactory>[0]) =>
+                computer.module(ctx, { mode: () => computerReplies.get(ctx.messageId) ?? 'do', stop: () => void Effect.runFork(stop(ctx.messageId)) })
+            ]
           : [])
       ]
 
@@ -263,7 +271,14 @@ export class Chat extends Context.Service<
             })
           )
           const usesComputer = computerOn(session)
-          const prompt = yield* promptFor(plan, partial, usesComputer ? modeOf(session.id) : null)
+          let mode: Mode | null = null
+          if (usesComputer) {
+            // A new reply reads its message for what the user wants; continuing keeps the mode.
+            const asked = partial === null ? lineage.at(-1) : undefined
+            mode = asked?.role === 'user' ? decideMode(asked.content, lastMode(session.id)) : lastMode(session.id)
+            saveMode(session.id, mode)
+          }
+          const prompt = yield* promptFor(plan, partial, mode)
           // The profile as it was when this chat first asked, so the system prompt stays the same.
           const facts = settings.memoryModel ? yield* db.use((d) => d.liveFacts(d.sessionMemoryRev(session.id))) : []
           // User instructions first so they win any conflict; the writing guideline is hidden from Settings.
@@ -281,7 +296,7 @@ export class Chat extends Context.Service<
           // Claimed before it runs, so a reply started meanwhile from the same place forks.
           const sessionId = plan.resume && !plan.resume.fork ? plan.resume.session : randomUUID()
           yield* db.use((d) => d.claimAgentSession(assistant.id, sessionId))
-          if (usesComputer) computerReplies.add(assistant.id)
+          if (mode) computerReplies.set(assistant.id, mode)
           const hooks: ReplyHooks = {
             text: (delta) => Effect.runSync(Effect.forEach(buffer.push(delta), emit, { discard: true })),
             step: (step) => Effect.runPromise(endLine.pipe(Effect.andThen(emit(stepLine(step))))),
@@ -468,6 +483,11 @@ export class Chat extends Context.Service<
         // While a Show-me step of this chat waits, a message answers it instead of starting a reply.
         const waiting = computer.waiting()
         if (waiting?.kind === 'teach' && waiting.sessionId === input.sessionId && input.text.trim()) {
+          // "Just do it": the reply may act from the next tool call on.
+          if (handsOver(input.text) && computerReplies.has(waiting.messageId)) {
+            computerReplies.set(waiting.messageId, 'do')
+            saveMode(input.sessionId, 'do')
+          }
           yield* computer.teachDone(waiting.id, teachAnswer(input.text))
           return yield* view(input.sessionId)
         }

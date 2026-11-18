@@ -45,7 +45,7 @@
     {#if wait.kind === 'approval' && wait.detail}
       <pre class="mt-2 max-h-24 overflow-auto rounded-md bg-bg px-2.5 py-2 font-mono text-[11.5px] leading-normal break-all whitespace-pre-wrap text-fg-2">{wait.detail}</pre>
     {:else if wait.kind === 'teach'}
-      <p class="mt-0.5 text-[12px] text-muted">Do it on screen, then press Done. Or type what happened.</p>
+      <p class="mt-0.5 text-[12px] text-muted">Do it on screen, then press Done. Or type what happened, or “just do it”.</p>
     {/if}
   </div>
   <div class="flex shrink-0 items-center gap-1 text-[13px]">

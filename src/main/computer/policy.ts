@@ -82,7 +82,7 @@ export const makePolicy =
       )
     if (AUTO_ALLOW.has(name)) return allow(input)
     if (ACT_TOOLS.has(name)) {
-      if (d.mode() === 'teach') return { behavior: 'deny', message: "Show-me mode is on: don't act for the user. Guide them with teach_step instead." }
+      if (d.mode() === 'teach') return { behavior: 'deny', message: "The user wants to learn this (teach mode): don't act for them. Guide them with teach_step instead." }
       return allow(input)
     }
     switch (name) {

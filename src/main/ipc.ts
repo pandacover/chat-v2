@@ -105,7 +105,6 @@ const handlers: Record<string, Handler> = {
           ...(patch.systemPrompt !== undefined ? { systemPrompt: patch.systemPrompt?.trim() ? patch.systemPrompt : null } : {}),
           ...(typeof patch.browserEnabled === 'boolean' ? { browserEnabled: patch.browserEnabled } : {}),
           ...(typeof patch.computerEnabled === 'boolean' ? { computerEnabled: patch.computerEnabled } : {}),
-          ...(patch.computerMode === 'do' || patch.computerMode === 'teach' ? { computerMode: patch.computerMode } : {}),
           ...(typeof patch.pinned === 'boolean' ? { pinned: patch.pinned } : {})
         })
       )

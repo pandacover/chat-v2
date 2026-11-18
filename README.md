@@ -39,9 +39,11 @@ If your shell sets `ELECTRON_RUN_AS_NODE=1`, unset it first. Otherwise Electron 
 
 Turn on **Computer** in the composer, and Claude can see your screen and use your apps in that chat. It is a port of Tomo's computer use, in `src/main/computer`.
 
-- **Do it**: Claude clicks and types for you. Before each input it gives focus back to the app you were in. If you move the mouse, it pauses.
-- **Show me**: Claude never clicks or types. It highlights each control on screen with what to do, and waits. Press **Done** beside the highlight or in the chat, or type what happened.
-- `Tab` in the composer switches between them. Each chat keeps its own mode.
+There is nothing to switch: each message is read for what you want.
+
+- **Doing it** ("draw me a cat", "turn on dark mode"): Claude clicks and types for you. Before each input it gives focus back to the app you were in. If you move the mouse, it pauses.
+- **Showing you** ("show me how…", "how do I…", "walk me through…"): Claude never clicks or types. It highlights each control on screen with what to do, and waits. Press **Done** beside the highlight or in the chat, or type what happened. Type "just do it" to have it finish for you.
+- A follow-up like "next" or a plain question carries on the way the chat was going.
 - Before anything you can't take back (deleting, sending, buying, installing, changing settings), a card in the chat asks for your OK, and the chat window comes to the front. `Ctrl+Enter` (`⌘ Enter` on a Mac) approves once the button has filled; `Esc` denies.
 - `Ctrl+Alt+Esc` (`⌃⌥Esc` on a Mac) stops a computer reply from any app, as Stop does. The app holds the shortcut only while a computer reply runs.
 - Shell commands that only read run freely. Any other command, and any file write, asks first.
