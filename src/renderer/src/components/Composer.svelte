@@ -1,8 +1,9 @@
 <script lang="ts">
   import { tip } from '@/lib/tooltip'
   import { untrack } from 'svelte'
+  import { type ComputerMode, stopShortcutLabel } from '@shared/computer'
   import type { Attachment } from '@shared/types'
-  import { modKey, shortcut } from '@/lib/keys'
+  import { isMac, modKey, shortcut } from '@/lib/keys'
   import { fade, pop } from '@/lib/motion'
   import { startRecording, type Recording } from '@/lib/recorder'
   import { app } from '@/lib/store.svelte'
@@ -18,7 +19,9 @@
     browserEnabled = false,
     onbrowser,
     computerEnabled = false,
-    oncomputer
+    oncomputer,
+    computerMode = 'do',
+    onmode
   }: {
     placeholder?: string
     model: string
@@ -27,6 +30,8 @@
     onbrowser: () => void
     computerEnabled?: boolean
     oncomputer: () => void
+    computerMode?: ComputerMode
+    onmode: (mode: ComputerMode) => void
   } = $props()
 
   let text = $state('')
@@ -49,6 +54,10 @@
 
   const busy = $derived(app.streaming)
   const canSend = $derived((text.trim() !== '' || app.draftAttachments.length > 0) && uploading === 0 && app.analyzing.size === 0 && !busy)
+  // While a Show-me step waits, a message answers it (the reply goes on); attachments stay in the draft.
+  const answering = $derived(app.teaching && text.trim() !== '')
+  const computerOn = $derived(computerEnabled && app.computerSupported)
+  const stopping = $derived(busy && !answering)
 
   export const focus = () => textarea?.focus()
 
@@ -122,7 +131,15 @@
     void window.api.attachments.discard(a.id)
   }
 
+  const answer = async () => {
+    const body = text
+    text = ''
+    queueMicrotask(fit)
+    if (!(await app.send(body, []))) text = body
+  }
+
   const submit = async () => {
+    if (answering) return answer()
     if (!canSend) return
     const body = text
     const files = app.draftAttachments
@@ -142,6 +159,11 @@
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault()
       void submit()
+    }
+    // Tab switches Do it and Show me, unless it just nested a list item.
+    if (e.key === 'Tab' && computerOn && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && !e.defaultPrevented) {
+      e.preventDefault()
+      onmode(computerMode === 'do' ? 'teach' : 'do')
     }
   }
 
@@ -297,7 +319,7 @@
       onfocus={() => (focused = true)}
       onblur={() => (focused = false)}
       rows="1"
-      {placeholder}
+      placeholder={app.teaching ? 'Tell it what happened, or press Done' : placeholder}
       class="block max-h-[240px] w-full resize-none bg-transparent px-4 pt-3.5 pb-1.5 text-[15px] leading-relaxed outline-none placeholder:text-muted {recording || transcribing
         ? 'opacity-0'
         : ''}"
@@ -351,34 +373,58 @@
     >
       <Icon name="globe" size={14} /><span class="hidden @sm:inline">Browser</span>
     </button>
-    <button
-      class="flex h-7 items-center gap-1.5 rounded-full px-[7px] text-[12.5px] transition-colors {computerEnabled
-        ? 'bg-fg text-bg'
-        : 'text-fg-2 hover:bg-hover hover:text-fg'}"
-      role="switch"
-      aria-checked={computerEnabled}
-      aria-label="Computer"
-      use:tip={'Computer use for this chat. It comes in a later version.'}
-      onclick={oncomputer}
-    >
-      <Icon name="monitor" size={14} /><span class="hidden @sm:inline">Computer</span>
-    </button>
+    {#if app.computerSupported}
+      <button
+        class="flex h-7 items-center gap-1.5 rounded-full px-[7px] text-[12.5px] transition-colors {computerEnabled
+          ? 'bg-fg text-bg'
+          : 'text-fg-2 hover:bg-hover hover:text-fg'}"
+        role="switch"
+        aria-checked={computerEnabled}
+        aria-label="Computer"
+        use:tip={computerEnabled ? 'The assistant can see your screen and use your apps in this chat' : 'Let the assistant see your screen and use your apps in this chat'}
+        onclick={oncomputer}
+      >
+        <Icon name="monitor" size={14} /><span class="hidden @sm:inline">Computer</span>
+      </button>
+      {#if computerEnabled}
+        <div
+          class="ml-0.5 flex h-7 items-center rounded-full p-0.5 text-[12.5px] shadow-[inset_0_0_0_1px_var(--line)]"
+          role="radiogroup"
+          aria-label="Computer mode"
+          use:tip={{ text: 'Do it: the assistant uses your computer. Show me: it shows you each step to do yourself.', kbd: 'Tab' }}
+          in:fade={{ duration: 120 }}
+        >
+          {#each [['do', 'Do it'], ['teach', 'Show me']] as const as [mode, label] (mode)}
+            <button
+              class="h-6 rounded-full px-2 transition-colors {computerMode === mode ? 'bg-hover text-fg' : 'text-muted hover:text-fg'}"
+              role="radio"
+              aria-checked={computerMode === mode}
+              onclick={() => onmode(mode)}>{label}</button
+            >
+          {/each}
+        </div>
+      {/if}
+    {/if}
     <span class="ml-auto"></span>
     <ModelPicker placement="up" value={model} onchange={onmodel} />
     <button
-      class="ml-1 grid size-8 place-items-center rounded-full transition-[background-color,color,transform] duration-150 active:scale-95 {busy
+      class="ml-1 grid size-8 place-items-center rounded-full transition-[background-color,color,transform] duration-150 active:scale-95 {stopping
         ? 'bg-fg text-bg'
-        : canSend
+        : canSend || answering
           ? 'bg-accent text-on-accent'
           : 'bg-hover text-muted'}"
-      use:tip={busy ? 'Stop generating' : { text: 'Send', kbd: 'Enter' }}
-      disabled={!busy && !canSend}
-      onclick={() => (busy ? app.stop() : submit())}
+      use:tip={stopping
+        ? computerOn
+          ? { text: 'Stop. Works from any app too', kbd: stopShortcutLabel(isMac) }
+          : 'Stop generating'
+        : { text: answering ? 'Answer the step' : 'Send', kbd: 'Enter' }}
+      disabled={!stopping && !canSend && !answering}
+      onclick={() => (stopping ? app.stop() : submit())}
     >
-      {#key busy}
-        <span in:pop={{ duration: 160 }}><Icon name={busy ? 'stop' : 'arrowUp'} size={16} stroke={busy ? 2.4 : 2} /></span>
+      {#key stopping}
+        <span in:pop={{ duration: 160 }}><Icon name={stopping ? 'stop' : 'arrowUp'} size={16} stroke={stopping ? 2.4 : 2} /></span>
       {/key}
-      <span class="sr-only">{busy ? 'Stop' : 'Send'}</span>
+      <span class="sr-only">{stopping ? 'Stop' : 'Send'}</span>
     </button>
   </div>
 </div>

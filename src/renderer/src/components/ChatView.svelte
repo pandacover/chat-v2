@@ -83,13 +83,6 @@
     app.openBrowser()
   }
 
-  const toggleComputer = async () => {
-    const next = !app.chat.computerEnabled
-    await app.updateSession({ computerEnabled: next })
-    if (!next) return
-    app.toast("Computer use isn't in this version yet. The switch is saved with the chat.", 'info')
-  }
-
   const openPrompt = () => {
     promptDraft = app.chat.systemPrompt ?? app.settings?.settings.systemPrompt ?? ''
     promptOpen = true
@@ -186,7 +179,9 @@
         browserEnabled={app.chat.browserEnabled}
         onbrowser={toggleBrowser}
         computerEnabled={app.chat.computerEnabled}
-        oncomputer={toggleComputer}
+        oncomputer={() => app.updateSession({ computerEnabled: !app.chat.computerEnabled })}
+        computerMode={app.chat.computerMode}
+        onmode={(computerMode) => app.updateSession({ computerMode })}
       />
     </div>
 

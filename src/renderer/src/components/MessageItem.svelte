@@ -4,6 +4,9 @@
   import { parseContent, type ContentBlock } from '@shared/artifacts'
   import { modelName } from '@shared/models'
   import { splitSteps, type Step } from '@shared/steps'
+  import { stopShortcutLabel } from '@shared/computer'
+  import { isMac } from '@/lib/keys'
+  import ComputerWaitCard from './ComputerWaitCard.svelte'
   import StepList from './StepList.svelte'
   import type { Attachment, PathNode } from '@shared/types'
   import { fade, fly } from '@/lib/motion'
@@ -29,6 +32,10 @@
       : []
   )
   const busy = $derived(app.streaming)
+  /** What computer use waits on in this reply. */
+  const wait = $derived(app.computerWait?.messageId === message.id ? app.computerWait : null)
+  // The Stop shortcut works while another app covers the chat; say so while a computer reply runs.
+  const computerRun = $derived(streaming && app.chat.computerEnabled && app.computerSupported)
   // The turn you just sent slides in; opening, switching or forking a chat renders still.
   const fresh = untrack(
     () => app.liveIds.has(node.message.id) || (!!node.message.activeChildId && app.liveIds.has(node.message.activeChildId))
@@ -244,10 +251,17 @@
       </div>
     {/if}
 
-    {#if streaming && app.control.active && blocks.at(-1)?.type !== 'steps'}
+    {#if wait}
+      <ComputerWaitCard {wait} />
+    {:else if streaming && app.control.active && blocks.at(-1)?.type !== 'steps'}
       <StepList steps={[]} live running />
     {:else if streaming && blocks.length === 0}
       <div class="thinking py-1 text-[13.5px]" aria-live="polite">Thinking</div>
+    {/if}
+    {#if computerRun}
+      <div class="-mt-1 text-[12px] text-muted" in:fade={{ duration: 200 }}>
+        <kbd class="font-[inherit] text-fg-2">{stopShortcutLabel(isMac)}</kbd> stops it from any app
+      </div>
     {/if}
 
     {#if message.status === 'interrupted' || message.status === 'stopped' || message.status === 'error'}
