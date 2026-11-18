@@ -1,11 +1,11 @@
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
-import { BrowserWindow, type WebContents, WebContentsView, app, autoUpdater as nativeUpdater, nativeTheme, safeStorage, screen, session, shell, webContents } from 'electron'
+import { BrowserWindow, type WebContents, WebContentsView, app, autoUpdater as nativeUpdater, nativeTheme, safeStorage, session, shell, webContents } from 'electron'
 import { Effect, Layer, ManagedRuntime } from 'effect'
 import { adUrlPatterns } from '@shared/blocklist'
 import type { BrowserEvent, StreamEvent } from '@shared/types'
 import { type MainServices, pinWindow, registerIpc } from './ipc'
-import { killAllChildren, runningChildren, stopAllChildren, trackChild } from './helperProcess'
+import { killAllChildren, runningChildren, stopAllChildren, trackChild } from './children'
 import { setAppMenu } from './menu'
 import { handleProtocols, registerSchemes } from './protocols'
 import { initUpdater, offerMoveToApplications } from './updater'
@@ -15,10 +15,6 @@ import { Attachments } from './services/Attachments'
 import { shrinkImage } from './images'
 import { Browser } from './services/Browser'
 import { Broadcaster, Chat } from './services/Chat'
-import { Computer } from './services/Computer'
-import { electronChatWindows, electronOverlay, electronScreen, macHasPermissions, macPermissions, macScreen } from './desktop'
-import { macDriver } from './macHelper'
-import { windowsDriver } from './winHelper'
 import { Db } from './services/Db'
 import { ElevenLabs } from './services/ElevenLabs'
 import { OpenRouter } from './services/OpenRouter'
@@ -59,7 +55,7 @@ const quitLog = (step: string) => console.log(`[quit] ${step} +${Math.round(perf
 
 /**
  * The first request to quit (Cmd+Q, the Dock, an update): from here the app looks gone at once,
- * and the helper processes are asked to exit, before the services close.
+ * and the child processes are asked to exit, before the services close.
  */
 const beginQuit = (why: string) => {
   if (quitting) return
@@ -140,32 +136,7 @@ const makeRuntime = () => {
   const db = Db.layer(join(root, 'chat.db'))
   const settings = SettingsStore.layer(cipher).pipe(Layer.provide(paths))
   const base = Layer.mergeAll(db, settings, paths)
-  const mac = process.platform === 'darwin'
-  const overlay = electronOverlay(headless)
-  // On a Mac the capture helper also lists the windows and types, faster than the input helper.
-  const macCapture = mac ? macScreen(overlay) : null
-  const computer = Computer.layer({
-    driver:
-      process.platform === 'win32'
-        ? windowsDriver(join(root, 'computer-helper.ps1'))
-        : mac
-          ? macDriver(
-              join(root, 'computer-helper.js'),
-              () => {
-                const d = screen.getPrimaryDisplay()
-                return { w: d.size.width, h: d.size.height, scale: d.scaleFactor }
-              },
-              macCapture?.input
-            )
-          : null,
-    os: mac ? 'darwin' : 'win32',
-    ...(mac ? { permissions: macPermissions, hasPermissions: macHasPermissions } : {}),
-    screen: macCapture ?? electronScreen,
-    overlay,
-    chatWindows: electronChatWindows(headless),
-    selfPid: process.pid
-  })
-  const providers = Layer.mergeAll(OpenRouter.layer, ElevenLabs.layer, Attachments.layerWith(shrinkImage), Browser.layer(emitBrowser, (id) => webContents.fromId(id)), computer).pipe(
+  const providers = Layer.mergeAll(OpenRouter.layer, ElevenLabs.layer, Attachments.layerWith(shrinkImage), Browser.layer(emitBrowser, (id) => webContents.fromId(id))).pipe(
     Layer.provideMerge(base)
   )
   const chat = Chat.layer.pipe(
@@ -319,14 +290,14 @@ app.on('before-quit', (event) => {
 
 app.on('will-quit', () => quitLog('will-quit'))
 app.on('quit', () => quitLog('quit'))
-// Whatever helper is still running when the process ends is killed with it.
+// Whatever child is still running when the process ends is killed with it.
 process.on('exit', () => killAllChildren())
 
 // Installing an update closes the windows before before-quit, so quitting starts here for it.
 if (process.platform === 'darwin') nativeUpdater.on('before-quit-for-update', () => beginQuit('before-quit-for-update'))
 
 /**
- * CHAT_V2_QUIT_TEST (scripts/quit-smoke.ts): starts a stand-in helper process that never exits on
+ * CHAT_V2_QUIT_TEST (scripts/quit-smoke.ts): starts a stand-in child process that never exits on
  * its own, prints its pid, and quits. `hang` also makes closing the services never finish.
  */
 const quitTest = () => {

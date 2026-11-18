@@ -67,15 +67,7 @@
     textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`
   }
 
-  // Writing in a computer chat opens the screen stream ahead of the reply (it closes on its own
-  // when idle), so the reply's first look at the screen doesn't wait for it.
-  let prewarmed = 0
-  const oninput = () => {
-    fit()
-    if (!computerEnabled || !window.api.computer.supported || Date.now() - prewarmed < 5000) return
-    prewarmed = Date.now()
-    window.api.computer.prewarm()
-  }
+  const oninput = fit
 
   // Each chat keeps its own unsent text and attachments ('' is the new chat).
   const key = $derived(app.view?.session.id ?? '')
@@ -359,22 +351,18 @@
     >
       <Icon name="globe" size={14} /><span class="hidden @sm:inline">Browser</span>
     </button>
-    {#if window.api.computer.supported}
-      <button
-        class="flex h-7 items-center gap-1.5 rounded-full px-[7px] text-[12.5px] transition-colors {computerEnabled
-          ? 'bg-fg text-bg'
-          : 'text-fg-2 hover:bg-hover hover:text-fg'}"
-        role="switch"
-        aria-checked={computerEnabled}
-        aria-label="Computer"
-        use:tip={computerEnabled
-          ? 'Sees your screen and works in your apps with its own cursor. Your mouse stays yours.'
-          : 'Let the assistant use your screen in this chat'}
-        onclick={oncomputer}
-      >
-        <Icon name="monitor" size={14} /><span class="hidden @sm:inline">Computer</span>
-      </button>
-    {/if}
+    <button
+      class="flex h-7 items-center gap-1.5 rounded-full px-[7px] text-[12.5px] transition-colors {computerEnabled
+        ? 'bg-fg text-bg'
+        : 'text-fg-2 hover:bg-hover hover:text-fg'}"
+      role="switch"
+      aria-checked={computerEnabled}
+      aria-label="Computer"
+      use:tip={'Computer use for this chat. It comes in a later version.'}
+      onclick={oncomputer}
+    >
+      <Icon name="monitor" size={14} /><span class="hidden @sm:inline">Computer</span>
+    </button>
     <span class="ml-auto"></span>
     <ModelPicker placement="up" value={model} onchange={onmodel} />
     <button

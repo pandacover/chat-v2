@@ -7,17 +7,14 @@ import type { MemoryRun, Message, MessageStatus, Session, SessionView, StreamEve
 import { type DbError, InvalidInput, type NotFound, errorMessage } from '../errors'
 import { WRITING_GUIDELINES } from '../guidelines'
 import { BROWSER_INSTRUCTIONS, BROWSER_TOOLS, MAX_AGENT_STEPS, type ToolOutcome, runTool } from '../agent'
-import { MAX_COMPUTER_STEPS, computerInstructions, computerTools, runComputerTool } from '../computerTools'
 import { MEMORY_INSTRUCTIONS, askedQuestion, memoryPrompt, memorySource, parseMemoryReply, profileBlock } from '../memory'
 import { stepLine, summarizeSteps } from '@shared/steps'
 import { type ReasoningDetail, mergeReasoning } from '../sse'
-import { replyTimer, timingLog } from '../timing'
 import { AppPaths } from './AppPaths'
 import { Attachments } from './Attachments'
 import { Db } from './Db'
 import { type ChatMessage, type ChatRequest, type ContentPart, OpenRouter } from './OpenRouter'
 import { Browser } from './Browser'
-import { Computer } from './Computer'
 import { SettingsStore, toolModel } from './SettingsStore'
 
 /** Pushes stream events to every open window. */
@@ -51,27 +48,6 @@ export const pruneSnapshots = (snapshots: ChatMessage[]) => {
   snapshots.splice(0, stale.length)
 }
 
-/**
- * How much of earlier desktop results' window lists a run carries before they're cut. Every
- * action's result lists the windows as they were then; only the newest is the screen now, and a
- * long run piled up dozens of old ones. Cut in a batch, as snapshots are, to keep the cache.
- */
-export const STALE_DESKTOP_CHARS = 16000
-export const DESKTOP_TRIMMED = '[The window list from then is left out.]'
-
-/**
- * Cuts every desktop result but the newest down to how it went and what it changed (`stale`),
- * once together they pass STALE_DESKTOP_CHARS. The model keeps the run's history of what each
- * action did, which is what tells it when it's going round in circles.
- */
-export const pruneDesktop = (results: Array<{ result: ChatMessage; stale: string }>) => {
-  const old = results.slice(0, -1)
-  const chars = old.reduce((n, r) => n + (typeof r.result.content === 'string' ? r.result.content.length : 0), 0)
-  if (chars <= STALE_DESKTOP_CHARS) return
-  for (const r of old) r.result.content = `${r.stale}\n${DESKTOP_TRIMMED}`
-  results.splice(0, old.length)
-}
-
 /** Continuing a reply: the partial reply goes back as the assistant's turn, and this asks for the rest. */
 export const CONTINUE_NOTE =
   "Your reply above was cut off. Continue it from exactly where it stopped: don't repeat anything you already wrote, don't start over, and don't say that you are continuing."
@@ -101,38 +77,6 @@ export const cleanTitle = (reply: string): string | null => {
 }
 
 type ChatError = DbError | NotFound | InvalidInput
-
-/** Whether a computer call's arguments carry something to say beside the cursor (see runComputerTool). */
-const saysSomething = (rawArgs: string) => {
-  try {
-    const say = (JSON.parse(rawArgs || '{}') as { say?: unknown }).say
-    return typeof say === 'string' && say.trim() !== ''
-  } catch {
-    return false
-  }
-}
-
-/** What the sketch cursor says while a computer-use reply works in the browser. */
-const browserHint = (name: string, rawArgs: string) => {
-  let args: Record<string, unknown> = {}
-  try {
-    args = JSON.parse(rawArgs || '{}') as Record<string, unknown>
-  } catch {
-    // Unreadable arguments still get a generic hint.
-  }
-  const host = (url: unknown) => {
-    try {
-      return new URL(String(url)).hostname.replace(/^www\./, '')
-    } catch {
-      return 'a page'
-    }
-  }
-  const query = String(args.query ?? '').trim()
-  if (name === 'browser_search' && query) return `Searching “${query.length > 48 ? `${query.slice(0, 48)}…` : query}”`
-  if (name === 'browser_read') return args.url ? `Reading ${host(args.url)}` : 'Reading the page'
-  if (name === 'browser_navigate' && args.url) return `Opening ${host(args.url)}`
-  return 'Looking things up'
-}
 
 export class Chat extends Context.Service<
   Chat,
@@ -171,10 +115,6 @@ export class Chat extends Context.Service<
       const attachments = yield* Attachments
       const broadcaster = yield* Broadcaster
       const browser = yield* Browser
-      const computer = yield* Computer
-      // Where each reply's time went, step by step (see timing.ts).
-      const timing = timingLog(join((yield* AppPaths).root, 'timing.jsonl'), process.env.CHAT_V2_TIMING === '1')
-      const usesComputer = (session: Session) => session.computerEnabled && computer.supported
 
       // One fiber per streaming assistant message. Closing the layer (app quit)
       // interrupts them all, which marks their messages `interrupted`.
@@ -235,9 +175,7 @@ export class Chat extends Context.Service<
           WRITING_GUIDELINES,
           settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : '',
           settings.artifactsEnabled ? MOODBOARD_INSTRUCTIONS : '',
-          // Computer use brings the browser along, for looking up how unfamiliar apps work.
-          usesComputer(session) ? computerInstructions(process.platform === 'darwin' ? 'darwin' : 'win32', { borrowPointer: settings.computerBorrowPointer }) : '',
-          session.browserEnabled || usesComputer(session) ? BROWSER_INSTRUCTIONS : '',
+          session.browserEnabled ? BROWSER_INSTRUCTIONS : '',
           profileBlock(facts)
         ]
           .map((s) => s.trim())
@@ -264,7 +202,7 @@ export class Chat extends Context.Service<
           messages,
           temperature: settings.temperature,
           ...(hasPdf ? { plugins: [{ id: 'file-parser', pdf: { engine: settings.pdfEngine } }] } : {}),
-          ...(usesComputer(session) ? { tools: [...computerTools(process.platform === 'darwin' ? 'darwin' : 'win32'), ...BROWSER_TOOLS] } : session.browserEnabled ? { tools: BROWSER_TOOLS } : {})
+          ...(session.browserEnabled ? { tools: BROWSER_TOOLS } : {})
         } satisfies ChatRequest as ChatRequest
         return request
       })
@@ -299,8 +237,7 @@ export class Chat extends Context.Service<
         messages.some((m) => Array.isArray(m.content) && m.content.some((p) => p.type === 'image_url'))
 
       /**
-       * The model for one request. `own` answers (the computer-use model in a computer run, else
-       * the chat's), unless the request carries images it can't see: then the first of the vision
+       * The model for one request: `own`, unless the request carries images it can't see: then the first of the vision
        * model and the chat's model that can. If none can, `own` gets them anyway.
        */
       const modelFor = (own: string, chatModel: string, vision: string, messages: ChatMessage[]) =>
@@ -354,14 +291,9 @@ export class Chat extends Context.Service<
         // Flushes a half-finished text line so a step line never lands in the middle of it.
         const endLine = Effect.suspend(() => Effect.forEach(buffer.flush(), emit, { discard: true }))
         let usedBrowser = false
-        let usedComputer = false
-        /** A reply with computer tools, which glances at the screen whether or not it acts. */
-        let lookedAtScreen = false
         // A continued reply keeps counting from what it already used.
         let usage: Usage | null = assistant.usage ? { ...assistant.usage } : null
         let answeredBy: string | null = null
-        const timer = replyTimer(assistant.id, timing)
-        let replyModel = assistant.model
         const addUsage = (u: Omit<Usage, 'requests'>) => {
           const prev = usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, reasoningTokens: 0, cost: null, requests: 0 }
           usage = {
@@ -378,100 +310,50 @@ export class Chat extends Context.Service<
         return Effect.gen(function* () {
           const request = yield* buildRequest(assistant, partial)
           const chatModel = request.model
-          replyModel = chatModel
           const settings = yield* settingsStore.get.pipe(Effect.orElseSucceed(() => null))
           const refs = new Map<string, string>()
-          const computerRun = request.tools?.some((t) => t.function.name.startsWith('computer_')) ?? false
-          lookedAtScreen = computerRun
-          const maxSteps = computerRun ? MAX_COMPUTER_STEPS : MAX_AGENT_STEPS
-          // A computer step is a small decision on a fresh screenshot, so the model thinks as much
-          // as Settings say (low by default). Models that can't take an effort ignore it.
-          if (computerRun) request.reasoning = { effort: settings?.computerReasoningEffort ?? 'low' }
-          // A computer step may be several actions the screenshot already shows the way to; they run
-          // one after another, each checked against that screenshot (see Computer.thinking).
-          if (computerRun) request.parallel_tool_calls = true
-          // Computer runs can have their own model, so a chat can talk with one and act with a faster one.
           // Runs with tools never go to the auto-router: it could pick another model at every step.
           const actingModel = request.tools ? toolModel(chatModel) : chatModel
-          const ownModel = (computerRun && settings?.computerModel) || actingModel
           // The newest screenshot message this run added; the one before it is dropped when it comes.
           let lastShot: ChatMessage | null = null
           // Page snapshots this run added, oldest first; all but the newest are stale.
           const snapshots: ChatMessage[] = []
-          // Desktop results this run added, oldest first, with what each is cut to once stale.
-          const desktopResults: Array<{ result: ChatMessage; stale: string }> = []
-          // The screen comes with the first request, so the model can act on its first step rather
-          // than spend a round trip asking for a screenshot. This only looks: the chat window stays
-          // up (left out of the capture on Windows, painted grey on a Mac) until the first computer
-          // action takes over.
-          if (computerRun && partial === null) {
-            const glance = yield* computer.glance(assistant.id).pipe(timer.action(0, 'computer.glance'))
-            if (glance) {
-              const seen: ChatMessage = {
-                role: 'user',
-                content: [
-                  { type: 'text', text: `The screen as this task starts:\n${glance.text}` },
-                  ...(glance.image ? [{ type: 'image_url' as const, image_url: { url: glance.image } }] : [])
-                ]
-              }
-              request.messages.push(seen)
-              if (glance.image) lastShot = seen
-            }
-          }
           for (let step = 0; ; step++) {
             const calls = new Map<number, { id: string; name: string; args: string }>()
             let text = ''
             // The model's thinking, which goes back with its tool calls so the next step builds on it.
             let thought = ''
             const reasoning: ReasoningDetail[] = []
-            let received = false
-            request.model = yield* modelFor(ownModel, actingModel, settings?.visionModel ?? '', request.messages)
+            request.model = yield* modelFor(actingModel, actingModel, settings?.visionModel ?? '', request.messages)
             // Once another model has answered, the reply is saved (and timed) as the last one's.
             if (request.model !== chatModel || answeredBy !== null) answeredBy = request.model
-            // While the model decides, the sketch cursor waits where it is with a spinner; the next
-            // action, or the reply ending however it ends, clears it.
-            if (computerRun) yield* computer.thinking
-            const ask = () =>
-              openRouter.streamChat(request).pipe(
-                Stream.runForEach((delta) => {
-                  received = true
-                  if (delta.type === 'usage') {
-                    addUsage(delta.usage)
-                    return Effect.void
-                  }
-                  if (delta.type === 'reasoning') {
-                    if (delta.text) thought += delta.text
-                    if (delta.details) mergeReasoning(reasoning, delta.details)
-                    return Effect.void
-                  }
-                  if (delta.type === 'text') {
-                    text += delta.text
-                    return Effect.forEach(buffer.push(delta.text), emit, { discard: true })
-                  }
-                  const call = calls.get(delta.index) ?? { id: '', name: '', args: '' }
-                  if (delta.id) call.id = delta.id
-                  if (delta.name) call.name += delta.name
-                  if (delta.args) call.args += delta.args
-                  calls.set(delta.index, call)
+            yield* openRouter.streamChat(request).pipe(
+              Stream.runForEach((delta) => {
+                if (delta.type === 'usage') {
+                  addUsage(delta.usage)
                   return Effect.void
-                }),
-                timer.call(step, request.model)
-              )
-            // A model that refuses the reasoning effort is asked again without it, for the rest of the reply.
-            yield* ask().pipe(
-              Effect.catchTag('ProviderError', (e) => {
-                if (!request.reasoning || received || (e.status !== 400 && e.status !== 422)) return Effect.fail(e)
-                delete request.reasoning
-                return Effect.logWarning(`${request.model} refused the reasoning effort, asking without it: ${e.message}`).pipe(Effect.andThen(ask()))
+                }
+                if (delta.type === 'reasoning') {
+                  if (delta.text) thought += delta.text
+                  if (delta.details) mergeReasoning(reasoning, delta.details)
+                  return Effect.void
+                }
+                if (delta.type === 'text') {
+                  text += delta.text
+                  return Effect.forEach(buffer.push(delta.text), emit, { discard: true })
+                }
+                const call = calls.get(delta.index) ?? { id: '', name: '', args: '' }
+                if (delta.id) call.id = delta.id
+                if (delta.name) call.name += delta.name
+                if (delta.args) call.args += delta.args
+                calls.set(delta.index, call)
+                return Effect.void
               })
             )
             if (calls.size === 0 || !request.tools) return
-            // The cursor says what each action's `say` does (see runComputerTool). A step that gives
-            // none acts without a word: what the cursor said for an earlier step no longer fits.
-            if (computerRun && ![...calls.values()].some((c) => c.name.startsWith('computer_') && saysSomething(c.args))) yield* computer.say('')
-            if (step >= maxSteps) {
+            if (step >= MAX_AGENT_STEPS) {
               yield* endLine
-              yield* emit(`Stopped after ${maxSteps} steps. Ask me to keep going if you want me to continue.`)
+              yield* emit(`Stopped after ${MAX_AGENT_STEPS} steps. Ask me to keep going if you want me to continue.`)
               return
             }
 
@@ -488,91 +370,34 @@ export class Chat extends Context.Service<
               // Structured blocks as they came (signed or encrypted ones must match exactly), else the plain text.
               ...(reasoning.length > 0 ? { reasoning_details: reasoning } : thought ? { reasoning: thought } : {})
             })
-            const images: Array<{ url: string; desktop: boolean }> = []
-            let halt: string | null = null
-            /** Why the rest of this step's calls aren't run: one before them failed or was held back. */
-            let skip: string | null = null
-            /** The newest screenshot of the desktop this step, and the result it belongs to. */
-            let screen: { url: string; result: ChatMessage; brief?: string } | null = null
-            let acted = 0
+            const images: string[] = []
             for (const call of toolCalls) {
-              // Every call needs a result, even ones after a refusal, or the request is malformed.
-              if (halt !== null) {
-                request.messages.push({ role: 'tool', tool_call_id: call.id, content: 'Not run: control was handed back to the user.' })
-                continue
-              }
-              if (skip !== null) {
-                request.messages.push({ role: 'tool', tool_call_id: call.id, content: `Not run: ${skip}` })
-                continue
-              }
-              const desktop = call.function.name.startsWith('computer_')
-              if (desktop && !usedComputer) {
-                usedComputer = true
-                const taken = yield* computer.begin(assistant.id).pipe(timer.action(step, 'computer.begin'), Effect.as(null), Effect.catch((e) => Effect.succeed(e.message)))
-                if (taken !== null) {
-                  yield* emit(stepLine({ tool: call.function.name, label: 'Could not use the computer', ok: false, detail: taken }))
-                  request.messages.push({ role: 'tool', tool_call_id: call.id, content: `Error: ${taken}` })
-                  usedComputer = false
-                  continue
-                }
-              }
-              if (!desktop) usedBrowser = true
-              if (!desktop && computerRun) yield* computer.hint(browserHint(call.function.name, call.function.arguments))
-              let outcome = desktop
-                ? yield* runComputerTool(computer, call.function.name, call.function.arguments).pipe(timer.action(step, call.function.name))
-                : yield* runTool(browser, refs, call.function.name, call.function.arguments).pipe(timer.action(step, call.function.name))
+              usedBrowser = true
+              let outcome = yield* runTool(browser, refs, call.function.name, call.function.arguments)
               if (outcome.attach) outcome = yield* attachToReply(assistant.id, outcome)
-              for (const s of outcome.steps ?? [outcome.step]) yield* emit(stepLine(s))
+              yield* emit(stepLine(outcome.step))
               const result: ChatMessage = { role: 'tool', tool_call_id: call.id, content: outcome.text }
               request.messages.push(result)
               if (outcome.snapshot) snapshots.push(result)
-              if (desktop && outcome.stale !== undefined) desktopResults.push({ result, stale: outcome.stale })
-              // Of the desktop, only the screen after the last action goes back: an earlier one would
-              // show a screen that is gone, and the model could take it for the current one.
-              if (outcome.image && desktop && call.function.name !== 'computer_zoom') {
-                if (screen?.brief) screen.result.content = screen.brief
-                screen = { url: outcome.image, result, ...(outcome.brief ? { brief: outcome.brief } : {}) }
-                acted++
-              } else if (outcome.image) images.push({ url: outcome.image, desktop })
-              if (outcome.halt) halt = outcome.halt
-              // The calls after a desktop action that failed were planned on it having worked.
-              else if (desktop && !outcome.step.ok && call !== toolCalls.at(-1)) skip = `the ${call.function.name} before this didn't go as planned, so this was left for you to plan again.`
+              if (outcome.image) images.push(outcome.image)
             }
-            if (halt !== null) return yield* emit(halt)
             pruneSnapshots(snapshots)
-            pruneDesktop(desktopResults)
-            if (screen) images.push({ url: screen.url, desktop: true })
             // Tool results are text-only on most providers, so screenshots follow as a user turn.
             if (images.length > 0) {
-              const heading =
-                images.length > 1
-                  ? `Images from this step, in the order they were taken${screen ? '; the last is the screen as it is now' : ''}:`
-                  : !screen
-                    ? images[0]!.desktop
-                      ? 'Close-up you asked for:'
-                      : 'Screenshot of the browser viewport you asked for:'
-                    : acted > 1
-                      ? `Screenshot after the last of your ${acted} actions this step (the screen as it is now):`
-                      : 'Screenshot after that step:'
+              const heading = images.length > 1 ? 'Images from this step, in the order they were taken:' : 'Screenshot of the browser viewport you asked for:'
               const shot: ChatMessage = {
                 role: 'user',
-                content: [{ type: 'text', text: heading }, ...images.map((i) => ({ type: 'image_url' as const, image_url: { url: i.url } }))]
+                content: [{ type: 'text', text: heading }, ...images.map((url) => ({ type: 'image_url' as const, image_url: { url } }))]
               }
               request.messages.push(shot)
-              // Only the newest screenshot is worth its tokens; the one before becomes a note (the glance's too).
+              // Only the newest screenshot is worth its tokens; the one before becomes a note.
               if (lastShot) lastShot.content = DROPPED_SCREENSHOT
               lastShot = shot
             }
           }
         }).pipe(
-          // Hand the browser and computer back however the reply ends (done, error, Stop, Take over).
+          // Hand the browser back however the reply ends (done, error, Stop).
           Effect.ensuring(Effect.suspend(() => (usedBrowser ? browser.release : Effect.void))),
-          Effect.ensuring(Effect.suspend(() => (usedComputer ? computer.end(assistant.id) : Effect.void))),
-          Effect.ensuring(Effect.suspend(() => computer.hint(''))),
-          // A reply that never took control has no `end` to take its words off the cursor.
-          Effect.ensuring(Effect.suspend(() => (usedComputer ? Effect.void : computer.say('')))),
-          // Text-only replies in a computer chat glanced at the screen too: don't leave its stream running.
-          Effect.ensuring(Effect.suspend(() => (lookedAtScreen ? computer.replyEnded(assistant.id) : Effect.void))),
           Effect.onExit((exit) =>
             Effect.gen(function* () {
               // The unfinished line is kept (and marked partial) so nothing received is lost.
@@ -586,9 +411,7 @@ export class Chat extends Context.Service<
               const error = Cause.squash(exit.cause)
               return yield* finish(assistant.id, 'error', errorMessage(error), partial, usage, answeredBy)
             })
-          ),
-          // Last, so the reply's wall time includes handing the computer back and saving the end.
-          Effect.onExit((exit) => timer.finish(answeredBy ?? replyModel, exit))
+          )
         )
       }
 
@@ -813,9 +636,6 @@ export class Chat extends Context.Service<
           stopRequested.add(messageId)
           yield* FiberMap.remove(generations, messageId)
         })
-
-      // Stop on the screen overlay, for when the chat window is out of the way.
-      computer.onStop((messageId) => void Effect.runFork(stop(messageId)))
 
       const switchBranch = Effect.fn('Chat.switchBranch')(function* (input: { sessionId: string; messageId: string }) {
         yield* messageIn(input.sessionId, input.messageId)

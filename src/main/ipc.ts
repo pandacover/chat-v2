@@ -9,8 +9,6 @@ import { publishArtifact } from './protocols'
 import { Attachments } from './services/Attachments'
 import { Browser } from './services/Browser'
 import { Chat, NEW_SESSION_TITLE } from './services/Chat'
-import { Computer } from './services/Computer'
-import { PROTECTED_TITLES, protectedAppsFor } from '@shared/computer'
 import { Db, type DbApi } from './services/Db'
 import { isSensitive } from './memory'
 import { ElevenLabs } from './services/ElevenLabs'
@@ -18,7 +16,7 @@ import { OpenRouter } from './services/OpenRouter'
 import { SettingsStore } from './services/SettingsStore'
 import { Sketches } from './services/Sketches'
 
-export type MainServices = Db | Chat | Attachments | SettingsStore | OpenRouter | ElevenLabs | Browser | Sketches | Computer
+export type MainServices = Db | Chat | Attachments | SettingsStore | OpenRouter | ElevenLabs | Browser | Sketches
 
 type Handler = (...args: any[]) => Effect.Effect<unknown, { readonly _tag: string; readonly message: string }, MainServices>
 
@@ -267,12 +265,7 @@ const handlers: Record<string, Handler> = {
       yield* browser.recordReply({ ok: true, path, seconds: Math.round(Number(reply.seconds) || 0) })
       return path
     }),
-  'browser:reveal': (path) => Effect.sync(() => shell.showItemInFolder(str(path, 'path'))),
-
-  'computer:tips': () => Computer.use((c) => c.tips),
-  'computer:removeTip': (id) => Computer.use((c) => c.removeTip(str(id, 'id'))),
-  'computer:protectedApps': () =>
-    Effect.succeed([...protectedAppsFor(process.platform === 'darwin' ? 'darwin' : 'win32').map((a) => a.label), ...PROTECTED_TITLES.map((t) => t.label)])
+  'browser:reveal': (path) => Effect.sync(() => shell.showItemInFolder(str(path, 'path')))
 }
 
 /** Calls made while the app quits are never answered; the window closes before it could use one. */
@@ -296,19 +289,4 @@ export const registerIpc = (runtime: ManagedRuntime.ManagedRuntime<MainServices,
       ).catch((e: unknown) => (quitting() ? unanswered : Promise.reject(e)))
     )
   }
-
-  // Computer mode is on while any window shows a chat with computer use switched on.
-  const computerWindows = new Set<number>()
-  const applyMode = () => void runtime.runPromise(Computer.use((c) => c.setMode(computerWindows.size > 0))).catch(() => undefined)
-  ipcMain.on('computer:mode', (event, on: unknown) => {
-    const id = event.sender.id
-    if (on === true && !computerWindows.has(id)) {
-      computerWindows.add(id)
-      event.sender.once('destroyed', () => {
-        if (computerWindows.delete(id) && !quitting()) applyMode()
-      })
-    } else if (on !== true) computerWindows.delete(id)
-    applyMode()
-  })
-  ipcMain.on('computer:prewarm', () => void runtime.runPromise(Computer.use((c) => c.prewarm)).catch(() => undefined))
 }

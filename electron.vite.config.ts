@@ -16,8 +16,7 @@ export default defineConfig({
     resolve: { alias: shared },
     build: {
       rollupOptions: {
-        // The overlay that draws computer use on screen gets its own, much smaller bridge.
-        input: { index: resolve(__dirname, 'src/preload/index.ts'), overlay: resolve(__dirname, 'src/preload/overlay.ts') },
+        input: { index: resolve(__dirname, 'src/preload/index.ts') },
         // Sandboxed preloads must be a single CommonJS file.
         output: { format: 'cjs', entryFileNames: '[name].cjs' }
       }
@@ -30,12 +29,7 @@ export default defineConfig({
       // electron-vite leaves the renderer unminified by default: 740 KB of script to parse at startup.
       minify: true,
       rollupOptions: {
-        // The overlay and the hidden page that streams the screen for computer use are pages of their own.
-        input: {
-          index: resolve(__dirname, 'src/renderer/index.html'),
-          overlay: resolve(__dirname, 'src/renderer/overlay.html'),
-          capture: resolve(__dirname, 'src/renderer/capture.html')
-        }
+        input: { index: resolve(__dirname, 'src/renderer/index.html') }
       }
     }
   }

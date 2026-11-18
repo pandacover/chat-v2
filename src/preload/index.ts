@@ -82,14 +82,6 @@ const api: Api = {
       return () => ipcRenderer.removeListener('updates:event', handler)
     }
   },
-  computer: {
-    supported: process.platform === 'win32' || process.platform === 'darwin',
-    tips: () => call('computer:tips'),
-    removeTip: (id) => call('computer:removeTip', id),
-    protectedApps: () => call('computer:protectedApps'),
-    setMode: (on) => ipcRenderer.send('computer:mode', on === true),
-    prewarm: () => ipcRenderer.send('computer:prewarm')
-  },
   browser: {
     attach: (id) => call('browser:attach', id),
     screenshot: (rect) => call('browser:screenshot', rect),

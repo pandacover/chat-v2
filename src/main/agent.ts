@@ -74,21 +74,7 @@ export interface ToolOutcome {
   text: string
   /** A screenshot the model asked to see (sent as a follow-up image message). */
   image?: string
-  /**
-   * The result without its screenshot, for when a later action in the same turn sends the screen
-   * after it instead (only the last of a turn's screenshots goes to the model).
-   */
-  brief?: string
-  /**
-   * What a desktop result shrinks to once later ones have told the model about the screen: how it
-   * went and what it changed, without the window list then (see pruneDesktop in Chat.ts).
-   */
-  stale?: string
   step: Step
-  /** The steps it took, shown in its place where it took several (computer_batch). */
-  steps?: Step[]
-  /** Ends the run with this line to the user (a refused action, or the user taking over). */
-  halt?: string
   /** A page snapshot, which the next action makes stale (see pruning in Chat.ts). */
   snapshot?: true
   /** A file to add to the reply for the user (a screenshot they asked for). */

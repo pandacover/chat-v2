@@ -63,7 +63,7 @@ class Appearance {
 
   constructor() {
     this.apply()
-    // Fires in every other window of the app (the computer-use overlay among them) on a change.
+    // Fires in every other window of the app on a change.
     addEventListener('storage', (e) => {
       if (e.key !== KEY && e.key !== null) return
       this.prefs = load()

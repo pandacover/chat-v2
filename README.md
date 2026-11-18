@@ -13,7 +13,6 @@ chat-v2 is a desktop chat app for any model on [OpenRouter](https://openrouter.a
 - Takes images, PDFs, and text files up to 25 MB each.
 - Opens HTML artifacts from the model in a sandboxed side panel.
 - Has a built-in browser that the model can use. It blocks ad and tracker hosts listed in `src/shared/blocklist.ts`.
-- Lets the model work in your apps on Windows and macOS. See [Computer use](#computer-use).
 - Transcribes voice input. Hold the mic button, or press `Ctrl+M` to start and stop.
 
 ## Run it from source
@@ -33,7 +32,6 @@ If your shell sets `ELECTRON_RUN_AS_NODE=1`, unset it first. Otherwise Electron 
 | `bun run preview` | Runs the production bundle. |
 | `bun run typecheck` | Runs `tsc` and `svelte-check`. |
 | `bun test` | Runs the unit and integration tests. |
-| `bun run build:mac-capture` | Builds the macOS screen capture helper. Needs the Xcode command-line tools. |
 
 ## Where your data lives
 
@@ -43,17 +41,8 @@ The app keeps its files in `%APPDATA%\chat-v2` on Windows, `~/Library/Applicatio
 - `secrets.json` holds the encrypted API keys.
 - `chat.db` holds chats, branches, and memory.
 - `attachments/` holds uploaded files.
-- `timing.jsonl` logs where each computer-use reply spent its time.
 
 For tests, `OPENROUTER_BASE_URL` and `ELEVENLABS_BASE_URL` point the app at a mock server. `CHAT_V2_HEADLESS=1` keeps the window hidden.
-
-## Computer use
-
-Turn on **Computer** in the composer. The model sees the main screen and works in your apps with its own cursor. It clicks and types without moving your mouse where it can. Where an app only answers the real mouse (drags, and clicks or scrolls in some apps), it borrows the pointer for under a second and puts it back. After every action the model is told what changed on screen, so a click that did nothing isn't sent again and again. A tag beside its cursor says what it is doing, and it can draw marks on the screen to show you where things are. **Stop** in the bar at the top of the screen ends the run.
-
-A guard in `src/shared/computer.ts` checks every action. It hides system settings, security prompts, terminals, password managers, and chat-v2 itself from the model, and refuses input to them. You can add apps in Settings. A refused step ends the reply and asks you to do that step yourself.
-
-On macOS, computer use needs Accessibility and Screen Recording permission. Linux has no computer use.
 
 ## Releases
 
@@ -67,7 +56,6 @@ The release workflow signs macOS builds with a self-signed certificate (`build/c
 - `src/renderer` is the Svelte 5 UI.
 - `src/preload` exposes `window.api` to the renderer.
 - `src/shared` holds code that the main process and the renderer share.
-- `native/mac-capture` is the Swift helper that captures the screen on macOS.
 
 Messages form a tree through `parent_id`. Edits, regenerations, and forks add messages and never change existing ones.
 

@@ -2,7 +2,6 @@ import { Context, Effect, Layer, Stream } from 'effect'
 import type { ModelInfo, Usage } from '@shared/types'
 import { type ConfigError, type MissingApiKey, ProviderError, errorMessage } from '../errors'
 import { type ReasoningDetail, parseSseLine } from '../sse'
-import { CurrentStopwatch } from '../timing'
 import { SettingsStore } from './SettingsStore'
 
 // Overridable for local testing against a mock server.
@@ -51,8 +50,6 @@ export interface ChatRequest {
   tools?: ToolDefinition[]
   /** `effort: 'none'` turns thinking off; thinking tokens count against `max_tokens`. */
   reasoning?: { effort: ReasoningEffort }
-  /** Several tool calls in one turn, run in order (computer use); off unless set. */
-  parallel_tool_calls?: boolean
 }
 
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high'
@@ -96,9 +93,6 @@ const perMillion = (v: unknown): number | null => {
   const n = typeof v === 'string' || typeof v === 'number' ? Number(v) : NaN
   return Number.isFinite(n) && n >= 0 ? Math.round(n * 1e6 * 1e6) / 1e6 : null
 }
-
-const countImages = (messages: ChatMessage[]) =>
-  messages.reduce((n, m) => n + (Array.isArray(m.content) ? m.content.filter((p) => p.type === 'image_url').length : 0), 0)
 
 /** Claude models, which cache only up to the breakpoints a request marks. */
 export const isAnthropic = (model: string) => /^~?anthropic\//.test(model)
@@ -185,8 +179,6 @@ export class OpenRouter extends Context.Service<
         Stream.unwrap(
           Effect.gen(function* () {
             const key = yield* settings.apiKey('openrouter')
-            // A reply times its calls (see timing.ts); other requests carry no stopwatch.
-            const sw = yield* CurrentStopwatch
             const controller = yield* Effect.acquireRelease(
               Effect.sync(() => new AbortController()),
               (c) => Effect.sync(() => c.abort())
@@ -196,10 +188,8 @@ export class OpenRouter extends Context.Service<
               messages: withCacheBreakpoints(req.model, req.messages),
               stream: true,
               // One action at a time keeps the browser's state predictable, unless the run asks otherwise.
-              ...(req.tools?.length ? { tool_choice: 'auto', parallel_tool_calls: req.parallel_tool_calls ?? false } : {})
+              ...(req.tools?.length ? { tool_choice: 'auto', parallel_tool_calls: false } : {})
             })
-            sw?.note('bytes', Buffer.byteLength(body))
-            sw?.note('images', countImages(req.messages))
             const res = yield* Effect.tryPromise({
               try: () =>
                 fetch(`${BASE}/chat/completions`, {
@@ -210,7 +200,6 @@ export class OpenRouter extends Context.Service<
                 }),
               catch: (cause) => providerError(undefined, `Could not reach OpenRouter: ${errorMessage(cause)}`)
             })
-            sw?.mark('headers')
             if (!res.ok || !res.body) {
               const body = yield* Effect.promise(() => res.text().catch(() => ''))
               return yield* Effect.fail(providerError(res.status, describeFailure(res.status, body)))
@@ -222,22 +211,8 @@ export class OpenRouter extends Context.Service<
             }).pipe(
               Stream.decodeText,
               Stream.splitLines,
-              Stream.flatMap((line) => {
-                // Any chunk counts, thinking included; keep-alive comments don't.
-                if (sw && line.startsWith('data:')) sw.mark('firstDelta')
-                return Stream.fromIterable(parseSseLine(line))
-              }),
+              Stream.flatMap((line) => Stream.fromIterable(parseSseLine(line))),
               Stream.takeWhile((e) => e.type !== 'done'),
-              Stream.tap((e) => {
-                if (!sw) return Effect.void
-                if (e.type === 'delta' || e.type === 'tool') sw.mark('firstContent')
-                else if (e.type === 'usage') sw.note('usage', e.usage)
-                else if (e.type === 'meta') {
-                  if (e.model) sw.note('model', e.model)
-                  if (e.provider) sw.note('provider', e.provider)
-                }
-                return Effect.void
-              }),
               Stream.mapEffect((e): Effect.Effect<ChatDelta | null, ProviderError> =>
                 e.type === 'error'
                   ? Effect.fail(providerError(undefined, e.message))

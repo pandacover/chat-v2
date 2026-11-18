@@ -76,7 +76,7 @@ export interface Session {
   forkedFromSessionId: string | null
   /** When on, the model gets browser tools for this chat. */
   browserEnabled: boolean
-  /** When on, the model can see the screen and use the mouse and keyboard (and the browser). */
+  /** Computer use for this chat. Saved, but nothing uses it yet: the computer-use tools plug in here. */
   computerEnabled: boolean
   /** When the chat was pinned to the top of the sidebar; null when it isn't. */
   pinnedAt: number | null
@@ -164,34 +164,6 @@ export interface Settings {
   memoryModel: string
   /** Keeps the window above other apps on the same desktop. */
   alwaysOnTop: boolean
-  /** Apps or window-title words computer use must never see or touch, on top of the built-in list. */
-  computerProtected: string[]
-  /**
-   * Lets computer use borrow the real pointer for a moment where nothing else works: drags (apps
-   * follow a drag only from the real mouse), clicks and scrolls in apps that ignore any other kind
-   * (on Windows, UWP, WinUI, XAML islands and WPF; on a Mac, areas an app draws itself), and a click
-   * tried again after it changed nothing. Off, the pointer is never touched and those drags and
-   * clicks mostly don't happen.
-   */
-  computerBorrowPointer: boolean
-  /**
-   * How hard the model thinks before each computer-use step. Low keeps the waits between actions
-   * short; models that don't think, or don't take an effort, ignore it.
-   */
-  computerReasoningEffort: 'minimal' | 'low' | 'medium' | 'high'
-  /**
-   * Runs the tool loop of computer-use replies (a fast model with vision suits it); '' keeps the
-   * chat's model. If it can't see images, the vision model steps in, then the chat's model.
-   */
-  computerModel: string
-}
-
-/** Something the assistant learned about an app while using it, offered again when it's in front. */
-export interface AppTip {
-  id: string
-  app: string
-  tip: string
-  at: number
 }
 
 export interface SettingsView {
@@ -331,18 +303,6 @@ export interface Api {
     savePng(name: string, data: ArrayBuffer): Promise<string | null>
   }
   browser: BrowserApi
-  computer: {
-    /** False where computer use isn't available (it runs on Windows and macOS). */
-    supported: boolean
-    tips(): Promise<AppTip[]>
-    removeTip(id: string): Promise<AppTip[]>
-    /** The apps and title words that are always protected, for Settings to list. */
-    protectedApps(): Promise<string[]>
-    /** Tells the app whether this window shows a chat with computer use on (the sketch cursor stays up). */
-    setMode(on: boolean): void
-    /** The user is writing in a chat with computer use on: gets the screen ready, so the reply's first look is quick. */
-    prewarm(): void
-  }
   updates: {
     get(): Promise<UpdateState>
     check(): Promise<UpdateState>
