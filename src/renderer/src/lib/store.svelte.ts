@@ -451,11 +451,14 @@ class AppState {
     try {
       const message = this.find(messageId)
       if (!message) return
-      const { lines, status } = await api.chat.linesSince(messageId, message.lineCount)
+      // A number, not the message: the message is live state that events change meanwhile.
+      const from = message.lineCount
+      const { lines, status } = await api.chat.linesSince(messageId, from)
       const current = this.find(messageId)
-      if (!current) return
+      // A view set meanwhile holds fewer lines than were asked for; its own backfill runs next.
+      if (!current || current.lineCount < from) return
       // Events may have advanced the message while the request was in flight.
-      const fresh = lines.slice(current.lineCount - message.lineCount)
+      const fresh = lines.slice(current.lineCount - from)
       for (const line of fresh) this.appendLine(current, line)
       current.status = status
     } catch {
