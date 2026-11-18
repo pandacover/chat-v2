@@ -14,9 +14,8 @@ import { isSensitive } from './memory'
 import { ElevenLabs } from './services/ElevenLabs'
 import { OpenRouter } from './services/OpenRouter'
 import { SettingsStore } from './services/SettingsStore'
-import { Sketches } from './services/Sketches'
 
-export type MainServices = Db | Chat | Attachments | SettingsStore | OpenRouter | ElevenLabs | Browser | Sketches
+export type MainServices = Db | Chat | Attachments | SettingsStore | OpenRouter | ElevenLabs | Browser
 
 type Handler = (...args: any[]) => Effect.Effect<unknown, { readonly _tag: string; readonly message: string }, MainServices>
 
@@ -207,29 +206,12 @@ const handlers: Record<string, Handler> = {
     }),
 
   'models:list': () => OpenRouter.use((o) => o.listModels),
-  'models:images': () => OpenRouter.use((o) => o.listImageModels),
 
   'stt:microphone': () => Effect.promise(microphoneAccess),
   'stt:transcribe': (audio: ArrayBuffer, mime) =>
     ElevenLabs.use((e) => e.transcribe(new Uint8Array(audio), str(mime, 'mime'))),
 
   'artifacts:publish': (html) => Effect.sync(() => publishArtifact(str(html, 'html'))),
-
-  'boards:get': (messageId, identifier) => Db.use((db) => db.use((d) => d.getBoard(str(messageId, 'messageId'), str(identifier, 'identifier')))),
-  'boards:save': (messageId, identifier, doc) =>
-    Db.use((db) => db.use((d) => d.saveBoard(str(messageId, 'messageId'), str(identifier, 'identifier'), doc))),
-  'boards:sketch': (prompt, variant) =>
-    Sketches.use((s) => s.get(str(prompt, 'prompt'), typeof variant === 'number' ? variant : 0)),
-  'boards:savePng': (name, data: ArrayBuffer) =>
-    Effect.promise(async () => {
-      const file = `${str(name, 'name').replace(/[\\/:*?"<>|]+/g, '-') || 'mood-board'}.png`
-      const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
-      const options = { defaultPath: join(app.getPath('pictures'), file), filters: [{ name: 'PNG image', extensions: ['png'] }] }
-      const result = win ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options)
-      if (result.canceled || !result.filePath) return null
-      writeFileSync(result.filePath, new Uint8Array(data))
-      return result.filePath
-    }),
 
   'updates:get': () => Effect.sync(updateState),
   'updates:check': () => Effect.promise(checkForUpdates),

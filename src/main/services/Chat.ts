@@ -1,7 +1,6 @@
 import { join } from 'node:path'
 import { Cause, Context, Effect, Exit, FiberMap, Layer, Semaphore, Stream } from 'effect'
-import { ARTIFACT_INSTRUCTIONS, replaceArtifacts } from '@shared/artifacts'
-import { MOODBOARD_INSTRUCTIONS, docToSpec, parseBoardDoc, specToJson } from '@shared/moodboard'
+import { ARTIFACT_INSTRUCTIONS } from '@shared/artifacts'
 import { makeLineBuffer } from '@shared/lines'
 import type { MemoryRun, Message, MessageStatus, Session, SessionView, StreamEvent, Usage } from '@shared/types'
 import { type DbError, InvalidInput, type NotFound, errorMessage } from '../errors'
@@ -154,27 +153,16 @@ export class Chat extends Context.Service<
         const session = yield* db.require('Session', (d) => d.getSession(assistant.sessionId))
         const history = yield* db.use((d) => d.lineage(assistant.parentId!))
         const stored = yield* db.use((d) => d.storedAttachmentsFor(history.map((m) => m.id)))
-        const boards = yield* db.use((d) => d.boardsFor(history.map((m) => m.id)))
         // The profile as it was when this chat first asked, so it is sent once per chat.
         const facts = settings.memoryModel
           ? yield* db.use((d) => d.liveFacts(d.sessionMemoryRev(session.id)))
           : []
-        // A mood board the user edited by hand goes back to the model as edited.
-        const withEdits = (m: Message) => {
-          const edited = boards.get(m.id)
-          if (!edited) return m.content
-          return replaceArtifacts(m.content, ({ identifier, kind }) => {
-            const doc = kind === 'moodboard' ? parseBoardDoc(edited.get(identifier)) : null
-            return doc ? specToJson(docToSpec(doc)) : null
-          })
-        }
 
         // User instructions first so they win any conflict; the writing guideline is hidden from Settings.
         const system = [
           session.systemPrompt ?? settings.systemPrompt,
           WRITING_GUIDELINES,
           settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : '',
-          settings.artifactsEnabled ? MOODBOARD_INSTRUCTIONS : '',
           session.browserEnabled ? BROWSER_INSTRUCTIONS : '',
           profileBlock(facts)
         ]
@@ -190,7 +178,7 @@ export class Chat extends Context.Service<
             const parts: ContentPart[] = [...files.parts, { type: 'text', text: m.content }]
             messages.push({ role: 'user', content: files.parts.length > 0 ? parts : m.content })
           } else if (m.role === 'assistant' && m.content.trim() !== '') {
-            messages.push({ role: 'assistant', content: summarizeSteps(withEdits(m)) })
+            messages.push({ role: 'assistant', content: summarizeSteps(m.content) })
           }
         }
         // Continuing: the partial reply goes back as the assistant's turn, and a note asks for the

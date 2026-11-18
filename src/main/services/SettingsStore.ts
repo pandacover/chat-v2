@@ -28,8 +28,6 @@ export const DEFAULT_SETTINGS: Settings = {
   pdfEngine: 'cloudflare-ai',
   artifactsEnabled: true,
   visionModel: '',
-  // About $0.008 per sketch at 768px.
-  sketchModel: 'black-forest-labs/flux-3-image-klein',
   // About $0.00001 per title.
   titleModel: 'mistralai/mistral-nemo',
   // Reads messages that talk about the user for facts; about $0.0003 a message, thinking off.
@@ -56,7 +54,6 @@ export const normalizeSettings = (raw: unknown): Settings => {
     artifactsEnabled:
       typeof input.artifactsEnabled === 'boolean' ? input.artifactsEnabled : DEFAULT_SETTINGS.artifactsEnabled,
     visionModel: str('visionModel', DEFAULT_SETTINGS.visionModel).trim(),
-    sketchModel: str('sketchModel', DEFAULT_SETTINGS.sketchModel).trim() || DEFAULT_SETTINGS.sketchModel,
     titleModel: str('titleModel', DEFAULT_SETTINGS.titleModel).trim(),
     memoryModel: str('memoryModel', DEFAULT_SETTINGS.memoryModel).trim(),
     alwaysOnTop: typeof input.alwaysOnTop === 'boolean' ? input.alwaysOnTop : DEFAULT_SETTINGS.alwaysOnTop

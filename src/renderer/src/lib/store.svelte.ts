@@ -54,8 +54,6 @@ class AppState {
   settings = $state<SettingsView | null>(null)
   models = $state<ModelInfo[]>([])
   modelsError = $state<string | null>(null)
-  imageModels = $state<ModelInfo[]>([])
-  imageModelsError = $state<string | null>(null)
   artifact = $state<OpenArtifact | null>(null)
   /** Settings is a modal over the chat; the chat stays mounted so drafts and scroll survive. */
   page = $state<'chat' | 'settings'>('chat')
@@ -305,15 +303,6 @@ class AppState {
       this.modelsError = null
     } catch (e) {
       this.modelsError = describe(e)
-    }
-  }
-
-  async loadImageModels() {
-    try {
-      this.imageModels = await api.models.images()
-      this.imageModelsError = null
-    } catch (e) {
-      this.imageModelsError = describe(e)
     }
   }
 

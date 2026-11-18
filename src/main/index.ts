@@ -10,7 +10,6 @@ import { setAppMenu } from './menu'
 import { handleProtocols, registerSchemes } from './protocols'
 import { initUpdater, offerMoveToApplications } from './updater'
 import { AppPaths } from './services/AppPaths'
-import { Sketches } from './services/Sketches'
 import { Attachments } from './services/Attachments'
 import { shrinkImage } from './images'
 import { Browser } from './services/Browser'
@@ -143,8 +142,7 @@ const makeRuntime = () => {
     Layer.provide(providers),
     Layer.provide(Layer.succeed(Broadcaster, broadcaster))
   )
-  const sketches = Sketches.layer.pipe(Layer.provide(providers))
-  return ManagedRuntime.make(Layer.mergeAll(chat, sketches, providers))
+  return ManagedRuntime.make(Layer.mergeAll(chat, providers))
 }
 
 let runtime: ManagedRuntime.ManagedRuntime<MainServices | AppPaths, unknown> | null = null

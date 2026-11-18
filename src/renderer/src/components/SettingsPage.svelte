@@ -330,11 +330,6 @@
                 {form.titleModel ? costLine(form.titleModel, 'title', 'a title') : ''}
               </p>
             </div>
-            <div class="mt-5 max-w-md">
-              <span class="mb-1.5 block font-medium text-fg">Sketch model</span>
-              <ModelPicker block source="image" value={form.sketchModel} onchange={(id) => (form.sketchModel = id)} />
-              <p class="mt-1.5 text-muted">Draws the pencil sketches on mood boards, one image per shot. Each sketch is drawn once and kept, so reopening a board costs nothing.</p>
-            </div>
             <label class="mt-5 block max-w-md">
               <span class="mb-1.5 flex justify-between"><span class="font-medium text-fg">Temperature</span><span class="text-fg-2 tabular-nums">{form.temperature.toFixed(1)}</span></span>
               <input type="range" min="0" max="2" step="0.1" bind:value={form.temperature} class="w-full accent-[var(--fg-2)]" />

@@ -4,7 +4,6 @@
   import { fade } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
   import Icon from './Icon.svelte'
-  import Moodboard from './Moodboard.svelte'
 
   let tab = $state<'preview' | 'code'>('preview')
   let url = $state<string | null>(null)
@@ -17,14 +16,11 @@
   const found = $derived(versions.findIndex((v) => v.messageId === app.artifact?.messageId))
   const index = $derived(found === -1 ? versions.length - 1 : found)
   const current = $derived(versions[index])
-  const isBoard = $derived(current?.block.kind === 'moodboard')
-  let board: ReturnType<typeof Moodboard> | undefined = $state()
 
   // Plain strings, so a streamed line that leaves the artifact unchanged doesn't
   // re-publish it or re-highlight its code.
-  const source = $derived(current?.block.content ?? '')
-  const html = $derived(current?.block.kind === 'html' ? source : undefined)
-  const highlighted = $derived(highlighter.hljs?.highlight(source, { language: isBoard ? 'json' : 'xml' }).value ?? escapeHtml(source))
+  const html = $derived(current?.block.content)
+  const highlighted = $derived(highlighter.hljs?.highlight(html ?? '', { language: 'xml' }).value ?? escapeHtml(html ?? ''))
 
   $effect(() => {
     if (html === undefined) return
@@ -46,7 +42,6 @@
 
   const download = () => {
     if (!current) return
-    if (isBoard) return void board?.exportPng()
     const a = document.createElement('a')
     a.href = URL.createObjectURL(new Blob([current.block.content], { type: 'text/html' }))
     a.download = `${current.block.identifier}.html`
@@ -93,7 +88,7 @@
           style="transform: translateX({tab === 'code' ? '100%' : '0'})"
         ></span>
         <button role="tab" aria-selected={tab === 'preview'} class="relative px-3 py-1 {tab === 'preview' ? 'text-fg' : 'text-muted'}" onclick={() => (tab = 'preview')}>
-          {isBoard ? 'Board' : 'Preview'}
+          Preview
         </button>
         <button role="tab" aria-selected={tab === 'code'} class="relative px-3 py-1 {tab === 'code' ? 'text-fg' : 'text-muted'}" onclick={() => (tab = 'code')}>
           Code
@@ -101,37 +96,15 @@
       </div>
 
       <span class="mx-1 h-4 w-px bg-line"></span>
-      {#if isBoard}
-        <button
-          class="icon-btn"
-          use:tip={'Undo hand edits: back to what the model wrote'}
-          disabled={tab !== 'preview'}
-          onclick={() => confirm('Put this board back to what the model wrote? You can undo this from the board.') && board?.reset()}
-        >
-          <Icon name="refresh" size={15} />
-        </button>
-        <button class="icon-btn" use:tip={copied ? 'Copied' : 'Copy JSON'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={15} /></button>
-        <button class="icon-btn" use:tip={'Download .png'} disabled={tab !== 'preview'} onclick={download}><Icon name="download" size={15} /></button>
-      {:else}
-        <button class="icon-btn" use:tip={'Reload'} onclick={() => ((loading = true), reloadKey++)}><Icon name="refresh" size={15} /></button>
-        <button class="icon-btn" use:tip={copied ? 'Copied' : 'Copy HTML'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={15} /></button>
-        <button class="icon-btn" use:tip={'Download .html'} onclick={download}><Icon name="download" size={15} /></button>
-      {/if}
+      <button class="icon-btn" use:tip={'Reload'} onclick={() => ((loading = true), reloadKey++)}><Icon name="refresh" size={15} /></button>
+      <button class="icon-btn" use:tip={copied ? 'Copied' : 'Copy HTML'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={15} /></button>
+      <button class="icon-btn" use:tip={'Download .html'} onclick={download}><Icon name="download" size={15} /></button>
       <button class="icon-btn" use:tip={{ text: 'Close', kbd: 'Esc' }} onclick={() => (app.artifact = null)}><Icon name="x" size={15} /></button>
     </header>
 
     <div class="relative min-h-0 flex-1 px-2 pb-2">
       <div class="relative h-full overflow-hidden rounded-md bg-surface shadow-[0_0_0_1px_var(--line)]">
-        {#if tab === 'preview' && isBoard}
-          <Moodboard
-            bind:this={board}
-            messageId={current.messageId}
-            identifier={current.block.identifier}
-            content={current.block.content}
-            title={current.block.title}
-            earlier={versions.slice(0, index).map((v) => v.messageId)}
-          />
-        {:else if tab === 'preview'}
+        {#if tab === 'preview'}
           {#if url}
             {#key `${url}:${reloadKey}`}
               <!-- Opaque-origin sandbox: scripts run, but cannot reach the app, its storage, or the parent window. -->
@@ -145,7 +118,7 @@
               ></iframe>
             {/key}
           {/if}
-          {#if loading && !isBoard}
+          {#if loading}
             <div class="absolute inset-0 grid place-items-center" out:fade={{ duration: 150 }}><span class="thinking text-[13px]">Loading</span></div>
           {/if}
         {:else}

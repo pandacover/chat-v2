@@ -13,8 +13,7 @@
     block = false,
     placement = 'down',
     filter,
-    noneLabel,
-    source = 'chat'
+    noneLabel
   }: {
     value: string
     onchange: (id: string) => void
@@ -24,12 +23,10 @@
     filter?: (m: ModelInfo) => boolean
     /** Offers an empty choice with this label (value ''). */
     noneLabel?: string
-    /** Which list to pick from: chat models, or image models for sketches. */
-    source?: 'chat' | 'image'
   } = $props()
 
-  const all = $derived(source === 'image' ? app.imageModels : app.models)
-  const error = $derived(source === 'image' ? app.imageModelsError : app.modelsError)
+  const all = $derived(app.models)
+  const error = $derived(app.modelsError)
 
   let open = $state(false)
   let query = $state('')
@@ -71,7 +68,7 @@
   const toggle = async () => {
     open = !open
     cursor = Math.max(0, results.findIndex((m) => m.id === value))
-    if (open && all.length === 0) void (source === 'image' ? app.loadImageModels() : app.loadModels())
+    if (open && all.length === 0) void app.loadModels()
     await tick()
     list?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' })
   }
