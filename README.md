@@ -14,6 +14,7 @@ chat-v2 is a desktop chat app for Claude. Replies run on Claude Code, which come
 - Takes images, PDFs, and text files up to 25 MB each. Claude reads images and PDFs itself.
 - Opens HTML artifacts from the model in a sandboxed side panel.
 - Has a built-in browser that Claude can use. It blocks ad and tracker hosts listed in `src/shared/blocklist.ts`.
+- Uses your computer on Windows and macOS: Claude looks at the screen, uses your apps and finds your files, or shows you each step to do yourself. See [Computer use](#computer-use).
 - Transcribes voice input. Hold the mic button, or press `Ctrl+M` to start and stop.
 
 ## Run it from source
@@ -34,6 +35,21 @@ If your shell sets `ELECTRON_RUN_AS_NODE=1`, unset it first. Otherwise Electron 
 | `bun run typecheck` | Runs `tsc` and `svelte-check`. |
 | `bun test` | Runs the unit and integration tests. |
 
+## Computer use
+
+Turn on **Computer** in the composer, and Claude can see your screen and use your apps in that chat. It is a port of Tomo's computer use, in `src/main/computer`.
+
+- **Do it**: Claude clicks and types for you. Before each input it gives focus back to the app you were in. If you move the mouse, it pauses.
+- **Show me**: Claude never clicks or types. It highlights each control on screen with what to do, and waits. Press **Done** beside the highlight or in the chat, or type what happened.
+- `Tab` in the composer switches between them. Each chat keeps its own mode.
+- Before anything you can't take back (deleting, sending, buying, installing, changing settings), a card in the chat asks for your OK, and the chat window comes to the front. `Ctrl+Enter` (`⌘ Enter` on a Mac) approves once the button has filled; `Esc` denies.
+- `Ctrl+Alt+Esc` (`⌃⌥Esc` on a Mac) stops a computer reply from any app, as Stop does. The app holds the shortcut only while a computer reply runs.
+- Shell commands that only read run freely. Any other command, and any file write, asks first.
+- While a computer reply runs, chat-v2's windows are left out of screenshots, which also hides them from screen sharing.
+- Computer replies think at low effort on Sonnet and Haiku and medium on the others, whatever Settings say: they make many short look-and-click calls.
+- On Windows, a window running as administrator drops chat-v2's input, and Claude says so.
+- On macOS, chat-v2 needs Accessibility and Screen Recording permission. This side hasn't run on a Mac yet.
+
 ## Where your data lives
 
 The app keeps its files in `%APPDATA%\chat-v2` on Windows, `~/Library/Application Support/chat-v2` on macOS, and `~/.config/chat-v2` on Linux.
@@ -44,7 +60,7 @@ The app keeps its files in `%APPDATA%\chat-v2` on Windows, `~/Library/Applicatio
 - `attachments/` holds uploaded files.
 - `claude/` is Claude Code's folder for the app. It holds the sessions each chat's turns resume from, so they stay out of your own `~/.claude` history. The sign-in is still the one `claude` keeps.
 
-For tests, `CHAT_V2_FAKE_QUERY` names a module whose `query` stands in for the SDK's, and `ELEVENLABS_BASE_URL` points voice input at a mock server. `CHAT_V2_HEADLESS=1` keeps the window hidden.
+For tests, `CHAT_V2_FAKE_QUERY` names a module whose `query` stands in for the SDK's, `CHAT_V2_FAKE_COMPUTER` one whose `platform` stands in for the real computer, and `ELEVENLABS_BASE_URL` points voice input at a mock server. `CHAT_V2_HEADLESS=1` keeps the windows hidden. `node test/computer/e2e.mjs <playwright-core dir> [out dir]`, after `bun run build`, drives computer use in the hidden app with both.
 
 ## Releases
 
@@ -55,7 +71,7 @@ The release workflow signs macOS builds with a self-signed certificate (`build/c
 ## Code layout
 
 - `src/main` is the Electron main process. Its Effect services are in `src/main/services`.
-- `src/main/agent` runs replies on the Claude Agent SDK. `driver.ts` makes the queries, `history.ts` picks the session a turn resumes, and `module.ts` is the contract for tool sets. The browser (`browser.ts`) is one: an in-process MCP server whose tools wait behind Claude Code's tool search until the model loads them.
+- `src/main/agent` runs replies on the Claude Agent SDK. `driver.ts` makes the queries, `history.ts` picks the session a turn resumes, and `module.ts` is the contract for tool sets. The browser (`browser.ts`) is one: an in-process MCP server whose tools wait behind Claude Code's tool search until the model loads them. Computer use (`src/main/computer`, with its own README) is the other.
 - `src/renderer` is the Svelte 5 UI.
 - `src/preload` exposes `window.api` to the renderer.
 - `src/shared` holds code that the main process and the renderer share.

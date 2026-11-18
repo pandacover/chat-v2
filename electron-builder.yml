@@ -56,6 +56,8 @@ mac:
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
     NSMicrophoneUsageDescription: chat-v2 uses the microphone for voice input.
+    # Computer use drives other apps through System Events (osascript) on macOS.
+    NSAppleEventsUsageDescription: chat-v2 uses other apps for you when you turn on computer use in a chat.
   # One build per architecture: a universal app carries both and is twice the size. Apps from
   # before the split download "-universal.dmg": release.yml uploads the Intel DMG under that name
   # too (it runs on both through Rosetta, and the next update moves Apple silicon to arm64).
