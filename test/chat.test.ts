@@ -227,12 +227,15 @@ describe('replies', () => {
     const kinds = [
       ['authentication_failed', 'Not logged in · Please run /login'],
       ['rate_limit', "You've hit your limit · resets 5pm"],
-      ['billing_error', 'Credit balance is too low']
+      ['billing_error', 'Credit balance is too low'],
+      // The SDK can also throw, with no assistant message saying what kind of error it was.
+      ['thrown', 'Claude Code returned an error result: Invalid API key · Fix external API key']
     ]
     let n = 0
     const t = setup(async function* (t) {
       const [kind, text] = kinds[n++]!
       yield* t.text('Partial ')
+      if (kind === 'thrown') throw new Error(text)
       yield* t.apiError(kind!, text!)
     })
     const s = await t.run(newSession)
@@ -246,7 +249,8 @@ describe('replies', () => {
     expect(errors).toEqual([
       "Claude Code isn't signed in. Run `claude` in a terminal and sign in with /login, or use an Anthropic API key in Settings. (Not logged in · Please run /login)",
       "You've reached a usage or rate limit. (You've hit your limit · resets 5pm)",
-      'Your Anthropic account has a billing problem or no credit left. (Credit balance is too low)'
+      'Your Anthropic account has a billing problem or no credit left. (Credit balance is too low)',
+      "Claude Code isn't signed in. Run `claude` in a terminal and sign in with /login, or use an Anthropic API key in Settings. (Invalid API key · Fix external API key)"
     ])
     // What streamed before the error is kept.
     expect((await t.run(Chat.use((c) => c.view(s.id)))).path[1]!.message).toMatchObject({ status: 'error', content: 'Partial ' })

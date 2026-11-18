@@ -151,6 +151,24 @@ export const describeFailure = (kind: SDKAssistantMessageError | null, detail: s
   return said && !lead.includes(said) ? `${lead} (${said})` : lead
 }
 
+/** An error Claude Code reported in words only, without an assistant message saying what kind. */
+const kindOf = (text: string): SDKAssistantMessageError | null =>
+  /not logged in|\/login|invalid api key|invalid x-api-key/i.test(text)
+    ? 'authentication_failed'
+    : /credit balance|billing/i.test(text)
+      ? 'billing_error'
+      : /rate limit|hit your limit/i.test(text)
+        ? 'rate_limit'
+        : null
+
+type Failure = { kind: SDKAssistantMessageError; text: string }
+
+/** The message for a query that failed: from its error message if there was one, else from what the SDK threw or the result said. */
+const explain = (failure: Failure | null, said: string, auth: Auth, model: string) => {
+  const detail = (failure?.text || said).replace(/^Claude Code returned an error result:\s*/, '')
+  return describeFailure(failure?.kind ?? kindOf(detail), detail, auth, model)
+}
+
 const usageOf = (r: SDKResultMessage, cost: number | null): Usage => {
   const u = r.usage
   const input = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
@@ -268,7 +286,7 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
           : { sessionId: req.session.id })
       }
       let result: SDKResultMessage | null = null
-      let failure: { kind: SDKAssistantMessageError; text: string } | null = null
+      let failure: Failure | null = null
       try {
         for await (const m of deps.query({ prompt: once(req.prompt), options })) {
           if (abort.signal.aborted) break
@@ -289,16 +307,15 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
         }
       } catch (e) {
         if (abort.signal.aborted) throw abortError()
-        throw new AgentError(failure ? describeFailure(failure.kind, failure.text, req.auth, req.model) : `Claude Code failed: ${errorMessage(e)}`)
+        throw new AgentError(explain(failure, errorMessage(e), req.auth, req.model))
       }
       if (abort.signal.aborted) throw abortError()
-      if (!result) throw new AgentError(failure ? describeFailure(failure.kind, failure.text, req.auth, req.model) : 'Claude Code ended before the reply did.')
+      if (!result) throw new AgentError(failure ? explain(failure, '', req.auth, req.model) : 'Claude Code ended before the reply did.')
       const sessionCost = result.total_cost_usd
       const usage = usageOf(result, Math.max(0, sessionCost - req.session.baseCost))
       if (result.subtype === 'error_max_turns') return { usage, sessionCost, maxTurns: true }
       if (result.subtype !== 'success' || result.is_error) {
-        const said = result.subtype === 'success' ? result.result : result.errors.join(' ')
-        throw new AgentError(describeFailure(failure?.kind ?? null, failure?.text || said, req.auth, req.model))
+        throw new AgentError(explain(failure, result.subtype === 'success' ? result.result : result.errors.join(' '), req.auth, req.model))
       }
       return { usage, sessionCost, maxTurns: false }
     } finally {
@@ -316,7 +333,7 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
     try {
       let text = ''
       let result: SDKResultMessage | null = null
-      let failure: { kind: SDKAssistantMessageError; text: string } | null = null
+      let failure: Failure | null = null
       const options: Options = {
         ...base(req.auth),
         model: req.model,
@@ -328,15 +345,20 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
         thinking: { type: 'disabled' },
         abortController: abort
       }
-      for await (const m of deps.query({ prompt: once([{ type: 'text', text: req.prompt }]), options })) {
-        if (m.type === 'assistant' && !m.parent_tool_use_id) {
-          if (m.error) failure = { kind: m.error, text: textOf(m.message.content) }
-          else text += textOf(m.message.content)
-        } else if (m.type === 'result') result = m
+      try {
+        for await (const m of deps.query({ prompt: once([{ type: 'text', text: req.prompt }]), options })) {
+          if (m.type === 'assistant' && !m.parent_tool_use_id) {
+            if (m.error) failure = { kind: m.error, text: textOf(m.message.content) }
+            else text += textOf(m.message.content)
+          } else if (m.type === 'result') result = m
+        }
+      } catch (e) {
+        if (abort.signal.aborted) throw abortError()
+        throw new AgentError(explain(failure, errorMessage(e), req.auth, req.model))
       }
       if (abort.signal.aborted) throw abortError()
       if (failure || !result || result.is_error || result.subtype !== 'success')
-        throw new AgentError(describeFailure(failure?.kind ?? null, failure?.text ?? (result?.subtype === 'success' ? result.result : ''), req.auth, req.model))
+        throw new AgentError(explain(failure, result?.subtype === 'success' ? result.result : (result?.errors.join(' ') ?? ''), req.auth, req.model))
       return text
     } finally {
       signal.removeEventListener('abort', stop)
