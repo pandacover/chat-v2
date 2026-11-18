@@ -10,28 +10,34 @@
   const bridge = (window as unknown as { computerOverlay: ComputerOverlayBridge }).computerOverlay
 
   let st = $state<OverlayState>({ acting: false, teach: null })
-  // Main makes the overlay click-through again on every new state; report afresh from here.
-  $effect(() =>
-    bridge.onState((s) => {
-      st = s
-      over = false
-    })
-  )
+  $effect(() => bridge.onState((s) => (st = s)))
 
   /**
    * The overlay covers the whole screen, so it may only take the mouse while the pointer is on the
-   * callout. Hit-tested on every move, not with enter/leave: a callout that goes away under the
-   * pointer (Done) never gets a mouseleave, and would leave a full-screen window eating every click.
+   * callout. A click-through window hears no mouse moves of its own, so main watches the pointer;
+   * this tells it where the callout is, again after each glide or change of size.
    */
   let calloutEl: HTMLElement | undefined = $state()
-  let over = false
-  const onmove = (e: MouseEvent) => {
-    const r = calloutEl?.getBoundingClientRect()
-    const hit = !!r && e.clientX >= r.left && e.clientX < r.right && e.clientY >= r.top && e.clientY < r.bottom
-    if (hit === over) return
-    over = hit
-    bridge.interactive(hit)
-  }
+  $effect(() => {
+    const el = calloutEl
+    void callout
+    if (!el) return
+    const report = () => {
+      const r = el.getBoundingClientRect()
+      bridge.callout({ x: r.left, y: r.top, width: r.width, height: r.height })
+    }
+    report()
+    const size = new ResizeObserver(report)
+    size.observe(el)
+    el.addEventListener('transitionend', report)
+    el.addEventListener('animationend', report)
+    return () => {
+      size.disconnect()
+      el.removeEventListener('transitionend', report)
+      el.removeEventListener('animationend', report)
+      bridge.callout(null)
+    }
+  })
 
   const PAD = 6
   const t = $derived(st.teach)
@@ -49,8 +55,6 @@
     return placeBelow ? { left, top: below, below: true } : { left, bottom: vh - hole.y + 12, below: false }
   })
 </script>
-
-<svelte:window onmousemove={onmove} />
 
 {#if st.acting}
   <!-- Computer use is driving: a hairline around the screen. The chat says what it's doing. -->

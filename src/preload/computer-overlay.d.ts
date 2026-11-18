@@ -18,8 +18,8 @@ export interface OverlayState {
 export interface ComputerOverlayBridge {
   /** Returns a function that stops listening. */
   onState(listener: (state: OverlayState) => void): () => void
-  /** True while the pointer is on the Show-me callout, so its Done button takes the click. */
-  interactive(on: boolean): void
+  /** Where the Show-me callout is (DIPs, window-relative), or null; main lets it take the mouse while the pointer is on it. */
+  callout(rect: { x: number; y: number; width: number; height: number } | null): void
   /** The user pressed Done on the callout. */
   done(): void
 }

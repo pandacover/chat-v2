@@ -3,6 +3,11 @@
 // control with the instruction and a Done button beside it. It only takes the mouse while the
 // pointer is on that callout, and screen captures leave it out. The global Stop shortcut is here
 // too: the chat window is often covered while computer use acts.
+//
+// Main watches the pointer itself rather than forwarding mouse moves to the click-through window
+// (setIgnoreMouseEvents' `forward`): on Windows that is a low-level mouse hook on this thread,
+// which Windows silently removes the first time the thread is busy too long, and this thread runs
+// the agent. Without it the callout never took the mouse and Done clicked the app below.
 import { join } from 'node:path'
 import { app, BrowserWindow, globalShortcut, ipcMain, screen, type Rectangle } from 'electron'
 import { STOP_SHORTCUT } from '@shared/computer'
@@ -21,6 +26,9 @@ export interface ElectronOverlayOptions {
   page?: string
 }
 
+/** How often the pointer is checked while a Show-me callout is up. */
+const POLL_MS = 40
+
 export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayPort & { readonly window: BrowserWindow | null } => {
   const headless = opts.headless ?? process.env.CHAT_V2_HEADLESS === '1'
   let win: BrowserWindow | null = null
@@ -33,6 +41,31 @@ export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayP
   let holdingKey = false
   const pressed = () => {
     for (const f of stopListeners) f()
+  }
+  /** The callout's rect as the renderer last reported it (DIPs, window-relative). */
+  let callout: Rectangle | null = null
+  let taking = false
+  let poll: ReturnType<typeof setInterval> | null = null
+
+  const take = (on: boolean) => {
+    if (on === taking || !win || win.isDestroyed()) return
+    taking = on
+    win.setIgnoreMouseEvents(!on)
+  }
+  const check = () => {
+    if (!win || win.isDestroyed() || !teach || !callout) return take(false)
+    const p = screen.getCursorScreenPoint()
+    const b = win.getBounds()
+    const x = p.x - b.x
+    const y = p.y - b.y
+    take(x >= callout.x && x < callout.x + callout.width && y >= callout.y && y < callout.y + callout.height)
+  }
+  const watch = (on: boolean) => {
+    if (on && !poll) poll = setInterval(check, POLL_MS)
+    if (!on && poll) {
+      clearInterval(poll)
+      poll = null
+    }
   }
 
   const create = () => {
@@ -58,13 +91,16 @@ export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayP
     })
     w.setAlwaysOnTop(true, 'screen-saver')
     w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-    w.setIgnoreMouseEvents(true, { forward: true })
+    w.setIgnoreMouseEvents(true)
     // Invisible to screenshots, so the model never sees (or clicks) the overlay itself.
     w.setContentProtection(true)
     // A fresh renderer starts from what main last sent.
     w.webContents.on('did-finish-load', () => w.webContents.send('computer-overlay:state', state))
     w.on('closed', () => {
-      if (win === w) win = null
+      if (win !== w) return
+      win = null
+      taking = false
+      watch(false)
     })
     const url = process.env.ELECTRON_RENDERER_URL
     if (opts.page) void w.loadFile(opts.page)
@@ -75,8 +111,10 @@ export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayP
 
   const fromOverlay = (sender: Electron.WebContents) => !!win && !win.isDestroyed() && sender === win.webContents
   // Only a Show-me callout ever takes the mouse; the acting frame never does.
-  ipcMain.on('computer-overlay:interactive', (e, on: boolean) => {
-    if (fromOverlay(e.sender)) win!.setIgnoreMouseEvents(!(on && teach !== null), { forward: true })
+  ipcMain.on('computer-overlay:callout', (e, rect: Rectangle | null) => {
+    if (!fromOverlay(e.sender)) return
+    callout = rect
+    check()
   })
   ipcMain.on('computer-overlay:done', (e) => {
     if (fromOverlay(e.sender)) for (const f of doneListeners) f()
@@ -86,8 +124,9 @@ export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayP
     const show = acting || teach !== null
     if (!show && !win) return
     win ??= create()
-    // Click-through again on every change; the renderer takes the mouse back only while the pointer is on the callout.
-    win.setIgnoreMouseEvents(true, { forward: true })
+    // The pointer is watched only while a callout is up; it takes the mouse back when on it.
+    watch(teach !== null)
+    check()
     if (!show) {
       state = { acting: false, teach: null }
       win.webContents.send('computer-overlay:state', state)
@@ -143,7 +182,8 @@ export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayP
       if (holdingKey) globalShortcut.unregister(STOP_SHORTCUT)
       holdingKey = false
       app.off('browser-window-created', onCreated)
-      ipcMain.removeAllListeners('computer-overlay:interactive')
+      watch(false)
+      ipcMain.removeAllListeners('computer-overlay:callout')
       ipcMain.removeAllListeners('computer-overlay:done')
       if (win && !win.isDestroyed()) win.destroy()
       win = null

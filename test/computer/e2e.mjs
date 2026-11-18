@@ -127,7 +127,36 @@ try {
   const overlay = app.windows().find((w) => w.url().includes('computer-overlay.html'))
   ok(!!overlay, 'the overlay window exists')
   await capture('overlay', 'computer-overlay.html')
-  await overlay.getByRole('button', { name: 'Done' }).click()
+  // The overlay is click-through, and takes the mouse only while the pointer is on the callout. Main
+  // watches the pointer; here it reads a stand-in, and the window's mouse setting is recorded.
+  await app.evaluate(({ BrowserWindow, screen }) => {
+    globalThis.e2ePointer = { x: -99999, y: -99999 }
+    screen.getCursorScreenPoint = () => globalThis.e2ePointer
+    const w = BrowserWindow.getAllWindows().find((w) => w.webContents.getURL().includes('computer-overlay.html'))
+    const set = w.setIgnoreMouseEvents.bind(w)
+    globalThis.e2eClickThrough = true
+    w.setIgnoreMouseEvents = (ignore, o) => {
+      globalThis.e2eClickThrough = ignore
+      set(ignore, o)
+    }
+  })
+  const clickThrough = () => app.evaluate(() => globalThis.e2eClickThrough)
+  const pointAt = async (box) =>
+    app.evaluate(({ BrowserWindow }, box) => {
+      const b = BrowserWindow.getAllWindows().find((w) => w.webContents.getURL().includes('computer-overlay.html')).getBounds()
+      globalThis.e2ePointer = box ? { x: Math.round(b.x + box.x + box.width / 2), y: Math.round(b.y + box.y + box.height / 2) } : { x: b.x + 5, y: b.y + 5 }
+    }, box)
+  const done = overlay.getByRole('button', { name: 'Done' })
+  await pointAt(null)
+  await sleep(200)
+  ok(await clickThrough(), 'the overlay lets clicks through while the pointer is off the callout')
+  await pointAt(await done.boundingBox())
+  await until(async () => !(await clickThrough()), 'the overlay takes the mouse with the pointer on Done', 2000)
+  await pointAt(null)
+  await until(clickThrough, 'and lets it go when the pointer leaves', 2000)
+  await pointAt(await done.boundingBox())
+  await until(async () => !(await clickThrough()), 'and takes it again on the way back', 2000)
+  await done.click()
   await until(async () => (await step.innerText()).includes('Step 2 of 3'), "the overlay's Done ends the step")
   // The chat's Done.
   await step.getByRole('button', { name: 'Done' }).click()
@@ -136,6 +165,7 @@ try {
   const before = await page.locator('[aria-label="Edit message"]').count()
   await send('There is no switch for it')
   await until(async () => (await lastReply().innerText()).includes('Night light is on.'), 'a typed message answers the step')
+  ok(await clickThrough(), 'the overlay is click-through again once the steps are over')
   await sleep(300)
   ok((await lastReply().innerText()).split('Night light is on.').length === 2, 'the reply shows its last line once')
   ok((await page.locator('[aria-label="Edit message"]').count()) === before, 'the typed answer is not a new message')
