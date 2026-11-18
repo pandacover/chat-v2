@@ -72,6 +72,12 @@ const api: Api = {
       return () => ipcRenderer.removeListener('updates:event', handler)
     }
   },
+  computer: {
+    supported: () => call('computer:supported'),
+    waiting: () => call('computer:waiting'),
+    approve: (id, approved) => call('computer:approve', id, approved),
+    teachDone: (id) => call('computer:teachDone', id)
+  },
   browser: {
     attach: (id) => call('browser:attach', id),
     screenshot: (rect) => call('browser:screenshot', rect),

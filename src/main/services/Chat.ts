@@ -12,6 +12,7 @@ import { browserModule } from '../agent/browser'
 import { Agent, type Auth, MAX_TURNS, type PromptBlock, type ReplyHooks } from '../agent/driver'
 import { HISTORY_NOTE, type TurnPlan, continueNote, planTurn, transcriptText } from '../agent/history'
 import type { ToolModuleFactory } from '../agent/module'
+import { ComputerUse, type Mode, effortFor, modeTag, teachAnswer } from '../computer'
 import { Attachments } from './Attachments'
 import { Browser } from './Browser'
 import { Db } from './Db'
@@ -51,6 +52,10 @@ export const cleanTitle = (reply: string): string | null => {
 /** The model a chat's new reply runs on: the chat's, unless that is one from before Claude. */
 const chatModel = (session: Session, settings: Settings | null) =>
   isClaudeModel(session.model) ? session.model : (settings?.defaultModel ?? null)
+
+/** Added to the system prompt when a chat has both the browser and computer use on. */
+export const BROWSER_AND_COMPUTER_NOTE =
+  "Both the browser panel and computer use are on. Use the browser panel's tools for web pages, so the user can watch in the chat window, and the computer tools for their own apps, files and settings. Open a page in the user's own browser only when they ask for that."
 
 const sumUsage = (a: Usage | null, b: Usage): Usage =>
   a
@@ -105,9 +110,26 @@ export class Chat extends Context.Service<
       const attachments = yield* Attachments
       const broadcaster = yield* Broadcaster
       const browser = yield* Browser
+      const computer = yield* ComputerUse
 
-      /** The tool sets a reply in `session` gets, built afresh for each reply. Computer use plugs in here. */
-      const toolSets = (session: Session): ToolModuleFactory[] => [...(session.browserEnabled ? [browserModule(browser)] : [])]
+      // Open windows show what computer use waits on (an approval, a Show-me step) in its chat.
+      const unsubscribe = computer.subscribe((waiting) => broadcaster.send({ type: 'computer', waiting }))
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe))
+
+      const computerOn = (session: Session) => session.computerEnabled && computer.supported
+      /** The chat's mode as it is now: switching it in the composer counts from the next tool call. */
+      const modeOf = (sessionId: string): Mode =>
+        Effect.runSync(db.use((d) => d.getSession(sessionId)?.computerMode ?? 'do').pipe(Effect.orElseSucceed(() => 'do' as const)))
+      /** Replies running with computer use, which the chat's Stop also stops computer use for. */
+      const computerReplies = new Set<string>()
+
+      /** The tool sets a reply in `session` gets, built afresh for each reply. */
+      const toolSets = (session: Session): ToolModuleFactory[] => [
+        ...(session.browserEnabled ? [browserModule(browser)] : []),
+        ...(computerOn(session)
+          ? [(ctx: Parameters<ToolModuleFactory>[0]) => computer.module(ctx, { mode: () => modeOf(session.id), stop: () => void Effect.runFork(stop(ctx.messageId)) })]
+          : [])
+      ]
 
       // One fiber per streaming assistant message. Closing the layer (app quit)
       // interrupts them all, which marks their messages `interrupted`.
@@ -149,20 +171,22 @@ export class Chat extends Context.Service<
        * The user message the reply gets: the turns its session doesn't have, then the message
        * itself. Continuing, a note asking for the rest comes last.
        */
-      const promptFor = Effect.fn('Chat.promptFor')(function* (plan: TurnPlan, partial: string | null) {
+      const promptFor = Effect.fn('Chat.promptFor')(function* (plan: TurnPlan, partial: string | null, mode: Mode | null) {
+        // A computer chat tells the model its mode with each message.
+        const tag = (text: string) => (mode ? modeTag(mode, text) : text)
         const stored = yield* db.use((d) => d.storedAttachmentsFor(plan.turns.map((m) => m.id)))
         const blocks: PromptBlock[] = []
         const last = partial === null ? plan.turns.length - 1 : -1
         for (const [i, m] of plan.turns.entries()) {
           if (m.role === 'user') blocks.push(...(yield* attachments.toBlocks(stored.get(m.id) ?? [])))
-          const text = i === last ? m.content : transcriptText(m)
+          const text = i === last ? tag(m.content) : transcriptText(m)
           if (text?.trim()) blocks.push({ type: 'text', text })
         }
         if (partial !== null) {
           // Continued from its own session, the reply is there up to its checkpoint; the end is quoted.
           const own = plan.turns.length === 0
           if (!own) blocks.push({ type: 'text', text: transcriptText({ role: 'assistant', content: partial } as Message) ?? '' })
-          blocks.push({ type: 'text', text: continueNote(own ? partial : null) })
+          blocks.push({ type: 'text', text: tag(continueNote(own ? partial : null)) })
         }
         return blocks.filter((b) => b.type !== 'text' || b.text !== '')
       })
@@ -238,11 +262,18 @@ export class Chat extends Context.Service<
               exists: agent.hasSession
             })
           )
-          const prompt = yield* promptFor(plan, partial)
+          const usesComputer = computerOn(session)
+          const prompt = yield* promptFor(plan, partial, usesComputer ? modeOf(session.id) : null)
           // The profile as it was when this chat first asked, so the system prompt stays the same.
           const facts = settings.memoryModel ? yield* db.use((d) => d.liveFacts(d.sessionMemoryRev(session.id))) : []
           // User instructions first so they win any conflict; the writing guideline is hidden from Settings.
-          const instructions = [session.systemPrompt ?? settings.systemPrompt, WRITING_GUIDELINES, settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : '', HISTORY_NOTE]
+          const instructions = [
+            session.systemPrompt ?? settings.systemPrompt,
+            WRITING_GUIDELINES,
+            settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : '',
+            HISTORY_NOTE,
+            session.browserEnabled && usesComputer ? BROWSER_AND_COMPUTER_NOTE : ''
+          ]
             .map((s) => s.trim())
             .filter(Boolean)
             .join('\n\n')
@@ -250,6 +281,7 @@ export class Chat extends Context.Service<
           // Claimed before it runs, so a reply started meanwhile from the same place forks.
           const sessionId = plan.resume && !plan.resume.fork ? plan.resume.session : randomUUID()
           yield* db.use((d) => d.claimAgentSession(assistant.id, sessionId))
+          if (usesComputer) computerReplies.add(assistant.id)
           const hooks: ReplyHooks = {
             text: (delta) => Effect.runSync(Effect.forEach(buffer.push(delta), emit, { discard: true })),
             step: (step) => Effect.runPromise(endLine.pipe(Effect.andThen(emit(stepLine(step))))),
@@ -263,7 +295,8 @@ export class Chat extends Context.Service<
                   sessionId: session.id,
                   messageId: assistant.id,
                   model: runOn,
-                  effort: settings.effort,
+                  // Computer use makes many short click-and-look calls; Tomo's effort suits them.
+                  effort: usesComputer ? effortFor(runOn) : settings.effort,
                   instructions,
                   profile: profileBlock(facts),
                   prompt,
@@ -290,6 +323,7 @@ export class Chat extends Context.Service<
               yield* Effect.forEach(tail, emit, { discard: true }).pipe(Effect.ignore)
               const partial = tail.length > 0
               const stopped = stopRequested.delete(assistant.id)
+              computerReplies.delete(assistant.id)
               if (Exit.isSuccess(exit)) return yield* finish(assistant.id, 'complete', null, false, usage, model)
               if (Cause.hasInterruptsOnly(exit.cause))
                 return yield* finish(assistant.id, stopped ? 'stopped' : 'interrupted', null, partial, usage, model)
@@ -431,6 +465,12 @@ export class Chat extends Context.Service<
         attachmentIds: string[]
       }) {
         yield* messageIn(input.sessionId, input.parentId)
+        // While a Show-me step of this chat waits, a message answers it instead of starting a reply.
+        const waiting = computer.waiting()
+        if (waiting?.kind === 'teach' && waiting.sessionId === input.sessionId && input.text.trim()) {
+          yield* computer.teachDone(waiting.id, teachAnswer(input.text))
+          return yield* view(input.sessionId)
+        }
         return yield* insertUserTurn(input)
       })
 
@@ -484,6 +524,8 @@ export class Chat extends Context.Service<
         Effect.gen(function* () {
           if (!(yield* FiberMap.has(generations, messageId))) return
           stopRequested.add(messageId)
+          // Input in progress is cut off and its waits are denied before the reply goes.
+          if (computerReplies.has(messageId)) yield* computer.stop
           yield* FiberMap.remove(generations, messageId)
         })
 

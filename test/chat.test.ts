@@ -7,7 +7,7 @@ import type { StreamEvent } from '../src/shared/types'
 import { stepLine } from '../src/shared/steps'
 import { AppPaths } from '../src/main/services/AppPaths'
 import { Attachments } from '../src/main/services/Attachments'
-import { Broadcaster, Chat } from '../src/main/services/Chat'
+import { BROWSER_AND_COMPUTER_NOTE, Broadcaster, Chat } from '../src/main/services/Chat'
 import { Db } from '../src/main/services/Db'
 import { Browser, type BrowserApi, type PageSnapshot } from '../src/main/services/Browser'
 import { SettingsStore } from '../src/main/services/SettingsStore'
@@ -15,7 +15,9 @@ import { Agent } from '../src/main/agent/driver'
 import { BROWSER_INSTRUCTIONS } from '../src/main/agent/browser'
 import { HISTORY_NOTE } from '../src/main/agent/history'
 import { WRITING_GUIDELINES } from '../src/main/guidelines'
+import { ComputerUse, noOverlay, type OverlayPort, type Platform } from '../src/main/computer'
 import { type Call, type Script, fakeQuery } from './fakeQuery'
+import { fakeOverlay, fakePlatform } from './computer/fakes'
 
 const page = (over: Partial<PageSnapshot> = {}): PageSnapshot => ({
   url: 'http://shop.test/',
@@ -78,7 +80,9 @@ const setup = (
   // Titling and memory are off unless a test is about them, so every call a script sees is a reply.
   config: Record<string, unknown> = { titleModel: '', memoryModel: '' },
   dir = mkdtempSync(join(tmpdir(), 'chat-v2-')),
-  browserLog: string[] = []
+  browserLog: string[] = [],
+  // No computer use unless a test brings a (fake) platform.
+  computer: { platform: Platform | null; overlay: OverlayPort } = { platform: null, overlay: noOverlay }
 ) => {
   dirs.push(dir)
   writeFileSync(join(dir, 'config.json'), JSON.stringify(config))
@@ -88,7 +92,9 @@ const setup = (
   const paths = AppPaths.layer(dir)
   const base = Layer.mergeAll(Db.layer(join(dir, 'chat.db')), SettingsStore.layer({ encrypt: (s) => s, decrypt: (s) => s }).pipe(Layer.provide(paths)), paths)
   const agent = Agent.layer({ query: fake.query, configDir: join(dir, 'claude'), cwd: dir, clientApp: 'chat-v2/test' })
-  const providers = Layer.mergeAll(agent, Attachments.layer).pipe(Layer.provideMerge(base))
+  const facts: string[] = []
+  const computerUse = ComputerUse.layer({ ...computer, remember: async (fact) => void facts.push(fact) })
+  const providers = Layer.mergeAll(agent, Attachments.layer, computerUse).pipe(Layer.provideMerge(base))
   const broadcaster = Broadcaster.of({
     send: (e) => {
       events.push(e)
@@ -101,13 +107,13 @@ const setup = (
       providers
     )
   )
-  const run = <A, E>(eff: Effect.Effect<A, E, Chat | Db | SettingsStore | Attachments | Agent>) => runtime.runPromise(eff)
+  const run = <A, E>(eff: Effect.Effect<A, E, Chat | Db | SettingsStore | Attachments | Agent | ComputerUse>) => runtime.runPromise(eff)
   const doneCount = () => events.filter((e) => e.type === 'done').length
   const waitForDone = async (n: number) => {
     while (doneCount() < n) await new Promise<void>((r) => waiters.push(r))
   }
   const replies = () => fake.calls.filter((c) => !isAsk(c))
-  return { runtime, run, events, calls: fake.calls, replies, waitForDone, dir }
+  return { runtime, run, events, calls: fake.calls, replies, waitForDone, dir, facts }
 }
 
 const newSession = Effect.gen(function* () {
@@ -748,6 +754,215 @@ describe('browser', () => {
     expect(t.calls[0]!.options.tools).toEqual([])
     expect(t.calls[0]!.options.mcpServers).toEqual({})
     expect(await t.calls[0]!.options.canUseTool!('mcp__browser__search', {}, { signal: new AbortController().signal } as never)).toMatchObject({ behavior: 'deny' })
+    await t.runtime.dispose()
+  })
+})
+
+describe('computer use', () => {
+  const computerChat = (mode: 'do' | 'teach' = 'do') =>
+    Effect.gen(function* () {
+      const s = yield* newSession
+      yield* (yield* Db).use((d) => d.updateSession(s.id, { computerEnabled: true, computerMode: mode }))
+      return s
+    })
+  const withComputer = (script: Script, over: Partial<Platform> = {}) => {
+    const fake = fakePlatform(over)
+    const overlay = fakeOverlay()
+    const t = setup(script, undefined, undefined, [], { platform: fake.p, overlay: overlay.port })
+    const waits = () => t.events.flatMap((e) => (e.type === 'computer' ? [e.waiting] : []))
+    return { ...t, fake, overlay, waits, lastWait: () => waits().at(-1) ?? null }
+  }
+  const resultText = (r: { result: { content: Array<{ text?: string }> } | null }) => (r.result?.content ?? []).map((c) => c.text ?? '').join('')
+  const messageOf = async (t: { run: ReturnType<typeof setup>['run'] }, sessionId: string) => (await t.run(Chat.use((c) => c.view(sessionId)))).path[1]!.message
+
+  test("a computer reply: the mode tag, Tomo's effort, its tools behind ToolSearch, and its steps in the message", async () => {
+    const t = withComputer(async function* (t) {
+      yield* t.tool('mcp__computer__look_at_screen')
+      yield* t.tool('mcp__computer__click', { x: 100, y: 50 })
+      yield* t.tool('Glob', { pattern: '**/*.pdf' })
+      yield* t.text('Done.')
+      yield t.result()
+    })
+    const s = await t.run(computerChat())
+    await t.run(sendTo(s, s.rootId, 'Click the thing'))
+    await t.waitForDone(1)
+
+    const call = t.calls[0]!
+    expect(call.prompt).toEqual([{ type: 'text', text: '[mode: do] Click the thing' }])
+    expect(call.options.effort).toBe('low')
+    expect(call.options.tools).toEqual(['ToolSearch', 'Read', 'Glob', 'Grep', 'WebSearch', 'Bash'])
+    expect(Object.keys(call.options.mcpServers ?? {})).toEqual(['computer'])
+    expect(call.options.env?.ENABLE_TOOL_SEARCH).toBe('true')
+    expect(systemOf(call)).toContain('# Computer use')
+    expect(systemOf(call)).not.toContain(BROWSER_AND_COMPUTER_NOTE)
+    // 1024x576 of a 2048x1152 screen: the click lands at twice the pixels.
+    expect(t.fake.calls).toContain('click 200,100')
+    const message = await messageOf(t, s.id)
+    expect(message.status).toBe('complete')
+    expect(message.content).toBe(
+      [
+        stepLine({ tool: 'computer_click', label: 'Click', ok: true, detail: '100, 50' }),
+        stepLine({ tool: 'Glob', label: 'Search files', ok: true, detail: '**/*.pdf' }),
+        'Done.'
+      ].join('\n')
+    )
+    // Content protection and the Stop shortcut are on for the reply only.
+    expect(t.overlay.protect).toEqual([true, false])
+    expect(t.overlay.stopKey).toEqual([true, false])
+    await t.runtime.dispose()
+  })
+
+  test('with the browser on too, the prompt says which to use for what', async () => {
+    const t = withComputer(reply)
+    const s = await t.run(computerChat())
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { browserEnabled: true }))))
+    await t.run(sendTo(s, s.rootId, 'Hi'))
+    await t.waitForDone(1)
+    expect(Object.keys(t.calls[0]!.options.mcpServers ?? {}).sort()).toEqual(['browser', 'computer'])
+    expect(systemOf(t.calls[0]!)).toContain(BROWSER_AND_COMPUTER_NOTE)
+    await t.runtime.dispose()
+  })
+
+  test('without a platform (Linux) a computer chat replies without computer use', async () => {
+    const t = setup(reply)
+    const s = await t.run(computerChat())
+    await t.run(sendTo(s, s.rootId, 'Hi'))
+    await t.waitForDone(1)
+    expect(t.calls[0]!.prompt).toEqual([{ type: 'text', text: 'Hi' }])
+    expect(t.calls[0]!.options.tools).toEqual([])
+    await t.runtime.dispose()
+  })
+
+  test('an approval waits in its chat, is answered through the API, and Stop resolves the next one as denied', async () => {
+    const results: string[] = []
+    const t = withComputer(async function* (t) {
+      results.push(resultText(yield* t.tool('mcp__computer__ask_approval', { action: 'Delete 3 files', detail: 'a.txt, b.txt, c.txt' })))
+      // A command that changes something asks too, from the permission check.
+      const signal = new AbortController().signal
+      const answer = await t.call.options.canUseTool!('Bash', { command: 'del report.txt' }, { signal, toolUseID: 'toolu_bash' } as never)
+      results.push(answer?.behavior === 'deny' ? answer.message : 'allowed')
+      yield* t.text('Deleted.')
+      yield t.result()
+    })
+    const s = await t.run(computerChat())
+    const view = await t.run(sendTo(s, s.rootId, 'Clean up and send it'))
+    const id = view.path[1]!.message.id
+    await settle(() => t.lastWait()?.kind === 'approval')
+    const first = t.lastWait()!
+    expect(first).toMatchObject({ kind: 'approval', title: 'Delete 3 files', detail: 'a.txt, b.txt, c.txt', sessionId: s.id, messageId: id })
+    expect(await t.run(ComputerUse.use((c) => Effect.sync(c.waiting)))).toEqual(first)
+    await t.run(ComputerUse.use((c) => c.approve(first.id, true)))
+    await settle(() => t.lastWait()?.kind === 'approval' && t.lastWait()!.id !== first.id)
+
+    await t.run(Chat.use((c) => c.stop(id)))
+    await t.waitForDone(1)
+    await settle(() => results.length === 2)
+    expect(results).toEqual(['Approved. Go ahead.', 'The user denied this.'])
+    expect(t.waits().at(-2)).toMatchObject({ kind: 'approval', title: 'Run a command on your computer', detail: 'del report.txt' })
+    expect(t.lastWait()).toBeNull()
+    const message = await messageOf(t, s.id)
+    expect(message.status).toBe('stopped')
+    expect(message.content).toBe(stepLine({ tool: 'computer_ask_approval', label: 'Approval', ok: true, detail: 'Delete 3 files' }))
+    await t.runtime.dispose()
+  })
+
+  test("Show me: a step ends with the overlay's Done or a typed message, and acting is refused", async () => {
+    const results: string[] = []
+    let denied = ''
+    const t = withComputer(async function* (t) {
+      yield* t.tool('mcp__computer__look_at_screen')
+      const click = yield* t.tool('mcp__computer__click', { x: 1, y: 1 })
+      denied = click.permission.behavior === 'deny' ? click.permission.message : ''
+      results.push(resultText(yield* t.tool('mcp__computer__teach_step', { instruction: 'Click Display', step: 1, total: 3, x: 100, y: 100 })))
+      results.push(resultText(yield* t.tool('mcp__computer__teach_step', { instruction: 'Click Night light', step: 2, total: 3, x: 100, y: 200 })))
+      results.push(resultText(yield* t.tool('mcp__computer__teach_step', { instruction: 'Turn it on', step: 3, total: 3, x: 100, y: 300 })))
+      yield* t.text('That was it.')
+      yield t.result()
+    })
+    const s = await t.run(computerChat('teach'))
+    const view = await t.run(sendTo(s, s.rootId, 'Show me how to turn on night light'))
+    const id = view.path[1]!.message.id
+    const atStep = (n: number) => () => {
+      const w = t.lastWait()
+      return w?.kind === 'teach' && w.step === n
+    }
+    await settle(atStep(1))
+    expect(t.calls[0]!.prompt).toEqual([{ type: 'text', text: '[mode: teach] Show me how to turn on night light' }])
+    expect(t.lastWait()).toMatchObject({ kind: 'teach', instruction: 'Click Display', step: 1, total: 3, sessionId: s.id, messageId: id })
+    expect(t.overlay.last().teach?.instruction).toBe('Click Display')
+    t.overlay.pressDone()
+    await settle(atStep(2))
+    // Typed while a step waits: an answer to the step, not a new message.
+    await t.run(sendTo(s, id, "There's no Night light in my menu"))
+    await settle(atStep(3))
+    await t.run(sendTo(s, id, 'done'))
+    await t.waitForDone(1)
+
+    expect(denied).toContain('Show-me mode is on')
+    expect(results).toEqual([
+      'The user did it. Look at the screen before the next step.',
+      `The user said: "There's no Night light in my menu"`,
+      'The user did it. Look at the screen before the next step.'
+    ])
+    expect(t.replies()).toHaveLength(1)
+    const after = await t.run(Chat.use((c) => c.view(s.id)))
+    expect(after.path).toHaveLength(2)
+    expect(after.path[1]!.message.content).toBe(
+      [
+        stepLine({ tool: 'computer_teach_step', label: 'Step 1 of 3', ok: true, detail: 'Click Display' }),
+        stepLine({ tool: 'computer_teach_step', label: 'Step 2 of 3', ok: true, detail: "Click Night light · You said “There's no Night light in my menu”" }),
+        stepLine({ tool: 'computer_teach_step', label: 'Step 3 of 3', ok: true, detail: 'Turn it on' }),
+        'That was it.'
+      ].join('\n')
+    )
+    expect(t.overlay.last().teach).toBeNull()
+    await t.runtime.dispose()
+  })
+
+  test('Stop cuts off typing in progress, and the next reply may act again', async () => {
+    const t = withComputer(async function* (t) {
+      if (t.call.prompt.some((b) => b.text?.includes('again'))) {
+        yield* t.tool('mcp__computer__press_keys', { combo: 'ctrl+s' })
+        yield* t.text('Saved.')
+        yield t.result()
+        return
+      }
+      yield* t.tool('mcp__computer__type_text', { text: 'x'.repeat(400) })
+      yield* t.text('Typed.')
+      yield t.result()
+    })
+    const s = await t.run(computerChat())
+    const view = await t.run(sendTo(s, s.rootId, 'Type a lot'))
+    const id = view.path[1]!.message.id
+    await settle(() => t.fake.calls.some((c) => c.startsWith('type ')))
+    await t.run(Chat.use((c) => c.stop(id)))
+    await t.waitForDone(1)
+    await new Promise((r) => setTimeout(r, 300))
+    // 400 characters go in 25 chunks of about 64 ms. Stop lands after the first one or two (this
+    // fake can't cut off the chunk in flight; the Windows host can).
+    expect(t.fake.calls.filter((c) => c.startsWith('type ')).length).toBeLessThan(4)
+    expect((await messageOf(t, s.id)).status).toBe('stopped')
+
+    await t.run(sendTo(s, id, 'Save it again'))
+    await t.waitForDone(2)
+    expect(t.fake.calls).toContain('keys ctrl+s')
+    await t.runtime.dispose()
+  })
+
+  test('the Stop shortcut stops the computer reply as the chat Stop would', async () => {
+    const t = withComputer(async function* (t) {
+      yield* t.tool('mcp__computer__ask_approval', { action: 'Buy it', detail: '$20' })
+      yield* t.text('Bought.')
+      yield t.result()
+    })
+    const s = await t.run(computerChat())
+    await t.run(sendTo(s, s.rootId, 'Buy it'))
+    await settle(() => t.lastWait()?.kind === 'approval')
+    t.overlay.pressStopKey()
+    await t.waitForDone(1)
+    expect(t.lastWait()).toBeNull()
+    expect((await messageOf(t, s.id)).status).toBe('stopped')
+    expect(t.overlay.stopKey).toEqual([true, false])
     await t.runtime.dispose()
   })
 })

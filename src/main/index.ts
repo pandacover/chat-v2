@@ -18,6 +18,10 @@ import { shrinkImage } from './images'
 import { Browser } from './services/Browser'
 import { Broadcaster, Chat } from './services/Chat'
 import { Agent, type AgentDeps, type QueryFn } from './agent/driver'
+import type { RunContext } from './agent/module'
+import { ComputerUse, type Platform, makePlatform, supported } from './computer'
+import { makeElectronOverlay } from './computer/overlay'
+import { isSensitive } from './memory'
 import { Db } from './services/Db'
 import { ElevenLabs } from './services/ElevenLabs'
 import { type SecretCipher, SettingsStore } from './services/SettingsStore'
@@ -162,6 +166,46 @@ const agentDeps = (root: string): AgentDeps => {
   }
 }
 
+/** The computer-use overlay window and Stop shortcut; made once the app is ready. */
+let overlay: ReturnType<typeof makeElectronOverlay> | null = null
+
+/**
+ * Computer use. `remember` keeps a fact the model was told to save in memory, as one learned in
+ * that chat, unless memory is off or the fact looks like a secret.
+ */
+const computerLayer = Layer.unwrap(
+  Effect.gen(function* () {
+    const db = yield* Db
+    const settings = yield* SettingsStore
+    const remember = async (fact: string, ctx: RunContext) => {
+      if (!(await Effect.runPromise(settings.get)).memoryModel) throw new Error('Memory is off in Settings, so nothing was saved.')
+      if (isSensitive(fact)) throw new Error("That looks like a password, key or account number, which memory doesn't keep.")
+      const saved = await Effect.runPromise(db.use((d) => d.changeMemory({ add: [fact], update: [], remove: [] }, { kind: 'learned', sessionId: ctx.sessionId })))
+      if (saved) broadcaster.send({ type: 'memory', sessionId: ctx.sessionId, added: saved.added, removed: saved.removed })
+    }
+    // CHAT_V2_FAKE_COMPUTER (tests only): a module whose `platform` stands in for the real one,
+    // or whose `wrap` changes it (a live test refuses everything that would act).
+    const fake = process.env.CHAT_V2_FAKE_COMPUTER ? (load(process.env.CHAT_V2_FAKE_COMPUTER) as { platform?: Platform; wrap?: (p: Platform) => Platform }) : null
+    const real = supported && !fake?.platform ? makePlatform({ track: trackChild }) : null
+    const platform = fake?.platform ?? (real && fake?.wrap ? fake.wrap(real) : real)
+    overlay = makeElectronOverlay()
+    return ComputerUse.layer({ platform, overlay, remember })
+  })
+)
+
+/**
+ * An approval waits in its chat, and the app computer use drives often covers the chat window.
+ * The windows come to the front without taking focus, so a key meant for that app can't answer
+ * it. Answering focuses the chat, and the next input gives focus back to the app first.
+ */
+const raiseForApproval = () => {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win === overlay?.window || win.isDestroyed() || !win.isVisible()) continue
+    if (win.isMinimized()) win.showInactive()
+    win.moveTop()
+  }
+}
+
 const makeRuntime = () => {
   const root = app.getPath('userData')
   const paths = AppPaths.layer(root)
@@ -171,11 +215,12 @@ const makeRuntime = () => {
   const providers = Layer.mergeAll(Agent.layer(agentDeps(root)), ElevenLabs.layer, Attachments.layerWith(shrinkImage), Browser.layer(emitBrowser, (id) => webContents.fromId(id))).pipe(
     Layer.provideMerge(base)
   )
+  const computer = computerLayer.pipe(Layer.provide(base))
   const chat = Chat.layer.pipe(
-    Layer.provide(providers),
+    Layer.provide(Layer.merge(providers, computer)),
     Layer.provide(Layer.succeed(Broadcaster, broadcaster))
   )
-  return ManagedRuntime.make(Layer.mergeAll(chat, providers))
+  return ManagedRuntime.make(Layer.mergeAll(chat, providers, computer))
 }
 
 let runtime: ManagedRuntime.ManagedRuntime<MainServices | AppPaths, unknown> | null = null
@@ -279,6 +324,11 @@ app.whenReady().then(async () => {
   // ad frame. Only requests to those hosts come here. Opening one as a page still works, so
   // clicking an ad goes where it leads.
   browserSession.webRequest.onBeforeRequest({ urls: adUrlPatterns() }, (details, callback) => callback({ cancel: details.resourceType !== 'mainFrame' }))
+
+  const computer = await rt.runPromise(ComputerUse.use(Effect.succeed))
+  computer.subscribe((waiting) => {
+    if (waiting?.kind === 'approval') raiseForApproval()
+  })
 
   registerIpc(rt, isQuitting)
   handleProtocols(rt, isQuitting)

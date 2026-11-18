@@ -1,4 +1,5 @@
 // Types shared by the main process, preload bridge and renderer.
+import type { ComputerMode, ComputerWait } from './computer'
 
 export type Role = 'root' | 'system' | 'user' | 'assistant'
 
@@ -85,8 +86,10 @@ export interface Session {
   forkedFromSessionId: string | null
   /** When on, the model gets browser tools for this chat. */
   browserEnabled: boolean
-  /** Computer use for this chat. Saved, but nothing uses it yet: the computer-use tools plug in here. */
+  /** When on, the model can see the screen and use the user's apps (Windows and macOS). */
   computerEnabled: boolean
+  /** Computer use operates the computer (do) or shows each step for the user to do (teach, "Show me"). */
+  computerMode: ComputerMode
   /** When the chat was pinned to the top of the sidebar; null when it isn't. */
   pinnedAt: number | null
   createdAt: number
@@ -140,6 +143,7 @@ export interface SessionPatch {
   systemPrompt?: string | null
   browserEnabled?: boolean
   computerEnabled?: boolean
+  computerMode?: ComputerMode
   pinned?: boolean
 }
 
@@ -198,6 +202,8 @@ export type StreamEvent =
   | { type: 'memory'; sessionId: string; added: string[]; removed: string[] }
   /** A file the assistant added to its reply mid-run (a screenshot it saved for the user). */
   | { type: 'attachment'; messageId: string; attachment: Attachment }
+  /** What computer use waits on the user for (an approval, a Show-me step); null once nothing. */
+  | { type: 'computer'; waiting: ComputerWait }
 
 export interface AppError {
   tag: string
@@ -285,6 +291,15 @@ export interface Api {
     publish(html: string): Promise<string>
   }
   browser: BrowserApi
+  computer: {
+    /** False on Linux, where there is no computer use. */
+    supported(): Promise<boolean>
+    /** What computer use waits on right now, for a window that just loaded. */
+    waiting(): Promise<ComputerWait>
+    approve(id: string, approved: boolean): Promise<void>
+    /** Ends the Show-me step `id` as done. */
+    teachDone(id: string): Promise<void>
+  }
   updates: {
     get(): Promise<UpdateState>
     check(): Promise<UpdateState>

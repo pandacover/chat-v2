@@ -10,12 +10,13 @@ import { Attachments } from './services/Attachments'
 import { Browser } from './services/Browser'
 import { Chat, NEW_SESSION_TITLE } from './services/Chat'
 import { Agent } from './agent/driver'
+import { ComputerUse } from './computer'
 import { Db, type DbApi } from './services/Db'
 import { isSensitive } from './memory'
 import { ElevenLabs } from './services/ElevenLabs'
 import { SettingsStore } from './services/SettingsStore'
 
-export type MainServices = Db | Chat | Attachments | SettingsStore | Agent | ElevenLabs | Browser
+export type MainServices = Db | Chat | Attachments | SettingsStore | Agent | ElevenLabs | Browser | ComputerUse
 
 type Handler = (...args: any[]) => Effect.Effect<unknown, { readonly _tag: string; readonly message: string }, MainServices>
 
@@ -104,6 +105,7 @@ const handlers: Record<string, Handler> = {
           ...(patch.systemPrompt !== undefined ? { systemPrompt: patch.systemPrompt?.trim() ? patch.systemPrompt : null } : {}),
           ...(typeof patch.browserEnabled === 'boolean' ? { browserEnabled: patch.browserEnabled } : {}),
           ...(typeof patch.computerEnabled === 'boolean' ? { computerEnabled: patch.computerEnabled } : {}),
+          ...(patch.computerMode === 'do' || patch.computerMode === 'teach' ? { computerMode: patch.computerMode } : {}),
           ...(typeof patch.pinned === 'boolean' ? { pinned: patch.pinned } : {})
         })
       )
@@ -246,7 +248,12 @@ const handlers: Record<string, Handler> = {
       yield* browser.recordReply({ ok: true, path, seconds: Math.round(Number(reply.seconds) || 0) })
       return path
     }),
-  'browser:reveal': (path) => Effect.sync(() => shell.showItemInFolder(str(path, 'path')))
+  'browser:reveal': (path) => Effect.sync(() => shell.showItemInFolder(str(path, 'path'))),
+
+  'computer:supported': () => ComputerUse.use((c) => Effect.succeed(c.supported)),
+  'computer:waiting': () => ComputerUse.use((c) => Effect.sync(c.waiting)),
+  'computer:approve': (id, approved) => ComputerUse.use((c) => c.approve(str(id, 'id'), approved === true)),
+  'computer:teachDone': (id) => ComputerUse.use((c) => c.teachDone(str(id, 'id')))
 }
 
 /** Calls made while the app quits are never answered; the window closes before it could use one. */

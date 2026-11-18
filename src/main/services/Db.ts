@@ -14,6 +14,7 @@ import type {
   Session,
   Usage
 } from '@shared/types'
+import type { ComputerMode } from '@shared/computer'
 import { DbError, NotFound, errorMessage } from '../errors'
 
 const MIGRATIONS: string[] = [
@@ -109,7 +110,9 @@ const MIGRATIONS: string[] = [
   `alter table messages add column agent_session text;
   alter table messages add column agent_uuid text;
   alter table messages add column agent_cost real;
-  create index messages_agent_session on messages(agent_session);`
+  create index messages_agent_session on messages(agent_session);`,
+  // A computer chat's mode: 'do' (the model operates the computer) or 'teach' (Show me).
+  `alter table sessions add column computer_mode text not null default 'do';`
 ]
 
 /** At most this many facts are kept; past it, new ones are dropped until some are removed. */
@@ -124,6 +127,7 @@ interface SessionRow {
   forked_from_session_id: string | null
   browser_enabled: number
   computer_enabled: number
+  computer_mode: string
   pinned_at: number | null
   created_at: number
   updated_at: number
@@ -169,6 +173,7 @@ const toSession = (r: SessionRow): Session => ({
   forkedFromSessionId: r.forked_from_session_id,
   browserEnabled: r.browser_enabled === 1,
   computerEnabled: r.computer_enabled === 1,
+  computerMode: r.computer_mode === 'teach' ? 'teach' : 'do',
   pinnedAt: r.pinned_at,
   createdAt: r.created_at,
   updatedAt: r.updated_at
@@ -448,6 +453,7 @@ export const makeDb = (file: string) => {
       })
       if (source.browserEnabled) run('update sessions set browser_enabled = 1 where id = ?', fork.id)
       if (source.computerEnabled) run('update sessions set computer_enabled = 1 where id = ?', fork.id)
+      run('update sessions set computer_mode = ? where id = ?', source.computerMode, fork.id)
       let parentId = fork.rootId
       const stored = attachmentsFor(path.map((m) => m.id))
       for (const m of path) {
@@ -631,6 +637,7 @@ export const makeDb = (file: string) => {
         systemPrompt?: string | null
         browserEnabled?: boolean
         computerEnabled?: boolean
+        computerMode?: ComputerMode
         pinned?: boolean
       }
     ) => {
@@ -641,6 +648,7 @@ export const makeDb = (file: string) => {
         run('update sessions set browser_enabled = ? where id = ?', patch.browserEnabled ? 1 : 0, id)
       if (patch.computerEnabled !== undefined)
         run('update sessions set computer_enabled = ? where id = ?', patch.computerEnabled ? 1 : 0, id)
+      if (patch.computerMode !== undefined) run('update sessions set computer_mode = ? where id = ?', patch.computerMode, id)
       if (patch.title !== undefined) run('update sessions set title = ? where id = ?', patch.title, id)
       if (patch.model !== undefined) run('update sessions set model = ? where id = ?', patch.model, id)
       if (patch.systemPrompt !== undefined)

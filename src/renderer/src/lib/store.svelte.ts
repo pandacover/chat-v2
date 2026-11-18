@@ -1,5 +1,6 @@
 import { SvelteMap, SvelteSet } from 'svelte/reactivity'
 import { parseContent, type ArtifactBlock } from '@shared/artifacts'
+import type { ComputerWait } from '@shared/computer'
 import type { UpdateState } from '@shared/types'
 import type {
   Attachment,
@@ -98,6 +99,13 @@ class AppState {
   /** Where the agent's pointer is, in page pixels; `clicks` increments per click for the ripple. */
   cursor = $state({ x: 0, y: 0, visible: false, clicks: 0 })
 
+  /** Whether this computer has computer use (Windows and macOS). */
+  computerSupported = $state(false)
+  /** What computer use waits on the user for, in whichever chat. */
+  computerWait = $state<ComputerWait>(null)
+  /** A Show-me step of the open chat waits: a message sent now answers it. */
+  teaching = $derived(this.computerWait?.kind === 'teach' && this.computerWait.sessionId === this.view?.session.id)
+
   private toastSeq = 0
   private backfilling = new Map<string, Promise<void>>()
 
@@ -124,7 +132,8 @@ class AppState {
     model: this.view ? this.view.session.model : (this.fresh.model ?? null),
     systemPrompt: this.view ? this.view.session.systemPrompt : (this.fresh.systemPrompt ?? null),
     browserEnabled: this.view ? this.view.session.browserEnabled : (this.fresh.browserEnabled ?? false),
-    computerEnabled: this.view ? this.view.session.computerEnabled : (this.fresh.computerEnabled ?? false)
+    computerEnabled: this.view ? this.view.session.computerEnabled : (this.fresh.computerEnabled ?? false),
+    computerMode: this.view ? this.view.session.computerMode : (this.fresh.computerMode ?? 'do')
   })
 
   hasArtifact = $derived(this.artifact !== null && this.artifactVersions.length > 0)
@@ -247,6 +256,8 @@ class AppState {
     api.chat.onEvent((e) => this.onEvent(e))
     api.browser.onEvent((e) => this.onBrowserEvent(e))
     api.updates.onEvent((s) => (this.update = s))
+    void api.computer.supported().then((on) => (this.computerSupported = on))
+    void api.computer.waiting().then((w) => (this.computerWait = w))
     void api.updates.get().then((s) => (this.update = s))
     addEventListener('beforeunload', () => this.saveDrafts())
     await Promise.all([this.refreshSessions(), this.loadSettings()])
@@ -406,6 +417,14 @@ class AppState {
     if (id) await this.attempt(() => api.chat.stop(id))
   }
 
+  async approve(id: string, approved: boolean) {
+    await this.attempt(() => api.computer.approve(id, approved))
+  }
+
+  async teachDone(id: string) {
+    await this.attempt(() => api.computer.teachDone(id))
+  }
+
   async switchBranch(messageId: string) {
     const view = this.view
     if (!view) return
@@ -491,6 +510,10 @@ class AppState {
         this.toast(`Remembered ${e.added.length === 1 ? quote(e.added[0]!) : `${e.added.length} things about you`}`, 'info')
       else if (e.removed.length > 0)
         this.toast(`Forgot ${e.removed.length === 1 ? quote(e.removed[0]!) : `${e.removed.length} things about you`}`, 'info')
+      return
+    }
+    if (e.type === 'computer') {
+      this.computerWait = e.waiting
       return
     }
     if (e.type === 'title') {
