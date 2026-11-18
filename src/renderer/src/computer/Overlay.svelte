@@ -1,43 +1,79 @@
 <script lang="ts">
+  import { tick } from 'svelte'
   import type { ComputerOverlayBridge, OverlayState } from '../../../preload/computer-overlay'
 
   /**
    * Full-screen, click-through layer above everything.
    *  - While computer use drives: a hairline frame around the screen (the chat says what it's doing).
    *  - In Show-me mode: a spotlight on the exact control, with the instruction beside it. The
-   *    spotlight glides from step to step.
+   *    spotlight glides from step to step; the user can drag the callout aside.
+   *  - While the chat is out of sight: a notch at the top of the screen with what it's doing and Stop.
    */
   const bridge = (window as unknown as { computerOverlay: ComputerOverlayBridge }).computerOverlay
 
-  let st = $state<OverlayState>({ acting: false, teach: null })
-  $effect(() => bridge.onState((s) => (st = s)))
+  let st = $state<OverlayState>({ acting: false, teach: null, notch: null })
+  $effect(() =>
+    bridge.onState((s) => {
+      // Where the user dragged the callout holds for the rest of the lesson; a lesson starts at step 1.
+      if (s.teach?.step === 1 && st.teach?.step !== 1) pin = null
+      st = s
+    })
+  )
+
+  /** Where the user dragged the callout, and the grab point while they drag it. */
+  let pin = $state<{ left: number; top: number } | null>(null)
+  let drag: { dx: number; dy: number } | null = null
+  let calloutEl: HTMLElement | undefined = $state()
 
   /**
-   * The overlay covers the whole screen, so it may only take the mouse while the pointer is on the
-   * callout. A click-through window hears no mouse moves of its own, so main watches the pointer;
-   * this tells it where the callout is, again after each glide or change of size.
+   * The overlay covers the whole screen, so it may only take the mouse while the pointer is on one
+   * of its controls (`data-hit`). A click-through window hears no mouse moves of its own, so main
+   * watches the pointer; this tells it where the controls are, after each change and each glide.
+   * Mid-drag the whole window counts, so a quick drag can't slip off the callout.
    */
-  let calloutEl: HTMLElement | undefined = $state()
+  const report = () =>
+    bridge.hits(
+      drag
+        ? [{ x: 0, y: 0, width: innerWidth, height: innerHeight }]
+        : [...document.querySelectorAll('[data-hit]')].map((el) => {
+            const r = el.getBoundingClientRect()
+            return { x: r.left, y: r.top, width: r.width, height: r.height }
+          })
+    )
   $effect(() => {
-    const el = calloutEl
-    void callout
-    if (!el) return
-    const report = () => {
-      const r = el.getBoundingClientRect()
-      bridge.callout({ x: r.left, y: r.top, width: r.width, height: r.height })
-    }
-    report()
-    const size = new ResizeObserver(report)
-    size.observe(el)
-    el.addEventListener('transitionend', report)
-    el.addEventListener('animationend', report)
+    void st
+    void pin
+    void tick().then(report)
+  })
+  $effect(() => {
+    addEventListener('transitionend', report)
+    addEventListener('animationend', report)
     return () => {
-      size.disconnect()
-      el.removeEventListener('transitionend', report)
-      el.removeEventListener('animationend', report)
-      bridge.callout(null)
+      removeEventListener('transitionend', report)
+      removeEventListener('animationend', report)
     }
   })
+
+  const ondown = (e: PointerEvent) => {
+    if (e.button !== 0 || (e.target as Element).closest('button') || !calloutEl) return
+    const r = calloutEl.getBoundingClientRect()
+    drag = { dx: e.clientX - r.left, dy: e.clientY - r.top }
+    calloutEl.setPointerCapture(e.pointerId)
+    report()
+  }
+  const onmove = (e: PointerEvent) => {
+    if (!drag || !calloutEl) return
+    const clamp = (v: number, max: number) => Math.min(Math.max(8, v), max - 8)
+    pin = { left: clamp(e.clientX - drag.dx, innerWidth - calloutEl.offsetWidth), top: clamp(e.clientY - drag.dy, innerHeight - calloutEl.offsetHeight) }
+  }
+  const onup = () => {
+    if (!drag) return
+    drag = null
+    report()
+    bridge.press('moved')
+  }
+
+  const n = $derived(st.notch)
 
   const PAD = 6
   const t = $derived(st.teach)
@@ -68,15 +104,22 @@
   </div>
   <div
     class="callout"
-    class:above={!callout.below}
-    style="left:{callout.left}px;{callout.below ? `top:${callout.top}px` : `bottom:${callout.bottom}px`};width:{CALLOUT_W}px"
+    class:above={!callout.below && !pin}
+    class:pinned={!!pin}
+    style="{pin ? `left:${pin.left}px;top:${pin.top}px` : `left:${callout.left}px;${callout.below ? `top:${callout.top}px` : `bottom:${callout.bottom}px`}`};width:{CALLOUT_W}px"
     role="dialog"
     tabindex="-1"
     aria-label="Step {t.step} of {t.total}"
+    data-hit
     bind:this={calloutEl}
+    onpointerdown={ondown}
+    onpointermove={onmove}
+    onpointerup={onup}
+    onpointercancel={onup}
   >
     <div class="meta">
       <span class="count">{t.step}<span class="of">/{t.total}</span></span>
+      <span class="grip" aria-hidden="true" title="Drag to move"></span>
       <span class="progress" aria-hidden="true">
         {#each Array(t.total) as _, i}<i class:on={i < t.step}></i>{/each}
       </span>
@@ -84,8 +127,27 @@
     <p>{t.instruction}</p>
     <div class="row">
       <span class="hint">Do it, then</span>
-      <button onclick={() => bridge.done()}>Done</button>
+      <button onclick={() => bridge.press('done')}>Done</button>
     </div>
+  </div>
+{/if}
+
+{#if n}
+  <!-- The chat is out of sight: what computer use is doing, at the top of the screen. On a MacBook
+       with a camera notch it wraps around the housing, with the status left of it and Stop right. -->
+  <div
+    class="notch"
+    class:camera={!!n.camera}
+    style={n.camera ? `--cam-w:${n.camera.width}px;--cam-h:${n.camera.height}px` : ''}
+    role="status"
+    data-hit
+  >
+    <button class="status" onclick={() => bridge.press('chat')} title="Show the chat">
+      <span class="dot" class:waiting={n.waiting}></span>
+      <span class="text">{n.text}</span>
+    </button>
+    {#if n.camera}<span class="housing" aria-hidden="true"></span>{/if}
+    <button class="stop" onclick={() => bridge.press('stop')}>Stop</button>
   </div>
 {/if}
 
@@ -187,6 +249,23 @@
   .callout.above {
     animation-name: sink;
   }
+  .callout {
+    cursor: grab;
+    touch-action: none;
+  }
+  /* Dragged by the user: it stays where they put it, without gliding. */
+  .callout.pinned {
+    transition: none;
+  }
+  .callout:active {
+    cursor: grabbing;
+  }
+  .grip {
+    width: 18px;
+    height: 6px;
+    border-radius: 3px;
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.35) 1px, transparent 1.5px) 0 0 / 6px 3px;
+  }
   .meta {
     display: flex;
     align-items: center;
@@ -244,6 +323,102 @@
   }
   .row button:hover {
     background: #e9e9e7;
+  }
+
+  /* ---------------------------------------------------------------- notch */
+  .notch {
+    position: fixed;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 32px;
+    max-width: 460px;
+    padding: 0 5px 0 12px;
+    border-radius: 0 0 14px 14px;
+    background: #0b0b0b;
+    color: #fff;
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.06),
+      0 8px 24px -8px rgba(0, 0, 0, 0.5);
+    animation: drop 320ms var(--ease-out) both;
+  }
+  /* Around a MacBook's camera housing: the black meets the physical notch, with the status on its
+     left and Stop on its right, and nothing under the camera itself. */
+  .notch.camera {
+    display: grid;
+    /* Equal wings, so the gap sits exactly under the centred camera. */
+    grid-template-columns: 150px var(--cam-w) 150px;
+    height: var(--cam-h);
+    max-width: none;
+    gap: 0;
+    padding: 0 8px;
+    border-radius: 0 0 12px 12px;
+  }
+  .housing {
+    height: 100%;
+  }
+  .notch.camera .stop {
+    justify-self: end;
+  }
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    font-size: 12.5px;
+    cursor: default;
+  }
+  .text {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .dot {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #6fd389;
+    animation: breathe 1.6s ease-in-out infinite;
+  }
+  .dot.waiting {
+    background: #f2b950;
+    animation: none;
+  }
+  .stop {
+    flex: none;
+    height: 22px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.14);
+    color: #fff;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 560;
+    cursor: default;
+  }
+  .stop:hover {
+    background: rgba(255, 255, 255, 0.24);
+  }
+  @keyframes drop {
+    from {
+      transform: translate(-50%, -100%);
+    }
+  }
+  @keyframes breathe {
+    50% {
+      opacity: 0.35;
+    }
   }
 
   @keyframes rise {

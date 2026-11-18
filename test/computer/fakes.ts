@@ -6,7 +6,7 @@ import type { Step } from '@shared/steps'
 import type { RunContext, ToolModule } from '../../src/main/agent/module'
 import { ComputerUse, type Mode } from '../../src/main/computer'
 import type { TeachTarget } from '../../src/main/computer/interaction'
-import type { OverlayPort } from '../../src/main/computer/port'
+import type { Activity, OverlayPort } from '../../src/main/computer/port'
 import type { Platform } from '../../src/main/computer/platform/types'
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -72,14 +72,14 @@ export const fakePlatform = (over: Partial<Platform> = {}) => {
 
 /** An overlay that records what it was told to draw. */
 export const fakeOverlay = () => {
-  const shown: Array<{ acting: boolean; teach: TeachTarget | null }> = []
+  const shown: Array<{ acting: boolean; teach: TeachTarget | null; activity: Activity | null }> = []
   const protect: boolean[] = []
   /** Whether the Stop shortcut is held, after each change. */
   const stopKey: boolean[] = []
   let done: (() => void) | null = null
   let stop: (() => void) | null = null
   const port: OverlayPort = {
-    show: (acting, teach) => void shown.push({ acting, teach }),
+    show: (acting, teach, activity) => void shown.push({ acting, teach, activity }),
     protect: (on) => void protect.push(on),
     onDone: (f) => void (done = f),
     stopKey: (on) => void stopKey.push(on),
@@ -91,7 +91,7 @@ export const fakeOverlay = () => {
     shown,
     protect,
     stopKey,
-    last: () => shown.at(-1) ?? { acting: false, teach: null },
+    last: () => shown.at(-1) ?? { acting: false, teach: null, activity: null },
     pressDone: () => done?.(),
     pressStopKey: () => stop?.()
   }

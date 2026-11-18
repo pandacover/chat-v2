@@ -9,12 +9,12 @@ import { makeControl } from './control'
 import { makeInteraction, type Owner, type TeachOutcome, type TeachTarget, type Waiting } from './interaction'
 import type { Platform } from './platform/types'
 import { makePolicy, builtinStep, BUILTIN_TOOLS } from './policy'
-import type { OverlayPort } from './port'
+import type { Activity, OverlayPort } from './port'
 import { instructions } from './prompt'
 import { MAX_TASK_TOOLS, SERVER, makeServer, type Mode } from './tools'
 
 export { supported, makePlatform } from './platform'
-export { noOverlay, type OverlayPort } from './port'
+export { noOverlay, type Activity, type OverlayPort } from './port'
 export { builtinStep, isReadOnlyCommand, BUILTIN_TOOLS } from './policy'
 export { modeTag, teachAnswer } from './prompt'
 export { decideMode, handsOver } from './intent'
@@ -65,9 +65,19 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
   let acting: Owner | null = null
   let spot: TeachTarget | null = null
   let live = 0
+  /** The label of the last step a computer reply took, for the notch. */
+  let lastStep: string | null = null
   /** The chat's Stop of each computer reply running now. */
   const stops = new Set<() => void>()
-  const draw = () => overlay.show(acting !== null, spot)
+  /** What the notch says while a computer reply runs. */
+  const activity = (): Activity | null => {
+    if (live === 0) return null
+    const w = interaction.current()
+    if (w?.kind === 'approval') return { text: 'Waiting for your OK', waiting: true }
+    if (w?.kind === 'teach') return { text: `Your turn · Step ${w.step} of ${w.total}`, waiting: true }
+    return { text: lastStep ? `Working · ${lastStep}` : 'Working', waiting: false }
+  }
+  const draw = () => overlay.show(acting !== null, spot, activity())
   const control = p ? makeControl(p) : null
   const interaction = makeInteraction({
     spotlight: (t) => {
@@ -80,6 +90,7 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
     }
   })
   overlay.onDone(() => void Effect.runFork(interaction.resolveTeach({ kind: 'done' })))
+  interaction.subscribe(draw)
 
   const userTurn = Effect.suspend(() => {
     if (!control) return Effect.void
@@ -107,7 +118,11 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
     let ended = false
     let calls = 0
     const stopReply = opts.stop ?? (() => {})
-    const step = (s: Step) => void ctx.step(s).catch(() => undefined)
+    const step = (s: Step) => {
+      lastStep = s.label
+      draw()
+      void ctx.step(s).catch(() => undefined)
+    }
     const setActing = (on: boolean) => {
       if (on) acting = owner
       else if (acting === owner) acting = null
@@ -138,12 +153,15 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
       if (--live === 0) {
         overlay.protect(false)
         overlay.stopKey(false)
+        lastStep = null
       }
+      draw()
     }
     if (live++ === 0) {
       overlay.protect(true)
       overlay.stopKey(true)
     }
+    draw()
     stops.add(stopReply)
     // The reply's waits resolve as denied or stopped the moment it ends, even before `end` is called.
     ctx.signal.addEventListener('abort', () => void end(), { once: true })

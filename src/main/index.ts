@@ -188,7 +188,9 @@ const computerLayer = Layer.unwrap(
     const fake = process.env.CHAT_V2_FAKE_COMPUTER ? (load(process.env.CHAT_V2_FAKE_COMPUTER) as { platform?: Platform; wrap?: (p: Platform) => Platform }) : null
     const real = supported && !fake?.platform ? makePlatform({ track: trackChild }) : null
     const platform = fake?.platform ?? (real && fake?.wrap ? fake.wrap(real) : real)
-    overlay = makeElectronOverlay()
+    // After a press on the overlay, focus goes back to the app the user was in (the one under it).
+    const refocus = () => void platform?.remember().then(() => platform.restoreFocus()).catch(() => undefined)
+    overlay = makeElectronOverlay({ refocus })
     return ComputerUse.layer({ platform, overlay, remember })
   })
 )

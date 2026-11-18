@@ -4,6 +4,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { isDesktopRun } from '@shared/steps'
 import { BUILTIN_TOOLS, MAX_TASK_TOOLS, STOPPED_TEXT, builtinStep, decideMode, effortFor, handsOver, isReadOnlyCommand, modeTag, teachAnswer, type Waiting } from '../../src/main/computer'
+import { cameraHousing } from '../../src/main/computer/port'
 import { formatElements } from '../../src/main/computer/tools'
 import { disposeAll, harness, sleep, textOf, until } from './fakes'
 
@@ -73,8 +74,37 @@ describe('stopping mid-task', () => {
     expect(h.overlay.last().teach?.instruction).toBe('Click Personalize')
     await h.run(h.cu.stop)
     expect(textOf(await step)).toBe(STOPPED_TEXT)
-    expect(h.overlay.last()).toEqual({ acting: false, teach: null })
+    expect(h.overlay.last()).toMatchObject({ acting: false, teach: null })
     expect(h.cu.waiting()).toBeNull()
+  })
+
+  test('the notch says what a running reply is doing, and goes when it ends', async () => {
+    const h = await harness()
+    h.setMode('teach')
+    const r = await h.reply()
+    expect(h.overlay.last().activity).toEqual({ text: 'Working', waiting: false })
+    await r.tool('look_at_screen')
+    const step = r.tool('teach_step', { instruction: 'Click Personalize', step: 1, total: 3, element: 4 })
+    await until(() => h.cu.waiting()?.kind === 'teach')
+    expect(h.overlay.last().activity).toEqual({ text: 'Your turn · Step 1 of 3', waiting: true })
+    h.overlay.pressDone()
+    await step
+    expect(h.overlay.last().activity).toEqual({ text: 'Working · Step 1 of 3', waiting: false })
+    await r.mod.end!()
+    expect(h.overlay.last().activity).toBeNull()
+  })
+
+  test('the notch wraps a MacBook camera housing only on a notched built-in screen', () => {
+    const screen = (width: number, height: number, bar: number, internal = true) => ({ internal, bounds: { x: 0, y: 0, width, height }, workArea: { x: 0, y: bar, width, height: height - bar } })
+    // 14" and 16" MacBook Pro, 13" Air (M2): a 37-38 pt menu bar, about 1.54:1.
+    expect(cameraHousing(screen(1512, 982, 38), 'darwin')).toEqual({ width: 200, height: 38 })
+    expect(cameraHousing(screen(1728, 1117, 37), 'darwin')).toEqual({ width: 200, height: 37 })
+    // The menu bar hidden: told by the shape.
+    expect(cameraHousing(screen(1470, 956, 0), 'darwin')).toEqual({ width: 200, height: 32 })
+    // A 13" Air (M1) has no notch: a 24 pt menu bar on a 1.6:1 screen.
+    expect(cameraHousing(screen(1440, 900, 24), 'darwin')).toBeNull()
+    expect(cameraHousing(screen(2560, 1440, 25, false), 'darwin')).toBeNull()
+    expect(cameraHousing(screen(1920, 1080, 0), 'win32')).toBeNull()
   })
 
   test('a wait or a slow control read is cut off', async () => {

@@ -25,7 +25,7 @@ const renderInElectron = async (outDir: string) => {
     if (win.webContents.isLoading()) await new Promise<void>((r) => win.webContents.once('did-finish-load', () => r()))
     // Stand-in for the desktop under the transparent window, so the frame and dim read in a picture.
     // Entry animations only advance when a hidden window paints, so stills show their end state.
-    const css = `.frame,.spot,.callout{animation:none !important}${backdrop ? 'html,body{background:#d9d6cf !important}' : ''}`
+    const css = `.frame,.spot,.callout,.notch{animation:none !important}${backdrop ? 'html,body{background:#d9d6cf !important}' : ''}`
     const key = await win.webContents.insertCSS(css)
     await sleep(700)
     await win.webContents.capturePage() // a hidden window hands back the previous frame first
@@ -40,13 +40,25 @@ const renderInElectron = async (outDir: string) => {
   const rect = { x: Math.round((d.bounds.x + d.bounds.width / 3) * s), y: Math.round((d.bounds.y + 180) * s), width: Math.round(160 * s), height: Math.round(36 * s) }
   for (const theme of ['light', 'dark'] as const) {
     nativeTheme.themeSource = theme
-    overlay.show(true, null)
+    overlay.show(true, null, null)
     await shoot(`acting-${theme}`, true)
-    overlay.show(false, { rect, instruction: 'Click Display to open the screen settings.', step: 2, total: 4 })
+    overlay.show(false, { rect, instruction: 'Click Display to open the screen settings.', step: 2, total: 4 }, null)
     await shoot(`teach-${theme}`, true)
   }
   await shoot('teach-transparent', false)
-  overlay.show(false, null)
+  // The notch (no chat window has focus here): working, and waiting on the user with a step up.
+  overlay.show(true, null, { text: 'Working · Click', waiting: false })
+  await shoot('notch-working', true)
+  overlay.show(false, { rect, instruction: 'Click Display to open the screen settings.', step: 2, total: 4 }, { text: 'Your turn · Step 2 of 4', waiting: true })
+  await shoot('notch-teach', true)
+  // Around a MacBook's camera housing, as main sends it on such a screen.
+  overlay.window!.webContents.send('computer-overlay:state', { acting: false, teach: null, notch: { text: 'Working · Click', waiting: false, camera: { width: 200, height: 37 } } })
+  await shoot('notch-camera', true)
+  const gap = await overlay.window!.webContents.executeJavaScript(
+    `(() => { const r = document.querySelector('.housing').getBoundingClientRect(); return { centre: r.left + r.width / 2, width: r.width, screen: innerWidth / 2 } })()`
+  )
+  console.log(`[overlay] camera gap: ${gap.width} px wide, centred at ${gap.centre} (screen centre ${gap.screen})`)
+  overlay.show(false, null, null)
   console.log(`[overlay] ${d.bounds.width}x${d.bounds.height} @${d.scaleFactor}x, wrote PNGs to ${outDir}`)
   overlay.dispose()
   app.quit()

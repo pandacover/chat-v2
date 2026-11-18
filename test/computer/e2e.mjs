@@ -125,36 +125,63 @@ try {
   ok(!!overlay, 'the overlay window exists')
   await capture('overlay', 'computer-overlay.html')
   // The overlay is click-through, and takes the mouse only while the pointer is on the callout. Main
-  // watches the pointer; here it reads a stand-in, and the window's mouse setting is recorded.
+  // watches the pointer; here it reads a stand-in, and the window's mouse settings are recorded.
   await app.evaluate(({ BrowserWindow, screen }) => {
     globalThis.e2ePointer = { x: -99999, y: -99999 }
     screen.getCursorScreenPoint = () => globalThis.e2ePointer
     const w = BrowserWindow.getAllWindows().find((w) => w.webContents.getURL().includes('computer-overlay.html'))
-    const set = w.setIgnoreMouseEvents.bind(w)
+    const ignore = w.setIgnoreMouseEvents.bind(w)
     globalThis.e2eClickThrough = true
-    w.setIgnoreMouseEvents = (ignore, o) => {
-      globalThis.e2eClickThrough = ignore
-      set(ignore, o)
+    w.setIgnoreMouseEvents = (on, o) => {
+      globalThis.e2eClickThrough = on
+      ignore(on, o)
     }
   })
-  const clickThrough = () => app.evaluate(() => globalThis.e2eClickThrough)
+  const takes = async () => !(await app.evaluate(() => globalThis.e2eClickThrough))
+  const lets = () => app.evaluate(() => globalThis.e2eClickThrough)
+  // Windows drops a click on a window that can't be activated.
+  ok(
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((w) => w.webContents.getURL().includes('computer-overlay.html')).isFocusable()),
+    'the overlay can be activated, so Windows keeps a click on it'
+  )
   const pointAt = async (box) =>
     app.evaluate(({ BrowserWindow }, box) => {
       const b = BrowserWindow.getAllWindows().find((w) => w.webContents.getURL().includes('computer-overlay.html')).getBounds()
-      globalThis.e2ePointer = box ? { x: Math.round(b.x + box.x + box.width / 2), y: Math.round(b.y + box.y + box.height / 2) } : { x: b.x + 5, y: b.y + 5 }
+      globalThis.e2ePointer = box ? { x: Math.round(b.x + box.x + box.width / 2), y: Math.round(b.y + box.y + box.height / 2) } : { x: b.x + 5, y: b.y + 500 }
     }, box)
   const done = overlay.getByRole('button', { name: 'Done' })
   await pointAt(null)
   await sleep(200)
-  ok(await clickThrough(), 'the overlay lets clicks through while the pointer is off the callout')
+  ok(await lets(), 'the overlay lets clicks through while the pointer is off the callout')
   await pointAt(await done.boundingBox())
-  await until(async () => !(await clickThrough()), 'the overlay takes the mouse with the pointer on Done', 2000)
+  await until(takes, 'the overlay takes the mouse with the pointer on Done', 2000)
   await pointAt(null)
-  await until(clickThrough, 'and lets it go when the pointer leaves', 2000)
+  await until(lets, 'and lets it go when the pointer leaves', 2000)
+
+  // The callout can be dragged aside, and stays there for the next step.
+  const callout = overlay.locator('.callout')
+  const from = await callout.boundingBox()
+  await overlay.mouse.move(from.x + 40, from.y + 12)
+  await overlay.mouse.down()
+  await overlay.mouse.move(from.x + 240, from.y + 162, { steps: 6 })
+  await overlay.mouse.up()
+  const moved = await callout.boundingBox()
+  ok(Math.abs(moved.x - from.x - 200) < 2 && Math.abs(moved.y - from.y - 150) < 2, `dragging moves the callout (by ${Math.round(moved.x - from.x)}, ${Math.round(moved.y - from.y)})`)
   await pointAt(await done.boundingBox())
-  await until(async () => !(await clickThrough()), 'and takes it again on the way back', 2000)
+  await until(takes, 'the overlay takes the mouse where the callout now is', 2000)
+
+  // The notch: the chat window isn't focused (it is hidden here), so it says what's happening.
+  const notch = overlay.locator('.notch')
+  await until(async () => (await notch.count()) === 1 && (await notch.innerText()).includes('Your turn · Step 1 of 3'), 'the notch shows the step waiting on the user')
+  await capture('overlay-notch', 'computer-overlay.html')
+
   await done.click()
   await until(async () => (await step.innerText()).includes('Step 2 of 3'), "the overlay's Done ends the step")
+  await until(async () => (await overlay.locator('.callout p').innerText()) === 'Click Night light', 'the next step shows on the overlay')
+  // A hidden window runs the new callout's 6 px rise only as captures force frames.
+  await capture('overlay-step-2', 'computer-overlay.html')
+  const next = await callout.boundingBox()
+  ok(Math.abs(next.x - moved.x) < 2 && Math.abs(next.y - moved.y) < 2, `the next step keeps the place the callout was dragged to (${JSON.stringify(moved)} vs ${JSON.stringify(next)})`)
   // The chat's Done.
   await step.getByRole('button', { name: 'Done' }).click()
   await until(async () => (await step.innerText()).includes('Step 3 of 3'), "the chat's Done ends the step")
@@ -162,7 +189,8 @@ try {
   const before = await page.locator('[aria-label="Edit message"]').count()
   await send('There is no switch for it')
   await until(async () => (await lastReply().innerText()).includes('Night light is on.'), 'a typed message answers the step')
-  ok(await clickThrough(), 'the overlay is click-through again once the steps are over')
+  await until(lets, 'the overlay is click-through again once the steps are over', 2000)
+  await until(async () => (await notch.count()) === 0, 'and the notch goes with the reply')
   await sleep(300)
   ok((await lastReply().innerText()).split('Night light is on.').length === 2, 'the reply shows its last line once')
   ok((await page.locator('[aria-label="Edit message"]').count()) === before, 'the typed answer is not a new message')
@@ -185,6 +213,13 @@ try {
   const after = fake('type').length - atClick
   ok(after <= 2, `typing stopped: ${atClick} of 125 chunks before Stop, ${after} after (Stopped shown ${Date.now() - t0 - 500} ms after the click)`)
   ok(!(await shortcutHeld()), 'the Stop shortcut is let go after Stop')
+
+  // Stop in the notch, as from any app.
+  await send('Please type a lot')
+  await until(async () => (await notch.count()) === 1 && (await notch.innerText()).includes('Working'), 'the notch shows a reply at work')
+  await notch.getByRole('button', { name: 'Stop' }).click()
+  await until(async () => (await lastReply().innerText()).includes('Stopped.'), "the notch's Stop stops the reply")
+  await until(async () => (await notch.count()) === 0, 'and the notch goes')
 } finally {
   await app.close()
 }
