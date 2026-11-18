@@ -17,7 +17,11 @@ export default defineConfig({
     resolve: { alias: shared },
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/preload/index.ts') },
+        // The computer-use overlay (src/main/computer) gets its own, much smaller bridge.
+        input: {
+          index: resolve(__dirname, 'src/preload/index.ts'),
+          computer: resolve(__dirname, 'src/preload/computer.ts')
+        },
         // Sandboxed preloads must be a single CommonJS file.
         output: { format: 'cjs', entryFileNames: '[name].cjs' }
       }
@@ -30,7 +34,11 @@ export default defineConfig({
       // electron-vite leaves the renderer unminified by default: 740 KB of script to parse at startup.
       minify: true,
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/renderer/index.html') }
+        // The computer-use overlay is a page of its own.
+        input: {
+          index: resolve(__dirname, 'src/renderer/index.html'),
+          'computer-overlay': resolve(__dirname, 'src/renderer/computer-overlay.html')
+        }
       }
     }
   }
