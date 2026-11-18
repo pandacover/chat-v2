@@ -8,7 +8,7 @@ import type { RunContext, ToolModule } from '../agent/module'
 import { makeControl } from './control'
 import { makeInteraction, type Owner, type TeachOutcome, type TeachTarget, type Waiting } from './interaction'
 import type { Platform } from './platform/types'
-import { makePolicy, BUILTIN_TOOLS } from './policy'
+import { makePolicy, builtinStep, BUILTIN_TOOLS } from './policy'
 import type { OverlayPort } from './port'
 import { instructions } from './prompt'
 import { MAX_TASK_TOOLS, SERVER, makeServer, type Mode } from './tools'
@@ -16,7 +16,7 @@ import { MAX_TASK_TOOLS, SERVER, makeServer, type Mode } from './tools'
 export { supported, makePlatform } from './platform'
 export { noOverlay, type OverlayPort } from './port'
 export { builtinStep, isReadOnlyCommand, BUILTIN_TOOLS } from './policy'
-export { modeTag } from './prompt'
+export { modeTag, teachAnswer } from './prompt'
 export { MAX_TASK_TOOLS, STOPPED_TEXT, type Mode } from './tools'
 export type { Waiting, TeachOutcome } from './interaction'
 export type { Platform } from './platform/types'
@@ -27,9 +27,12 @@ export const effortFor = (model: string): 'low' | 'medium' => (/haiku|sonnet/i.t
 export interface ComputerUseApi {
   /** False on Linux, or when the layer was built without a platform. */
   readonly supported: boolean
-  /** The tool set for one reply. The mode is read at every tool call. */
-  readonly module: (ctx: RunContext, opts: { mode: () => Mode }) => ToolModule
-  /** The chat's Stop: cuts off input in progress and releases every wait. Input stays off until `userTurn`. */
+  /**
+   * The tool set for one reply. The mode is read at every tool call. `stop` is the chat's Stop for
+   * this reply, which the Stop shortcut runs.
+   */
+  readonly module: (ctx: RunContext, opts: { mode: () => Mode; stop?: () => void }) => ToolModule
+  /** Cuts off input in progress and releases every wait. Input stays off until `userTurn`. The chat's Stop runs it. */
   readonly stop: Effect.Effect<void>
   /**
    * A new user message (a new reply, or steering one that runs): input is allowed again, the
@@ -49,7 +52,7 @@ export interface ComputerUseApi {
 export interface ComputerUseOptions {
   /** The real platform (`makePlatform()`), a fake in tests, or null where computer use isn't supported. */
   readonly platform: Platform | null
-  /** The Electron overlay (`makeElectronOverlay()` from ./overlay), or `noOverlay`. */
+  /** The Electron overlay and Stop shortcut (`makeElectronOverlay()` from ./overlay), or `noOverlay`. */
   readonly overlay: OverlayPort
   /** Saves a fact the model was told to remember (chat-v2's memory). */
   readonly remember: (fact: string, ctx: RunContext) => Promise<void>
@@ -61,6 +64,8 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
   let acting: Owner | null = null
   let spot: TeachTarget | null = null
   let live = 0
+  /** The chat's Stop of each computer reply running now. */
+  const stops = new Set<() => void>()
   const draw = () => overlay.show(acting !== null, spot)
   const control = p ? makeControl(p) : null
   const interaction = makeInteraction({
@@ -89,11 +94,18 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
     return interaction.cancelAll()
   })
 
-  const module = (ctx: RunContext, opts: { mode: () => Mode }): ToolModule => {
+  // The Stop shortcut stops every computer reply, as the chat's Stop would.
+  overlay.onStopKey(() => {
+    void Effect.runFork(stop)
+    for (const f of [...stops]) f()
+  })
+
+  const module = (ctx: RunContext, opts: { mode: () => Mode; stop?: () => void }): ToolModule => {
     if (!control || !p) throw new Error('Computer use needs Windows or macOS.')
     const owner: Owner = { sessionId: ctx.sessionId, messageId: ctx.messageId }
     let ended = false
     let calls = 0
+    const stopReply = opts.stop ?? (() => {})
     const step = (s: Step) => void ctx.step(s).catch(() => undefined)
     const setActing = (on: boolean) => {
       if (on) acting = owner
@@ -121,9 +133,17 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
         spot = null
         draw()
       }
-      if (--live === 0) overlay.protect(false)
+      stops.delete(stopReply)
+      if (--live === 0) {
+        overlay.protect(false)
+        overlay.stopKey(false)
+      }
     }
-    if (live++ === 0) overlay.protect(true)
+    if (live++ === 0) {
+      overlay.protect(true)
+      overlay.stopKey(true)
+    }
+    stops.add(stopReply)
     // The reply's waits resolve as denied or stopped the moment it ends, even before `end` is called.
     ctx.signal.addEventListener('abort', () => void end(), { once: true })
     void Effect.runPromise(userTurn)
@@ -141,6 +161,7 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
         count
       }),
       builtins: BUILTIN_TOOLS,
+      stepFor: builtinStep,
       canUseTool: makePolicy({ control, interaction, owner, mode: opts.mode, ended: () => ended || ctx.signal.aborted, count }),
       end
     }

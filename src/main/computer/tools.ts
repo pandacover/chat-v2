@@ -85,7 +85,7 @@ export const toolDefs = (d: ToolDeps) => {
     label: string,
     detail: string,
     eff: Effect.Effect<CallToolResult, { readonly _tag: string; readonly message?: string }>,
-    opts: { acting?: boolean; quiet?: boolean; ok?: (r: CallToolResult) => boolean } = {}
+    opts: { acting?: boolean; quiet?: boolean; ok?: (r: CallToolResult) => boolean; detail?: () => string } = {}
   ): Promise<CallToolResult> => {
     if (d.control.stopped() || d.signal.aborted) return Promise.resolve(text(STOPPED_TEXT, true))
     if (!d.count()) return Promise.resolve(text(TOO_MANY_TEXT, true))
@@ -93,7 +93,8 @@ export const toolDefs = (d: ToolDeps) => {
     const mark = (ok: boolean) => {
       if (opts.quiet || marked) return
       marked = true
-      d.step({ tool: `computer_${name}`, label, ok, ...(detail ? { detail } : {}) })
+      const shown = opts.detail?.() ?? detail
+      d.step({ tool: `computer_${name}`, label, ok, ...(shown ? { detail: shown } : {}) })
     }
     if (opts.acting) d.setActing(true)
     const stopped = Effect.sync(() => {
@@ -423,8 +424,10 @@ export const toolDefs = (d: ToolDeps) => {
         width: z.number().optional().describe('Approximate control size, used only if no control is found at x,y'),
         height: z.number().optional()
       },
-      (a) =>
-        run(
+      (a) => {
+        // What the user typed instead of pressing Done goes into the step line.
+        let said = ''
+        return run(
           'teach_step',
           `Step ${a.step} of ${a.total}`,
           a.instruction,
@@ -441,10 +444,15 @@ export const toolDefs = (d: ToolDeps) => {
             d.control.resetTakeover()
             yield* d.interaction.clearTeach()
             if (outcome.kind === 'done') return text('The user did it. Look at the screen before the next step.')
-            if (outcome.kind === 'said') return text(`The user said: "${outcome.text}"`)
+            if (outcome.kind === 'said') {
+              said = outcome.text
+              return text(`The user said: "${outcome.text}"`)
+            }
             return text('The user stopped the lesson.')
-          })
-        ),
+          }),
+          { detail: () => (said ? `${a.instruction} · You said “${said}”` : a.instruction) }
+        )
+      },
       { searchHint: 'show me teach guide highlight spotlight step tutorial how to' }
     ),
 

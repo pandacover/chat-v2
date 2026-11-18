@@ -3,7 +3,7 @@
 // steps answered from the chat or the overlay, and what a reply's end releases.
 import { afterEach, describe, expect, test } from 'bun:test'
 import { isDesktopRun } from '@shared/steps'
-import { BUILTIN_TOOLS, MAX_TASK_TOOLS, STOPPED_TEXT, builtinStep, effortFor, isReadOnlyCommand, modeTag, type Waiting } from '../../src/main/computer'
+import { BUILTIN_TOOLS, MAX_TASK_TOOLS, STOPPED_TEXT, builtinStep, effortFor, isReadOnlyCommand, modeTag, teachAnswer, type Waiting } from '../../src/main/computer'
 import { formatElements } from '../../src/main/computer/tools'
 import { disposeAll, harness, sleep, textOf, until } from './fakes'
 
@@ -341,5 +341,27 @@ describe('what the driver gets', () => {
   test('built-in calls get readable step lines', () => {
     expect(builtinStep('Bash', { command: 'ls' })).toEqual({ tool: 'Bash', label: 'Run command', ok: true, detail: 'ls' })
     expect(builtinStep('Unknown', {})).toBeNull()
+    // A run of only built-in calls is still the computer's, not the browser's.
+    expect(isDesktopRun([builtinStep('Glob', { pattern: '*.pdf' })!])).toBe(true)
+    expect(isDesktopRun([{ tool: 'browser_click', label: 'Click', ok: true }])).toBe(false)
+  })
+
+  test('a message typed during a Show-me step: "done" and the like finish it, anything else is passed on', () => {
+    for (const t of ['done', 'Done!', 'ok', 'next', 'got it']) expect(teachAnswer(t)).toEqual({ kind: 'done' })
+    expect(teachAnswer(' I can’t find it ')).toEqual({ kind: 'said', text: 'I can’t find it' })
+  })
+
+  test('the Stop shortcut is held while a computer reply runs, and pressing it stops every running reply', async () => {
+    const h = await harness()
+    const stopped: string[] = []
+    const one = await h.reply()
+    const mod = h.cu.module({ ...one.ctx, messageId: 'other' }, { mode: () => 'do', stop: () => void stopped.push('other') })
+    expect(h.overlay.stopKey).toEqual([true])
+    h.overlay.pressStopKey()
+    expect(stopped).toEqual(['other'])
+    await one.mod.end!()
+    expect(h.overlay.stopKey).toEqual([true])
+    await mod.end!()
+    expect(h.overlay.stopKey).toEqual([true, false])
   })
 })

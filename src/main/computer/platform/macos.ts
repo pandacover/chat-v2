@@ -2,15 +2,19 @@
 // a Mac yet. It uses only tools that ship with the OS: `osascript -l JavaScript` (CoreGraphics
 // events, System Events), `screencapture`, `sips`, `mdfind` and `open`. Coordinates are points.
 // Needs Accessibility and Screen Recording permission for chat-v2.
-import { spawn } from 'node:child_process'
+import { type ChildProcess, spawn } from 'node:child_process'
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, extname, join } from 'node:path'
 import type { FileHit, Platform, SearchQuery, UiElement, WindowInfo } from './types'
 
+/** Called with every process the adapter starts (set by makeMacPlatform), so quitting can end them. */
+let track: (p: ChildProcess) => void = () => {}
+
 const run = (cmd: string, args: string[], input?: string): Promise<string> =>
   new Promise((resolve, reject) => {
     const p = spawn(cmd, args, { stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
+    track(p)
     let out = ''
     let err = ''
     p.stdout!.setEncoding('utf8').on('data', (d: string) => (out += d))
@@ -62,7 +66,8 @@ export const buildMdfindQuery = (q: SearchQuery): string => {
 }
 
 /** `ownerPid` is chat-v2's main process: its windows are never targets. */
-export const makeMacPlatform = (opts: { ownerPid: number }): Platform => {
+export const makeMacPlatform = (opts: { ownerPid: number; track?: (p: ChildProcess) => void }): Platform => {
+  if (opts.track) track = opts.track
   let remembered = ''
   let lastTree: UiElement[] = []
 

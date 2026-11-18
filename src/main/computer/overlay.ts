@@ -1,9 +1,11 @@
 // The computer-use overlay: a full-screen, click-through, always-on-top window. While computer use
 // drives, it draws a hairline frame around the screen; in Show-me mode, a spotlight on the exact
 // control with the instruction and a Done button beside it. It only takes the mouse while the
-// pointer is on that callout, and screen captures leave it out.
+// pointer is on that callout, and screen captures leave it out. The global Stop shortcut is here
+// too: the chat window is often covered while computer use acts.
 import { join } from 'node:path'
-import { app, BrowserWindow, ipcMain, screen, type Rectangle } from 'electron'
+import { app, BrowserWindow, globalShortcut, ipcMain, screen, type Rectangle } from 'electron'
+import { STOP_SHORTCUT } from '@shared/computer'
 import type { OverlayState, OverlayTeach } from '../../preload/computer-overlay'
 import type { TeachTarget } from './interaction'
 import type { OverlayPort } from './port'
@@ -27,6 +29,11 @@ export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayP
   let state: OverlayState = { acting: false, teach: null }
   let protecting = false
   const doneListeners: Array<() => void> = []
+  const stopListeners: Array<() => void> = []
+  let holdingKey = false
+  const pressed = () => {
+    for (const f of stopListeners) f()
+  }
 
   const create = () => {
     const w = new BrowserWindow({
@@ -125,7 +132,16 @@ export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayP
       else app.off('browser-window-created', onCreated)
     },
     onDone: (f) => void doneListeners.push(f),
+    stopKey: (on) => {
+      if (on === holdingKey) return
+      holdingKey = on
+      if (!on) return globalShortcut.unregister(STOP_SHORTCUT)
+      if (!globalShortcut.register(STOP_SHORTCUT, pressed)) console.warn(`[computer] ${STOP_SHORTCUT} is held by another app; Stop works from the chat only`)
+    },
+    onStopKey: (f) => void stopListeners.push(f),
     dispose: () => {
+      if (holdingKey) globalShortcut.unregister(STOP_SHORTCUT)
+      holdingKey = false
       app.off('browser-window-created', onCreated)
       ipcMain.removeAllListeners('computer-overlay:interactive')
       ipcMain.removeAllListeners('computer-overlay:done')

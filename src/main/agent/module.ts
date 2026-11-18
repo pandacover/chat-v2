@@ -28,6 +28,11 @@ export interface ToolModule {
   /** SDK built-in tools this set brings along, e.g. 'WebSearch'. */
   readonly builtins?: ReadonlyArray<string>
   /**
+   * The step line for a call of one of `builtins`. Claude Code runs those itself, so the driver
+   * adds the line when the call's result comes back. Null for no line.
+   */
+  readonly stepFor?: (name: string, input: Record<string, unknown>) => Step | null
+  /**
    * Whether a tool call may run. Called for every call in the reply; returns null for calls that
    * belong to another module. Without it, this module's own tools are allowed.
    */

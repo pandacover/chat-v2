@@ -135,12 +135,13 @@ export const installHost = (base = join(process.env.LOCALAPPDATA ?? tmpdir(), 'c
 }
 
 /** Start host.ps1 and connect a channel to it. */
-export const startHost = (script: string, ownerPid: number, onExit: () => void = () => {}) => {
+export const startHost = (script: string, ownerPid: number, onExit: () => void = () => {}, track: (p: ChildProcessWithoutNullStreams) => void = () => {}) => {
   const proc: ChildProcessWithoutNullStreams = spawn(
     'powershell.exe',
     ['-NoProfile', '-NoLogo', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, '-ElectronPid', String(ownerPid)],
     { stdio: 'pipe', windowsHide: true }
   )
+  track(proc)
   const host = makeHostChannel((line) => {
     if (!proc.stdin.destroyed) proc.stdin.write(line)
   })
@@ -182,14 +183,19 @@ export const startHost = (script: string, ownerPid: number, onExit: () => void =
  * process: its windows are never targets, and when one of them is in front the host works in
  * the app the user was in before.
  */
-export const makeWindowsPlatform = (opts: { ownerPid: number; hostDir?: string }): Platform => {
+export const makeWindowsPlatform = (opts: { ownerPid: number; hostDir?: string; track?: (p: ChildProcessWithoutNullStreams) => void }): Platform => {
   let host: ReturnType<typeof startHost> | null = null
   const call = <T>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
     if (!host) {
       // A host that exited is started again on the next call.
-      const h = startHost(installHost(opts.hostDir), opts.ownerPid, () => {
-        if (host === h) host = null
-      })
+      const h = startHost(
+        installHost(opts.hostDir),
+        opts.ownerPid,
+        () => {
+          if (host === h) host = null
+        },
+        opts.track
+      )
       host = h
     }
     return host.call<T>(method, params)

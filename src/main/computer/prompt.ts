@@ -38,3 +38,7 @@ When the user tells you a lasting preference ("call me Sam", "my projects live i
 
 /** The mode tag the driver puts in front of each user message while computer use is on. */
 export const modeTag = (mode: 'do' | 'teach', text: string) => `[mode: ${mode}] ${text}`
+
+/** A message the user typed while a Show-me step waits: "done" and the like finish the step; anything else is passed on. */
+export const teachAnswer = (text: string): { kind: 'done' } | { kind: 'said'; text: string } =>
+  /^(done|next|ok(ay)?|got it|did it|finished|yes)\b/i.test(text.trim()) ? { kind: 'done' } : { kind: 'said', text: text.trim() }

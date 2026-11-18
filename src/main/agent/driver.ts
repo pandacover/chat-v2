@@ -30,7 +30,10 @@ export interface AgentDeps {
   query: QueryFn
   /** Claude Code's own folder for this app (CLAUDE_CONFIG_DIR): sessions and its state. */
   configDir: string
-  /** The working directory of every query. The model has no file tools, so it only names the sessions folder. */
+  /**
+   * The working directory of every query. It names the sessions folder, so it never changes; a
+   * computer chat's shell commands start here too.
+   */
   cwd: string
   /** "chat-v2/<version>", sent with every request. */
   clientApp: string
@@ -287,6 +290,8 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
       }
       let result: SDKResultMessage | null = null
       let failure: Failure | null = null
+      // Built-in tool calls waiting for their result, with the step line each gets then.
+      const builtinCalls = new Map<string, Step>()
       try {
         for await (const m of deps.query({ prompt: once(req.prompt), options })) {
           if (abort.signal.aborted) break
@@ -299,10 +304,23 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
           } else if (m.type === 'assistant') {
             hooks.checkpoint(m.uuid)
             if (m.error) failure = { kind: m.error, text: textOf(m.message.content) }
+            for (const b of m.message.content) {
+              if (b.type !== 'tool_use') continue
+              const owner = modules.find((x) => x.builtins?.includes(b.name))
+              const step = owner?.stepFor?.(b.name, (b.input ?? {}) as Record<string, unknown>)
+              if (step) builtinCalls.set(b.id, step)
+            }
           } else if (m.type === 'user') {
             // Tool results: a reply stopped after one continues from there.
             const uuid = (m as { uuid?: string }).uuid
             if (uuid) hooks.checkpoint(uuid)
+            const content = m.message.content
+            for (const b of Array.isArray(content) ? content : []) {
+              const step = b.type === 'tool_result' ? builtinCalls.get(b.tool_use_id) : undefined
+              if (!step || b.type !== 'tool_result') continue
+              builtinCalls.delete(b.tool_use_id)
+              await ctx.step({ ...step, ok: step.ok && !b.is_error })
+            }
           } else if (m.type === 'result') result = m
         }
       } catch (e) {

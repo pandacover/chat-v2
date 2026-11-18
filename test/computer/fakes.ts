@@ -74,14 +74,27 @@ export const fakePlatform = (over: Partial<Platform> = {}) => {
 export const fakeOverlay = () => {
   const shown: Array<{ acting: boolean; teach: TeachTarget | null }> = []
   const protect: boolean[] = []
+  /** Whether the Stop shortcut is held, after each change. */
+  const stopKey: boolean[] = []
   let done: (() => void) | null = null
+  let stop: (() => void) | null = null
   const port: OverlayPort = {
     show: (acting, teach) => void shown.push({ acting, teach }),
     protect: (on) => void protect.push(on),
     onDone: (f) => void (done = f),
+    stopKey: (on) => void stopKey.push(on),
+    onStopKey: (f) => void (stop = f),
     dispose: () => {}
   }
-  return { port, shown, protect, last: () => shown.at(-1) ?? { acting: false, teach: null }, pressDone: () => done?.() }
+  return {
+    port,
+    shown,
+    protect,
+    stopKey,
+    last: () => shown.at(-1) ?? { acting: false, teach: null },
+    pressDone: () => done?.(),
+    pressStopKey: () => stop?.()
+  }
 }
 
 const open: Array<{ dispose: () => Promise<void> }> = []
