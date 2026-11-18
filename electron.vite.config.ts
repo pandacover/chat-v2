@@ -17,7 +17,12 @@ export default defineConfig({
     build: {
       rollupOptions: {
         // The overlay that draws computer use on screen gets its own, much smaller bridge.
-        input: { index: resolve(__dirname, 'src/preload/index.ts'), overlay: resolve(__dirname, 'src/preload/overlay.ts') },
+        // So does the Show-me overlay of src/main/computer (computer.ts).
+        input: {
+          index: resolve(__dirname, 'src/preload/index.ts'),
+          overlay: resolve(__dirname, 'src/preload/overlay.ts'),
+          computer: resolve(__dirname, 'src/preload/computer.ts')
+        },
         // Sandboxed preloads must be a single CommonJS file.
         output: { format: 'cjs', entryFileNames: '[name].cjs' }
       }
@@ -34,7 +39,8 @@ export default defineConfig({
         input: {
           index: resolve(__dirname, 'src/renderer/index.html'),
           overlay: resolve(__dirname, 'src/renderer/overlay.html'),
-          capture: resolve(__dirname, 'src/renderer/capture.html')
+          capture: resolve(__dirname, 'src/renderer/capture.html'),
+          'computer-overlay': resolve(__dirname, 'src/renderer/computer-overlay.html')
         }
       }
     }
