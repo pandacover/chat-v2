@@ -22,7 +22,7 @@ const renderInElectron = async (outDir: string) => {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
   const shoot = async (name: string, backdrop: boolean) => {
     const win = overlay.window!
-    if (win.webContents.isLoading()) await new Promise((r) => win.webContents.once('did-finish-load', r))
+    if (win.webContents.isLoading()) await new Promise<void>((r) => win.webContents.once('did-finish-load', () => r()))
     // Stand-in for the desktop under the transparent window, so the frame and dim read in a picture.
     // Entry animations only advance when a hidden window paints, so stills show their end state.
     const css = `.frame,.spot,.callout{animation:none !important}${backdrop ? 'html,body{background:#d9d6cf !important}' : ''}`
