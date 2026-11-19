@@ -190,7 +190,11 @@ const computerLayer = Layer.unwrap(
     const platform = fake?.platform ?? (real && fake?.wrap ? fake.wrap(real) : real)
     // After a press on the overlay, focus goes back to the app the user was in (the one under it).
     const refocus = () => void platform?.remember().then(() => platform.restoreFocus()).catch(() => undefined)
-    overlay = makeElectronOverlay({ refocus })
+    // On Linux the overlay is never shown unless CHAT_V2_LINUX_OVERLAY=1: without a compositing
+    // manager X11 draws its transparent window solid black over the whole screen (and into every
+    // screenshot), and it can't be hidden from capture there anyway. The Stop shortcut still works.
+    const linuxNoOverlay = process.platform === 'linux' && process.env.CHAT_V2_LINUX_OVERLAY !== '1'
+    overlay = makeElectronOverlay({ refocus, ...(linuxNoOverlay ? { headless: true } : {}) })
     return ComputerUse.layer({ platform, overlay, remember })
   })
 )

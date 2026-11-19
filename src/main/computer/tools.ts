@@ -159,7 +159,7 @@ export const toolDefs = (d: ToolDeps) => {
   return [
     tool(
       'look_at_screen',
-      "Take a screenshot of the screen the user is working on (chat-v2's own windows are left out). Call this first in any task that involves the screen, and again after anything that changes it. Coordinates you pass to the other computer tools are pixels in the latest screenshot.",
+      "Take a screenshot of the screen the user is working on (chat-v2's own windows are left out on Windows and macOS). Call this first in any task that involves the screen, and again after anything that changes it. Coordinates you pass to the other computer tools are pixels in the latest screenshot.",
       {},
       () =>
         run(
@@ -229,7 +229,7 @@ export const toolDefs = (d: ToolDeps) => {
 
     tool(
       'find_files',
-      "Search the user's files and folders with the system search index (Windows Search or Spotlight). Give at least one of name / contains / extensions. Name the results that matter in your reply.",
+      "Search the user's files and folders with the system search index (Windows Search or Spotlight; a scan of the home folder on Linux). Give at least one of name / contains / extensions. Name the results that matter in your reply.",
       {
         name: z.string().optional().describe('Words in the file or folder name'),
         contains: z.string().optional().describe('Words inside the document'),

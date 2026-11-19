@@ -27,6 +27,13 @@ ComputerUse.layer({
 - Before each input, focus goes back to the app the user was in. On Windows, when a chat-v2 window is in front, that app is the topmost app window under it in z-order. On macOS it is the app of the frontmost normal window that isn't chat-v2's.
 - If the mouse moves more than 28 px from where computer use left it, the reply pauses.
 - Windows only: a window running as administrator drops chat-v2's input, so the tools say so instead of trying.
+- Linux (`platform/linux.ts`) needs an X11 display (not Wayland or XWayland) and the command-line tools `xdotool`, `xprop`, `wmctrl`, ImageMagick's `import`, `find`, `grep` and `xdg-open` (Debian: `xdotool x11-utils wmctrl imagemagick xdg-utils`); a missing tool is reported as such. The tools always run with a UTF-8 locale.
+  - It can't read controls yet, so ui_elements fails and the Linux prompt tells the model to work from screenshots and pixels.
+  - Linux can't hide windows from capture, so when chat-v2 is in front a screenshot first brings the remembered app back. The overlay isn't shown on Linux (without a compositor X11 draws it solid black over the screen); set `CHAT_V2_LINUX_OVERLAY=1` to show it on a desktop with a compositor.
+  - Focus: restoreFocus falls back to the next app window if the remembered one closed, skips panels, docks and desktop windows, and fails if the app won't come to the front, so input never lands in chat-v2.
+  - Typing: ASCII goes in short `xdotool type` chunks so Stop never cuts a key press in half. Non-ASCII characters are sent as Unicode key presses, capitals with Shift, because `xdotool type` lowercases capital non-ASCII letters.
+  - Keys: names and punctuation are mapped to X keysyms (`ctrl+/` → `ctrl+slash`), and a key xdotool doesn't know is an error, not a silent no-op.
+  - `open` takes a path, a URL, or an app by its name or command name, never a command line: arguments would run without the approval shell commands need.
 - Every chat-v2 window has content protection while a computer reply runs, so none appears in screenshots. That also hides them from screen sharing for that time.
 
 ## Packaging
@@ -36,6 +43,7 @@ The Windows host (`host.ps1` and `host.cs`) is inlined in `platform/hostSource.t
 ## Tests
 
 - `bun test test/computer`: Control, the tools and the policy against a fake platform, and the real Windows host with read-only calls only.
+- `DISPLAY=:99 bun test test/computer/linux.test.ts`: the Linux parsers, and with an X display, window manager and xterm, the real Linux platform: windows, focus, screenshots, clicks, typing, Stop and file search. Without a display only the parsers run.
 - `bun run build && bun test/computer/render-overlay.ts [dir]`: renders the acting frame, a Show-me step and the notch (also around a MacBook camera) to PNGs without showing a window.
 - `bun test/computer/live-look.ts ["request"]`: one look-only reply with the real SDK (Haiku, teach mode). It uses the Claude Code login.
 - `bun test test/chat.test.ts -t "computer use"`: computer replies through the chat, with a fake `query` and platform.

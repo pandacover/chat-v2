@@ -26,7 +26,7 @@ export type { Platform } from './platform/types'
 export const effortFor = (model: string): 'low' | 'medium' => (/haiku|sonnet/i.test(model) ? 'low' : 'medium')
 
 export interface ComputerUseApi {
-  /** False on Linux, or when the layer was built without a platform. */
+  /** False where computer use can't run (e.g. Linux on Wayland), or when the layer was built without a platform. */
   readonly supported: boolean
   /**
    * The tool set for one reply. The mode is read at every tool call. `stop` is the chat's Stop for
@@ -113,7 +113,7 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
   })
 
   const module = (ctx: RunContext, opts: { mode: () => Mode; stop?: () => void }): ToolModule => {
-    if (!control || !p) throw new Error('Computer use needs Windows or macOS.')
+    if (!control || !p) throw new Error('Computer use needs Windows, macOS, or Linux with an X11 display.')
     const owner: Owner = { sessionId: ctx.sessionId, messageId: ctx.messageId }
     let ended = false
     let calls = 0
