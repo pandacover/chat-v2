@@ -1,12 +1,12 @@
 import { SvelteMap, SvelteSet } from 'svelte/reactivity'
 import { parseContent, type ArtifactBlock } from '@shared/artifacts'
+import type { ComputerWait } from '@shared/computer'
 import type { UpdateState } from '@shared/types'
 import type {
   Attachment,
   BrowserEvent,
   MemoryView,
   Message,
-  ModelInfo,
   Session,
   SessionPatch,
   SessionView,
@@ -52,10 +52,6 @@ class AppState {
   sessions = $state<Session[]>([])
   view = $state<SessionView | null>(null)
   settings = $state<SettingsView | null>(null)
-  models = $state<ModelInfo[]>([])
-  modelsError = $state<string | null>(null)
-  imageModels = $state<ModelInfo[]>([])
-  imageModelsError = $state<string | null>(null)
   artifact = $state<OpenArtifact | null>(null)
   /** Settings is a modal over the chat; the chat stays mounted so drafts and scroll survive. */
   page = $state<'chat' | 'settings'>('chat')
@@ -102,6 +98,13 @@ class AppState {
   control = $state({ active: false, label: '' })
   /** Where the agent's pointer is, in page pixels; `clicks` increments per click for the ripple. */
   cursor = $state({ x: 0, y: 0, visible: false, clicks: 0 })
+
+  /** Whether this computer has computer use (Windows and macOS). */
+  computerSupported = $state(false)
+  /** What computer use waits on the user for, in whichever chat. */
+  computerWait = $state<ComputerWait>(null)
+  /** A Show-me step of the open chat waits: a message sent now answers it. */
+  teaching = $derived(this.computerWait?.kind === 'teach' && this.computerWait.sessionId === this.view?.session.id)
 
   private toastSeq = 0
   private backfilling = new Map<string, Promise<void>>()
@@ -252,6 +255,8 @@ class AppState {
     api.chat.onEvent((e) => this.onEvent(e))
     api.browser.onEvent((e) => this.onBrowserEvent(e))
     api.updates.onEvent((s) => (this.update = s))
+    void api.computer.supported().then((on) => (this.computerSupported = on))
+    void api.computer.waiting().then((w) => (this.computerWait = w))
     void api.updates.get().then((s) => (this.update = s))
     addEventListener('beforeunload', () => this.saveDrafts())
     await Promise.all([this.refreshSessions(), this.loadSettings()])
@@ -260,7 +265,6 @@ class AppState {
     // An unsent new chat is where the user left off; otherwise reopen the latest chat.
     const first = this.sessions[0]
     if (first && !this.drafts.has('')) await this.open(first.id)
-    void this.loadModels()
   }
 
   toast(text: string, kind: Toast['kind'] = 'error') {
@@ -297,24 +301,6 @@ class AppState {
   async setPinned(on: boolean) {
     const view = await this.attempt(() => api.settings.update({ settings: { alwaysOnTop: on } }))
     if (view) this.settings = view
-  }
-
-  async loadModels() {
-    try {
-      this.models = await api.models.list()
-      this.modelsError = null
-    } catch (e) {
-      this.modelsError = describe(e)
-    }
-  }
-
-  async loadImageModels() {
-    try {
-      this.imageModels = await api.models.images()
-      this.imageModelsError = null
-    } catch (e) {
-      this.imageModelsError = describe(e)
-    }
   }
 
   /** Installs a fresh view and catches up any replies that are still streaming. */
@@ -430,6 +416,14 @@ class AppState {
     if (id) await this.attempt(() => api.chat.stop(id))
   }
 
+  async approve(id: string, approved: boolean) {
+    await this.attempt(() => api.computer.approve(id, approved))
+  }
+
+  async teachDone(id: string) {
+    await this.attempt(() => api.computer.teachDone(id))
+  }
+
   async switchBranch(messageId: string) {
     const view = this.view
     if (!view) return
@@ -475,11 +469,14 @@ class AppState {
     try {
       const message = this.find(messageId)
       if (!message) return
-      const { lines, status } = await api.chat.linesSince(messageId, message.lineCount)
+      // A number, not the message: the message is live state that events change meanwhile.
+      const from = message.lineCount
+      const { lines, status } = await api.chat.linesSince(messageId, from)
       const current = this.find(messageId)
-      if (!current) return
+      // A view set meanwhile holds fewer lines than were asked for; its own backfill runs next.
+      if (!current || current.lineCount < from) return
       // Events may have advanced the message while the request was in flight.
-      const fresh = lines.slice(current.lineCount - message.lineCount)
+      const fresh = lines.slice(current.lineCount - from)
       for (const line of fresh) this.appendLine(current, line)
       current.status = status
     } catch {
@@ -512,6 +509,10 @@ class AppState {
         this.toast(`Remembered ${e.added.length === 1 ? quote(e.added[0]!) : `${e.added.length} things about you`}`, 'info')
       else if (e.removed.length > 0)
         this.toast(`Forgot ${e.removed.length === 1 ? quote(e.removed[0]!) : `${e.removed.length} things about you`}`, 'info')
+      return
+    }
+    if (e.type === 'computer') {
+      this.computerWait = e.waiting
       return
     }
     if (e.type === 'title') {

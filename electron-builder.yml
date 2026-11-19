@@ -10,7 +10,15 @@ files:
   - out/**
   - package.json
   - "!out-test/**"
+  # The Claude Agent SDK is the one package outside out/ (see electron.vite.config.ts), and it
+  # starts Claude Code, a native binary of about 370 MB per platform: each build ships only the
+  # one for its own platform and processor.
+  - "!node_modules/@anthropic-ai/claude-agent-sdk-*/**"
+  - "node_modules/@anthropic-ai/claude-agent-sdk-${platform}-${arch}/**"
 asar: true
+# Outside the archive, where it can run; src/main/index.ts starts it from there.
+asarUnpack:
+  - "node_modules/@anthropic-ai/claude-agent-sdk-*/**"
 # The UI is English-only, so Chromium's other locale packs (about 48 MB) are left out.
 # "en-US" also keeps macOS's en.lproj.
 electronLanguages: [en-US]
@@ -46,15 +54,10 @@ mac:
   # audio-input entitlement.
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
-  # The screen capture helper (scripts/build-mac-capture.ts), outside the asar so it can run.
-  # Already universal, so the universal build keeps it as it is; signed with the app.
-  extraResources:
-    - from: native/mac-capture/out/chat-v2-capture
-      to: chat-v2-capture
   extendInfo:
     NSMicrophoneUsageDescription: chat-v2 uses the microphone for voice input.
-    # Computer use types through System Events when it can't post the characters itself.
-    NSAppleEventsUsageDescription: chat-v2 uses System Events to type into apps during computer use.
+    # Computer use drives other apps through System Events (osascript) on macOS.
+    NSAppleEventsUsageDescription: chat-v2 uses other apps for you when you turn on computer use in a chat.
   # One build per architecture: a universal app carries both and is twice the size. Apps from
   # before the split download "-universal.dmg": release.yml uploads the Intel DMG under that name
   # too (it runs on both through Rosetta, and the next update moves Apple silicon to arm64).

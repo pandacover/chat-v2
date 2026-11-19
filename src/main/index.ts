@@ -1,27 +1,29 @@
+import { mkdirSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
-import { BrowserWindow, type WebContents, WebContentsView, app, autoUpdater as nativeUpdater, nativeTheme, safeStorage, screen, session, shell, webContents } from 'electron'
+import { query } from '@anthropic-ai/claude-agent-sdk'
+import { BrowserWindow, type WebContents, WebContentsView, app, autoUpdater as nativeUpdater, nativeTheme, safeStorage, session, shell, webContents } from 'electron'
 import { Effect, Layer, ManagedRuntime } from 'effect'
 import { adUrlPatterns } from '@shared/blocklist'
 import type { BrowserEvent, StreamEvent } from '@shared/types'
 import { type MainServices, pinWindow, registerIpc } from './ipc'
-import { killAllChildren, runningChildren, stopAllChildren, trackChild } from './helperProcess'
+import { killAllChildren, runningChildren, stopAllChildren, trackChild } from './children'
 import { setAppMenu } from './menu'
 import { handleProtocols, registerSchemes } from './protocols'
 import { initUpdater, offerMoveToApplications } from './updater'
 import { AppPaths } from './services/AppPaths'
-import { Sketches } from './services/Sketches'
 import { Attachments } from './services/Attachments'
 import { shrinkImage } from './images'
 import { Browser } from './services/Browser'
 import { Broadcaster, Chat } from './services/Chat'
-import { Computer } from './services/Computer'
-import { electronChatWindows, electronOverlay, electronScreen, macHasPermissions, macPermissions, macScreen } from './desktop'
-import { macDriver } from './macHelper'
-import { windowsDriver } from './winHelper'
+import { Agent, type AgentDeps, type QueryFn } from './agent/driver'
+import type { RunContext } from './agent/module'
+import { ComputerUse, type Platform, makePlatform, supported } from './computer'
+import { makeElectronOverlay } from './computer/overlay'
+import { isSensitive } from './memory'
 import { Db } from './services/Db'
 import { ElevenLabs } from './services/ElevenLabs'
-import { OpenRouter } from './services/OpenRouter'
 import { type SecretCipher, SettingsStore } from './services/SettingsStore'
 
 registerSchemes()
@@ -59,7 +61,7 @@ const quitLog = (step: string) => console.log(`[quit] ${step} +${Math.round(perf
 
 /**
  * The first request to quit (Cmd+Q, the Dock, an update): from here the app looks gone at once,
- * and the helper processes are asked to exit, before the services close.
+ * and the child processes are asked to exit, before the services close.
  */
 const beginQuit = (why: string) => {
   if (quitting) return
@@ -134,46 +136,93 @@ const stopWorkersAfterClose = () =>
       })
   }, 1000)
 
+const load = createRequire(__filename)
+
+/**
+ * The Claude Code binary of a packaged app. The SDK looks for it beside itself, inside app.asar,
+ * where nothing can run; electron-builder unpacks it next to the archive (asarUnpack).
+ */
+const claudeBinary = () =>
+  load
+    .resolve(`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/claude${process.platform === 'win32' ? '.exe' : ''}`)
+    .replace(/app\.asar([\\/])/, 'app.asar.unpacked$1')
+
+const agentDeps = (root: string): AgentDeps => {
+  const configDir = join(root, 'claude')
+  mkdirSync(configDir, { recursive: true })
+  return {
+    // CHAT_V2_FAKE_QUERY (tests only): a module whose `query` stands in for the SDK's.
+    query: process.env.CHAT_V2_FAKE_QUERY ? (load(process.env.CHAT_V2_FAKE_QUERY) as { query: QueryFn }).query : query,
+    configDir,
+    cwd: root,
+    clientApp: `chat-v2/${app.getVersion()}`,
+    ...(app.isPackaged ? { executable: claudeBinary() } : {}),
+    // Started as the SDK would, but tracked, so quitting ends every Claude Code process.
+    spawn: (o) => {
+      const child = trackChild(spawn(o.command, o.args, { cwd: o.cwd, env: o.env, signal: o.signal, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }))
+      child.stderr.on('data', (chunk: Buffer) => console.warn(`[claude] ${chunk.toString().trimEnd()}`))
+      return child
+    }
+  }
+}
+
+/** The computer-use overlay window and Stop shortcut; made once the app is ready. */
+let overlay: ReturnType<typeof makeElectronOverlay> | null = null
+
+/**
+ * Computer use. `remember` keeps a fact the model was told to save in memory, as one learned in
+ * that chat, unless memory is off or the fact looks like a secret.
+ */
+const computerLayer = Layer.unwrap(
+  Effect.gen(function* () {
+    const db = yield* Db
+    const settings = yield* SettingsStore
+    const remember = async (fact: string, ctx: RunContext) => {
+      if (!(await Effect.runPromise(settings.get)).memoryModel) throw new Error('Memory is off in Settings, so nothing was saved.')
+      if (isSensitive(fact)) throw new Error("That looks like a password, key or account number, which memory doesn't keep.")
+      const saved = await Effect.runPromise(db.use((d) => d.changeMemory({ add: [fact], update: [], remove: [] }, { kind: 'learned', sessionId: ctx.sessionId })))
+      if (saved) broadcaster.send({ type: 'memory', sessionId: ctx.sessionId, added: saved.added, removed: saved.removed })
+    }
+    // CHAT_V2_FAKE_COMPUTER (tests only): a module whose `platform` stands in for the real one,
+    // or whose `wrap` changes it (a live test refuses everything that would act).
+    const fake = process.env.CHAT_V2_FAKE_COMPUTER ? (load(process.env.CHAT_V2_FAKE_COMPUTER) as { platform?: Platform; wrap?: (p: Platform) => Platform }) : null
+    const real = supported && !fake?.platform ? makePlatform({ track: trackChild }) : null
+    const platform = fake?.platform ?? (real && fake?.wrap ? fake.wrap(real) : real)
+    // After a press on the overlay, focus goes back to the app the user was in (the one under it).
+    const refocus = () => void platform?.remember().then(() => platform.restoreFocus()).catch(() => undefined)
+    overlay = makeElectronOverlay({ refocus })
+    return ComputerUse.layer({ platform, overlay, remember })
+  })
+)
+
+/**
+ * An approval waits in its chat, and the app computer use drives often covers the chat window.
+ * The windows come to the front without taking focus, so a key meant for that app can't answer
+ * it. Answering focuses the chat, and the next input gives focus back to the app first.
+ */
+const raiseForApproval = () => {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win === overlay?.window || win.isDestroyed() || !win.isVisible()) continue
+    if (win.isMinimized()) win.showInactive()
+    win.moveTop()
+  }
+}
+
 const makeRuntime = () => {
   const root = app.getPath('userData')
   const paths = AppPaths.layer(root)
   const db = Db.layer(join(root, 'chat.db'))
   const settings = SettingsStore.layer(cipher).pipe(Layer.provide(paths))
   const base = Layer.mergeAll(db, settings, paths)
-  const mac = process.platform === 'darwin'
-  const overlay = electronOverlay(headless)
-  // On a Mac the capture helper also lists the windows and types, faster than the input helper.
-  const macCapture = mac ? macScreen(overlay) : null
-  const computer = Computer.layer({
-    driver:
-      process.platform === 'win32'
-        ? windowsDriver(join(root, 'computer-helper.ps1'))
-        : mac
-          ? macDriver(
-              join(root, 'computer-helper.js'),
-              () => {
-                const d = screen.getPrimaryDisplay()
-                return { w: d.size.width, h: d.size.height, scale: d.scaleFactor }
-              },
-              macCapture?.input
-            )
-          : null,
-    os: mac ? 'darwin' : 'win32',
-    ...(mac ? { permissions: macPermissions, hasPermissions: macHasPermissions } : {}),
-    screen: macCapture ?? electronScreen,
-    overlay,
-    chatWindows: electronChatWindows(headless),
-    selfPid: process.pid
-  })
-  const providers = Layer.mergeAll(OpenRouter.layer, ElevenLabs.layer, Attachments.layerWith(shrinkImage), Browser.layer(emitBrowser, (id) => webContents.fromId(id)), computer).pipe(
+  const providers = Layer.mergeAll(Agent.layer(agentDeps(root)), ElevenLabs.layer, Attachments.layerWith(shrinkImage), Browser.layer(emitBrowser, (id) => webContents.fromId(id))).pipe(
     Layer.provideMerge(base)
   )
+  const computer = computerLayer.pipe(Layer.provide(base))
   const chat = Chat.layer.pipe(
-    Layer.provide(providers),
+    Layer.provide(Layer.merge(providers, computer)),
     Layer.provide(Layer.succeed(Broadcaster, broadcaster))
   )
-  const sketches = Sketches.layer.pipe(Layer.provide(providers))
-  return ManagedRuntime.make(Layer.mergeAll(chat, sketches, providers))
+  return ManagedRuntime.make(Layer.mergeAll(chat, providers, computer))
 }
 
 let runtime: ManagedRuntime.ManagedRuntime<MainServices | AppPaths, unknown> | null = null
@@ -278,6 +327,11 @@ app.whenReady().then(async () => {
   // clicking an ad goes where it leads.
   browserSession.webRequest.onBeforeRequest({ urls: adUrlPatterns() }, (details, callback) => callback({ cancel: details.resourceType !== 'mainFrame' }))
 
+  const computer = await rt.runPromise(ComputerUse.use(Effect.succeed))
+  computer.subscribe((waiting) => {
+    if (waiting?.kind === 'approval') raiseForApproval()
+  })
+
   registerIpc(rt, isQuitting)
   handleProtocols(rt, isQuitting)
   setAppMenu()
@@ -319,14 +373,14 @@ app.on('before-quit', (event) => {
 
 app.on('will-quit', () => quitLog('will-quit'))
 app.on('quit', () => quitLog('quit'))
-// Whatever helper is still running when the process ends is killed with it.
+// Whatever child is still running when the process ends is killed with it.
 process.on('exit', () => killAllChildren())
 
 // Installing an update closes the windows before before-quit, so quitting starts here for it.
 if (process.platform === 'darwin') nativeUpdater.on('before-quit-for-update', () => beginQuit('before-quit-for-update'))
 
 /**
- * CHAT_V2_QUIT_TEST (scripts/quit-smoke.ts): starts a stand-in helper process that never exits on
+ * CHAT_V2_QUIT_TEST (scripts/quit-smoke.ts): starts a stand-in child process that never exits on
  * its own, prints its pid, and quits. `hang` also makes closing the services never finish.
  */
 const quitTest = () => {

@@ -1,13 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import { parseContent } from '../src/shared/artifacts'
 import { makeLineBuffer } from '../src/shared/lines'
-import { parseSseLine } from '../src/main/sse'
 import { splitSteps, stepLine, summarizeSteps } from '../src/shared/steps'
 import { normalizeSettings, DEFAULT_SETTINGS } from '../src/main/services/SettingsStore'
 import { classify } from '../src/main/services/Attachments'
-import { DESKTOP_TRIMMED, DROPPED_SNAPSHOT, STALE_DESKTOP_CHARS, STALE_SNAPSHOT_CHARS, cleanTitle, pruneDesktop, pruneSnapshots } from '../src/main/services/Chat'
-import type { ChatMessage } from '../src/main/services/OpenRouter'
-import { clipElements } from '../src/main/agent'
+import { cleanTitle } from '../src/main/services/Chat'
+import { clipElements } from '../src/main/agent/browser'
 import { AD_HOSTS, adUrlPatterns } from '../src/shared/blocklist'
 
 const feed = (deltas: string[]) => {
@@ -44,39 +42,6 @@ describe('line buffer', () => {
   })
 })
 
-describe('sse', () => {
-  test('parses deltas, done, comments and errors', () => {
-    expect(parseSseLine(': OPENROUTER PROCESSING')).toEqual([])
-    expect(parseSseLine('')).toEqual([])
-    expect(parseSseLine('data: [DONE]')).toEqual([{ type: 'done' }])
-    expect(parseSseLine('data: {"choices":[{"delta":{"content":"hi"}}]}')).toEqual([{ type: 'delta', text: 'hi' }])
-    expect(parseSseLine('data: {"choices":[{"delta":{"role":"assistant"}}]}')).toEqual([])
-    expect(parseSseLine('data: {"error":{"message":"rate limited"}}')).toEqual([{ type: 'error', message: 'rate limited' }])
-  })
-
-  test('parses the usage chunk OpenRouter sends last', () => {
-    const line =
-      'data: ' +
-      JSON.stringify({
-        choices: [],
-        usage: { prompt_tokens: 194, completion_tokens: 2, total_tokens: 196, cost: 0.95, prompt_tokens_details: { cached_tokens: 10 }, completion_tokens_details: { reasoning_tokens: 1 } }
-      })
-    expect(parseSseLine(line)).toEqual([
-      { type: 'usage', usage: { promptTokens: 194, completionTokens: 2, totalTokens: 196, cachedTokens: 10, reasoningTokens: 1, cost: 0.95 } }
-    ])
-  })
-
-  test('parses streamed tool-call fragments', () => {
-    const first = parseSseLine(
-      'data: ' +
-        JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'browser_click', arguments: '' } }] } }] })
-    )
-    expect(first).toEqual([{ type: 'tool', index: 0, id: 'call_1', name: 'browser_click' }])
-    const next = parseSseLine('data: ' + JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"ref":' } }] } }] }))
-    expect(next).toEqual([{ type: 'tool', index: 0, args: '{"ref":' }])
-  })
-})
-
 describe('artifacts', () => {
   test('splits text and complete artifacts', () => {
     const blocks = parseContent(
@@ -84,14 +49,14 @@ describe('artifacts', () => {
     )
     expect(blocks).toEqual([
       { type: 'text', content: 'Here you go:\n' },
-      { type: 'artifact', identifier: 'clock', title: 'Clock', kind: 'html', content: '<!doctype html><p>hi</p>', complete: true },
+      { type: 'artifact', identifier: 'clock', title: 'Clock', content: '<!doctype html><p>hi</p>', complete: true },
       { type: 'text', content: '\nEnjoy.' }
     ])
   })
 
   test('marks an unterminated artifact as incomplete and strips code fences', () => {
     const blocks = parseContent('<artifact identifier="a" title="A">\n```html\n<div>')
-    expect(blocks).toEqual([{ type: 'artifact', identifier: 'a', title: 'A', kind: 'html', content: '```html\n<div>', complete: false }])
+    expect(blocks).toEqual([{ type: 'artifact', identifier: 'a', title: 'A', content: '```html\n<div>', complete: false }])
     const fenced = parseContent('<artifact title="B">\n```html\n<b>x</b>\n```\n</artifact>')
     expect(fenced[0]).toMatchObject({ content: '<b>x</b>', identifier: 'artifact-1', complete: true })
   })
@@ -147,12 +112,22 @@ describe('ad and tracker blocklist', () => {
 })
 
 describe('settings', () => {
-  test('falls back to defaults for bad values', () => {
-    expect(normalizeSettings({ temperature: 'hot', pdfEngine: 'nope', systemPrompt: 'Be brief.' })).toEqual({
+  test('falls back to defaults for bad values, and drops keys it does not know', () => {
+    expect(normalizeSettings({ effort: 'extreme', auth: 'magic', alwaysOnTop: 'yes', systemPrompt: 'Be brief.', temperature: 0.3 })).toEqual({
       ...DEFAULT_SETTINGS,
       systemPrompt: 'Be brief.'
     })
-    expect(normalizeSettings({ temperature: 9 }).temperature).toBe(2)
+  })
+
+  test("OpenRouter's models from before become Claude's; '' still turns titles and memory off", () => {
+    const old = normalizeSettings({ defaultModel: 'deepseek/deepseek-v4.1-flash', titleModel: 'mistralai/mistral-nemo', memoryModel: '', pdfEngine: 'native', visionModel: 'x/y' })
+    expect(old).toEqual({ ...DEFAULT_SETTINGS, memoryModel: '' })
+    expect(normalizeSettings({ defaultModel: 'claude-opus-5-5', titleModel: '', auth: 'apiKey', effort: 'max' })).toMatchObject({
+      defaultModel: 'claude-opus-5-5',
+      titleModel: '',
+      auth: 'apiKey',
+      effort: 'max'
+    })
   })
 })
 
@@ -277,13 +252,6 @@ describe('quoting', () => {
   })
 })
 
-describe('pricing', () => {
-  test('formats per-million prices', async () => {
-    const { money } = await import('../src/renderer/src/lib/pricing')
-    expect([15, 3.75, 3, 0.3, 0.25, 0.075, 0.025, 0.0005, 0].map(money)).toEqual(['$15', '$3.75', '$3', '$0.30', '$0.25', '$0.075', '$0.025', '$0.0005', '$0'])
-  })
-})
-
 describe('browser snapshots', () => {
   const line = (i: number, offscreen = false) => `[e${i}] button "Button number ${i}"${offscreen ? ' offscreen' : ''}`
 
@@ -294,32 +262,4 @@ describe('browser snapshots', () => {
     expect(clipped.split('\n')).toEqual([line(1, true), line(2), line(4), '[1 more elements not listed. Scroll to bring them on screen.]'])
   })
 
-  test('stale snapshots are dropped together once they add up, never the newest', () => {
-    const big = 'x'.repeat(STALE_SNAPSHOT_CHARS / 2)
-    const snaps = [{ role: 'tool', content: big }, { role: 'tool', content: big }] as ChatMessage[]
-    pruneSnapshots(snaps)
-    expect(snaps.map((m) => m.content)).toEqual([big, big])
-    snaps.push({ role: 'tool', content: big } as ChatMessage, { role: 'tool', content: 'newest' } as ChatMessage)
-    const all = [...snaps]
-    pruneSnapshots(snaps)
-    expect(all.map((m) => m.content)).toEqual([DROPPED_SNAPSHOT, DROPPED_SNAPSHOT, DROPPED_SNAPSHOT, 'newest'])
-    expect(snaps.map((m) => m.content)).toEqual(['newest'])
-  })
-
-  test("old desktop results lose their window lists together once they add up, keeping what each action did", () => {
-    const windows = `Screenshot: 1280×720 pixels.\n${'- "A window" (app.exe) at 0,0 100×100\n'.repeat(80)}`
-    const result = (did: string) => ({ result: { role: 'tool', content: `${did}\n${windows}` } as ChatMessage, stale: did })
-    const runs = [result('After this action: Nothing on the screen changed.'), result('After this action: The screen changed where you clicked (10,10).')]
-    pruneDesktop(runs)
-    expect(runs).toHaveLength(2)
-    const all = [...runs, ...Array.from({ length: 4 }, (_, i) => result(`step ${i}`)), result('newest')]
-    runs.push(...all.slice(2))
-    pruneDesktop(runs)
-    expect(all[0]!.result.content).toBe(`After this action: Nothing on the screen changed.\n${DESKTOP_TRIMMED}`)
-    expect(all.at(-2)!.result.content).toBe(`step 3\n${DESKTOP_TRIMMED}`)
-    // The newest is the screen now: it keeps its windows, and stays to be cut next time.
-    expect(all.at(-1)!.result.content).toContain(windows)
-    expect(runs.map((r) => r.stale)).toEqual(['newest'])
-    expect(STALE_DESKTOP_CHARS).toBeLessThan(windows.length * 6)
-  })
 })

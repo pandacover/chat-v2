@@ -9,16 +9,14 @@ import { publishArtifact } from './protocols'
 import { Attachments } from './services/Attachments'
 import { Browser } from './services/Browser'
 import { Chat, NEW_SESSION_TITLE } from './services/Chat'
-import { Computer } from './services/Computer'
-import { PROTECTED_TITLES, protectedAppsFor } from '@shared/computer'
+import { Agent } from './agent/driver'
+import { ComputerUse } from './computer'
 import { Db, type DbApi } from './services/Db'
 import { isSensitive } from './memory'
 import { ElevenLabs } from './services/ElevenLabs'
-import { OpenRouter } from './services/OpenRouter'
 import { SettingsStore } from './services/SettingsStore'
-import { Sketches } from './services/Sketches'
 
-export type MainServices = Db | Chat | Attachments | SettingsStore | OpenRouter | ElevenLabs | Browser | Sketches | Computer
+export type MainServices = Db | Chat | Attachments | SettingsStore | Agent | ElevenLabs | Browser | ComputerUse
 
 type Handler = (...args: any[]) => Effect.Effect<unknown, { readonly _tag: string; readonly message: string }, MainServices>
 
@@ -116,8 +114,9 @@ const handlers: Record<string, Handler> = {
       const db = yield* Db
       const chat = yield* Chat
       for (const messageId of yield* db.use((d) => d.streamingIds(str(id, 'id')))) yield* chat.stop(messageId)
-      const orphanFiles = yield* db.use((d) => d.deleteSession(id))
-      yield* (yield* Attachments).removeFiles(orphanFiles)
+      const orphans = yield* db.use((d) => d.deleteSession(id))
+      yield* (yield* Attachments).removeFiles(orphans.files)
+      yield* Agent.use((a) => Effect.sync(() => a.forget(orphans.agentSessions)))
     }),
   'sessions:fork': (sessionId, messageId) =>
     Effect.gen(function* () {
@@ -208,30 +207,11 @@ const handlers: Record<string, Handler> = {
       yield* Effect.promise(() => shell.openPath(view.configPath))
     }),
 
-  'models:list': () => OpenRouter.use((o) => o.listModels),
-  'models:images': () => OpenRouter.use((o) => o.listImageModels),
-
   'stt:microphone': () => Effect.promise(microphoneAccess),
   'stt:transcribe': (audio: ArrayBuffer, mime) =>
     ElevenLabs.use((e) => e.transcribe(new Uint8Array(audio), str(mime, 'mime'))),
 
   'artifacts:publish': (html) => Effect.sync(() => publishArtifact(str(html, 'html'))),
-
-  'boards:get': (messageId, identifier) => Db.use((db) => db.use((d) => d.getBoard(str(messageId, 'messageId'), str(identifier, 'identifier')))),
-  'boards:save': (messageId, identifier, doc) =>
-    Db.use((db) => db.use((d) => d.saveBoard(str(messageId, 'messageId'), str(identifier, 'identifier'), doc))),
-  'boards:sketch': (prompt, variant) =>
-    Sketches.use((s) => s.get(str(prompt, 'prompt'), typeof variant === 'number' ? variant : 0)),
-  'boards:savePng': (name, data: ArrayBuffer) =>
-    Effect.promise(async () => {
-      const file = `${str(name, 'name').replace(/[\\/:*?"<>|]+/g, '-') || 'mood-board'}.png`
-      const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
-      const options = { defaultPath: join(app.getPath('pictures'), file), filters: [{ name: 'PNG image', extensions: ['png'] }] }
-      const result = win ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options)
-      if (result.canceled || !result.filePath) return null
-      writeFileSync(result.filePath, new Uint8Array(data))
-      return result.filePath
-    }),
 
   'updates:get': () => Effect.sync(updateState),
   'updates:check': () => Effect.promise(checkForUpdates),
@@ -269,10 +249,10 @@ const handlers: Record<string, Handler> = {
     }),
   'browser:reveal': (path) => Effect.sync(() => shell.showItemInFolder(str(path, 'path'))),
 
-  'computer:tips': () => Computer.use((c) => c.tips),
-  'computer:removeTip': (id) => Computer.use((c) => c.removeTip(str(id, 'id'))),
-  'computer:protectedApps': () =>
-    Effect.succeed([...protectedAppsFor(process.platform === 'darwin' ? 'darwin' : 'win32').map((a) => a.label), ...PROTECTED_TITLES.map((t) => t.label)])
+  'computer:supported': () => ComputerUse.use((c) => Effect.succeed(c.supported)),
+  'computer:waiting': () => ComputerUse.use((c) => Effect.sync(c.waiting)),
+  'computer:approve': (id, approved) => ComputerUse.use((c) => c.approve(str(id, 'id'), approved === true)),
+  'computer:teachDone': (id) => ComputerUse.use((c) => c.teachDone(str(id, 'id')))
 }
 
 /** Calls made while the app quits are never answered; the window closes before it could use one. */
@@ -296,19 +276,4 @@ export const registerIpc = (runtime: ManagedRuntime.ManagedRuntime<MainServices,
       ).catch((e: unknown) => (quitting() ? unanswered : Promise.reject(e)))
     )
   }
-
-  // Computer mode is on while any window shows a chat with computer use switched on.
-  const computerWindows = new Set<number>()
-  const applyMode = () => void runtime.runPromise(Computer.use((c) => c.setMode(computerWindows.size > 0))).catch(() => undefined)
-  ipcMain.on('computer:mode', (event, on: unknown) => {
-    const id = event.sender.id
-    if (on === true && !computerWindows.has(id)) {
-      computerWindows.add(id)
-      event.sender.once('destroyed', () => {
-        if (computerWindows.delete(id) && !quitting()) applyMode()
-      })
-    } else if (on !== true) computerWindows.delete(id)
-    applyMode()
-  })
-  ipcMain.on('computer:prewarm', () => void runtime.runPromise(Computer.use((c) => c.prewarm)).catch(() => undefined))
 }

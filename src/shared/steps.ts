@@ -48,8 +48,11 @@ export const splitSteps = (content: string): Segment[] => {
   return out
 }
 
-/** Whether a run of steps drove the desktop (computer_* tools) or only the browser. */
-export const isDesktopRun = (steps: Step[]) => steps.some((s) => s.tool.startsWith('computer_'))
+/** Claude Code's own tools, which only computer use brings (its file and web search). */
+const COMPUTER_BUILTINS = new Set(['Read', 'Glob', 'Grep', 'Bash', 'WebSearch'])
+
+/** Whether a run of steps used the computer (its tools or the built-ins it brings) or only the browser. */
+export const isDesktopRun = (steps: Step[]) => steps.some((s) => s.tool.startsWith('computer_') || COMPUTER_BUILTINS.has(s.tool))
 
 const usedWhat = (steps: Step[]) => (isDesktopRun(steps) ? 'Used the computer' : 'Used the browser')
 

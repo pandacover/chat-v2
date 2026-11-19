@@ -1,8 +1,9 @@
 <script lang="ts">
   import { tip } from '@/lib/tooltip'
   import { untrack } from 'svelte'
+  import { stopShortcutLabel } from '@shared/computer'
   import type { Attachment } from '@shared/types'
-  import { modKey, shortcut } from '@/lib/keys'
+  import { isMac, modKey, shortcut } from '@/lib/keys'
   import { fade, pop } from '@/lib/motion'
   import { startRecording, type Recording } from '@/lib/recorder'
   import { app } from '@/lib/store.svelte'
@@ -49,6 +50,10 @@
 
   const busy = $derived(app.streaming)
   const canSend = $derived((text.trim() !== '' || app.draftAttachments.length > 0) && uploading === 0 && app.analyzing.size === 0 && !busy)
+  // While a Show-me step waits, a message answers it (the reply goes on); attachments stay in the draft.
+  const answering = $derived(app.teaching && text.trim() !== '')
+  const computerOn = $derived(computerEnabled && app.computerSupported)
+  const stopping = $derived(busy && !answering)
 
   export const focus = () => textarea?.focus()
 
@@ -67,15 +72,7 @@
     textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`
   }
 
-  // Writing in a computer chat opens the screen stream ahead of the reply (it closes on its own
-  // when idle), so the reply's first look at the screen doesn't wait for it.
-  let prewarmed = 0
-  const oninput = () => {
-    fit()
-    if (!computerEnabled || !window.api.computer.supported || Date.now() - prewarmed < 5000) return
-    prewarmed = Date.now()
-    window.api.computer.prewarm()
-  }
+  const oninput = fit
 
   // Each chat keeps its own unsent text and attachments ('' is the new chat).
   const key = $derived(app.view?.session.id ?? '')
@@ -130,7 +127,15 @@
     void window.api.attachments.discard(a.id)
   }
 
+  const answer = async () => {
+    const body = text
+    text = ''
+    queueMicrotask(fit)
+    if (!(await app.send(body, []))) text = body
+  }
+
   const submit = async () => {
+    if (answering) return answer()
     if (!canSend) return
     const body = text
     const files = app.draftAttachments
@@ -305,7 +310,7 @@
       onfocus={() => (focused = true)}
       onblur={() => (focused = false)}
       rows="1"
-      {placeholder}
+      placeholder={app.teaching ? 'Tell it what happened, or press Done' : placeholder}
       class="block max-h-[240px] w-full resize-none bg-transparent px-4 pt-3.5 pb-1.5 text-[15px] leading-relaxed outline-none placeholder:text-muted {recording || transcribing
         ? 'opacity-0'
         : ''}"
@@ -359,7 +364,7 @@
     >
       <Icon name="globe" size={14} /><span class="hidden @sm:inline">Browser</span>
     </button>
-    {#if window.api.computer.supported}
+    {#if app.computerSupported}
       <button
         class="flex h-7 items-center gap-1.5 rounded-full px-[7px] text-[12.5px] transition-colors {computerEnabled
           ? 'bg-fg text-bg'
@@ -367,9 +372,7 @@
         role="switch"
         aria-checked={computerEnabled}
         aria-label="Computer"
-        use:tip={computerEnabled
-          ? 'Sees your screen and works in your apps with its own cursor. Your mouse stays yours.'
-          : 'Let the assistant use your screen in this chat'}
+        use:tip={computerEnabled ? 'The assistant can see your screen and use your apps in this chat' : 'Let the assistant see your screen and use your apps in this chat'}
         onclick={oncomputer}
       >
         <Icon name="monitor" size={14} /><span class="hidden @sm:inline">Computer</span>
@@ -378,19 +381,23 @@
     <span class="ml-auto"></span>
     <ModelPicker placement="up" value={model} onchange={onmodel} />
     <button
-      class="ml-1 grid size-8 place-items-center rounded-full transition-[background-color,color,transform] duration-150 active:scale-95 {busy
+      class="ml-1 grid size-8 place-items-center rounded-full transition-[background-color,color,transform] duration-150 active:scale-95 {stopping
         ? 'bg-fg text-bg'
-        : canSend
+        : canSend || answering
           ? 'bg-accent text-on-accent'
           : 'bg-hover text-muted'}"
-      use:tip={busy ? 'Stop generating' : { text: 'Send', kbd: 'Enter' }}
-      disabled={!busy && !canSend}
-      onclick={() => (busy ? app.stop() : submit())}
+      use:tip={stopping
+        ? computerOn
+          ? { text: 'Stop. Works from any app too', kbd: stopShortcutLabel(isMac) }
+          : 'Stop generating'
+        : { text: answering ? 'Answer the step' : 'Send', kbd: 'Enter' }}
+      disabled={!stopping && !canSend && !answering}
+      onclick={() => (stopping ? app.stop() : submit())}
     >
-      {#key busy}
-        <span in:pop={{ duration: 160 }}><Icon name={busy ? 'stop' : 'arrowUp'} size={16} stroke={busy ? 2.4 : 2} /></span>
+      {#key stopping}
+        <span in:pop={{ duration: 160 }}><Icon name={stopping ? 'stop' : 'arrowUp'} size={16} stroke={stopping ? 2.4 : 2} /></span>
       {/key}
-      <span class="sr-only">{busy ? 'Stop' : 'Send'}</span>
+      <span class="sr-only">{stopping ? 'Stop' : 'Send'}</span>
     </button>
   </div>
 </div>

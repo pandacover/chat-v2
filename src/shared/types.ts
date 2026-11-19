@@ -1,4 +1,5 @@
 // Types shared by the main process, preload bridge and renderer.
+import type { ComputerMode, ComputerWait } from './computer'
 
 export type Role = 'root' | 'system' | 'user' | 'assistant'
 
@@ -35,16 +36,25 @@ export interface Attachment {
   analysis: AudioAnalysis | null
 }
 
-/** Tokens and OpenRouter credits for one reply, summed over every request it made. */
+/**
+ * Tokens and dollars for one reply, summed over every model call it made. Replies from before
+ * Claude (OpenRouter) have no cacheWriteTokens, and their cost is in OpenRouter credits, which
+ * were dollars too.
+ */
 export interface Usage {
+  /** Every input token, cached or not. */
   promptTokens: number
   completionTokens: number
   totalTokens: number
+  /** Input read from the prompt cache. */
   cachedTokens: number
+  /** Input written to the prompt cache. */
+  cacheWriteTokens?: number
+  /** Thinking, counted in completionTokens. */
   reasoningTokens: number
-  /** OpenRouter credits charged; null when the provider did not report a cost. */
+  /** US dollars, as Claude Code estimates them; null when not reported (a stopped reply). */
   cost: number | null
-  /** Model calls behind the reply (more than one when it used the browser). */
+  /** Model calls behind the reply (more than one when it used tools). */
   requests: number
 }
 
@@ -76,8 +86,13 @@ export interface Session {
   forkedFromSessionId: string | null
   /** When on, the model gets browser tools for this chat. */
   browserEnabled: boolean
-  /** When on, the model can see the screen and use the mouse and keyboard (and the browser). */
+  /** When on, the model can see the screen and use the user's apps (Windows and macOS). */
   computerEnabled: boolean
+  /**
+   * What the chat's last message was read as: operate the computer (do), or show each step for the
+   * user to do (teach). Decided from each message; a follow-up like "next" keeps it.
+   */
+  computerMode: ComputerMode
   /** When the chat was pinned to the top of the sidebar; null when it isn't. */
   pinnedAt: number | null
   createdAt: number
@@ -146,57 +161,29 @@ export interface SessionView {
   path: PathNode[]
 }
 
+/** How hard Claude thinks before it answers; higher is slower and costs more. */
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
 export interface Settings {
   defaultModel: string
   systemPrompt: string
-  temperature: number
+  effort: Effort
+  /** Replies run on the Claude Code sign-in (`claude`, then /login), or on an Anthropic API key. */
+  auth: 'login' | 'apiKey'
   sttModel: string
   sttLanguage: string
-  pdfEngine: 'cloudflare-ai' | 'mistral-ocr' | 'native'
   artifactsEnabled: boolean
-  /** Answers requests that contain images when the chat's model cannot see them; '' turns this off. */
-  visionModel: string
-  /** Draws the sketches on mood boards (an OpenRouter image model). */
-  sketchModel: string
   /** Names new chats from their first message; '' keeps the start of the message as the title. */
   titleModel: string
   /** Picks facts about the user out of their messages; '' turns memory off (nothing learned or sent). */
   memoryModel: string
   /** Keeps the window above other apps on the same desktop. */
   alwaysOnTop: boolean
-  /** Apps or window-title words computer use must never see or touch, on top of the built-in list. */
-  computerProtected: string[]
-  /**
-   * Lets computer use borrow the real pointer for a moment where nothing else works: drags (apps
-   * follow a drag only from the real mouse), clicks and scrolls in apps that ignore any other kind
-   * (on Windows, UWP, WinUI, XAML islands and WPF; on a Mac, areas an app draws itself), and a click
-   * tried again after it changed nothing. Off, the pointer is never touched and those drags and
-   * clicks mostly don't happen.
-   */
-  computerBorrowPointer: boolean
-  /**
-   * How hard the model thinks before each computer-use step. Low keeps the waits between actions
-   * short; models that don't think, or don't take an effort, ignore it.
-   */
-  computerReasoningEffort: 'minimal' | 'low' | 'medium' | 'high'
-  /**
-   * Runs the tool loop of computer-use replies (a fast model with vision suits it); '' keeps the
-   * chat's model. If it can't see images, the vision model steps in, then the chat's model.
-   */
-  computerModel: string
-}
-
-/** Something the assistant learned about an app while using it, offered again when it's in front. */
-export interface AppTip {
-  id: string
-  app: string
-  tip: string
-  at: number
 }
 
 export interface SettingsView {
   settings: Settings
-  hasOpenRouterKey: boolean
+  hasAnthropicKey: boolean
   hasElevenLabsKey: boolean
   configPath: string
 }
@@ -204,21 +191,8 @@ export interface SettingsView {
 export interface SettingsPatch {
   settings?: Partial<Settings>
   /** `undefined` leaves the key untouched, `''` clears it. */
-  openRouterKey?: string
+  anthropicKey?: string
   elevenLabsKey?: string
-}
-
-export interface ModelInfo {
-  id: string
-  name: string
-  contextLength: number | null
-  inputModalities: string[]
-  /** Set for image-generation models, which are priced per image rather than per token. */
-  image?: boolean
-  /** Whether OpenRouter lists tool calling for this model (needed for browser control). */
-  supportsTools: boolean
-  /** USD per million tokens; null when unknown or variable (routers). */
-  pricing: { input: number | null; output: number | null; cacheRead: number | null; cacheWrite: number | null }
 }
 
 export type StreamEvent =
@@ -230,6 +204,8 @@ export type StreamEvent =
   | { type: 'memory'; sessionId: string; added: string[]; removed: string[] }
   /** A file the assistant added to its reply mid-run (a screenshot it saved for the user). */
   | { type: 'attachment'; messageId: string; attachment: Attachment }
+  /** What computer use waits on the user for (an approval, a Show-me step); null once nothing. */
+  | { type: 'computer'; waiting: ComputerWait }
 
 export interface AppError {
   tag: string
@@ -307,11 +283,6 @@ export interface Api {
     update(patch: SettingsPatch): Promise<SettingsView>
     openConfigFile(): Promise<void>
   }
-  models: {
-    list(): Promise<ModelInfo[]>
-    /** Models that generate images, for mood board sketches. */
-    images(): Promise<ModelInfo[]>
-  }
   stt: {
     /** Asks for microphone access where the OS requires it (macOS); false when it is off. */
     microphone(): Promise<boolean>
@@ -321,27 +292,15 @@ export interface Api {
     /** Registers HTML for the sandboxed artifact:// scheme and returns its URL. */
     publish(html: string): Promise<string>
   }
-  boards: {
-    /** The hand-edited state of a mood board version, or null if it was never edited. */
-    get(messageId: string, identifier: string): Promise<unknown>
-    save(messageId: string, identifier: string, doc: unknown): Promise<void>
-    /** A pencil sketch for a shot as a data URL; cached, so the same prompt is drawn once. */
-    sketch(prompt: string, variant: number): Promise<string>
-    /** Asks where to save a PNG export and writes it; null when the user cancels. */
-    savePng(name: string, data: ArrayBuffer): Promise<string | null>
-  }
   browser: BrowserApi
   computer: {
-    /** False where computer use isn't available (it runs on Windows and macOS). */
-    supported: boolean
-    tips(): Promise<AppTip[]>
-    removeTip(id: string): Promise<AppTip[]>
-    /** The apps and title words that are always protected, for Settings to list. */
-    protectedApps(): Promise<string[]>
-    /** Tells the app whether this window shows a chat with computer use on (the sketch cursor stays up). */
-    setMode(on: boolean): void
-    /** The user is writing in a chat with computer use on: gets the screen ready, so the reply's first look is quick. */
-    prewarm(): void
+    /** False on Linux, where there is no computer use. */
+    supported(): Promise<boolean>
+    /** What computer use waits on right now, for a window that just loaded. */
+    waiting(): Promise<ComputerWait>
+    approve(id: string, approved: boolean): Promise<void>
+    /** Ends the Show-me step `id` as done. */
+    teachDone(id: string): Promise<void>
   }
   updates: {
     get(): Promise<UpdateState>

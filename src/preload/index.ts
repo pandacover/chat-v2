@@ -54,22 +54,12 @@ const api: Api = {
     update: (patch) => call('settings:update', patch),
     openConfigFile: () => call('settings:openConfigFile')
   },
-  models: {
-    list: () => call('models:list'),
-    images: () => call('models:images')
-  },
   stt: {
     microphone: () => call('stt:microphone'),
     transcribe: (audio, mime) => call('stt:transcribe', audio, mime)
   },
   artifacts: {
     publish: (html) => call('artifacts:publish', html)
-  },
-  boards: {
-    get: (messageId, identifier) => call('boards:get', messageId, identifier),
-    save: (messageId, identifier, doc) => call('boards:save', messageId, identifier, doc),
-    sketch: (prompt, variant) => call('boards:sketch', prompt, variant),
-    savePng: (name, data) => call('boards:savePng', name, data)
   },
   updates: {
     get: () => call('updates:get'),
@@ -83,12 +73,10 @@ const api: Api = {
     }
   },
   computer: {
-    supported: process.platform === 'win32' || process.platform === 'darwin',
-    tips: () => call('computer:tips'),
-    removeTip: (id) => call('computer:removeTip', id),
-    protectedApps: () => call('computer:protectedApps'),
-    setMode: (on) => ipcRenderer.send('computer:mode', on === true),
-    prewarm: () => ipcRenderer.send('computer:prewarm')
+    supported: () => call('computer:supported'),
+    waiting: () => call('computer:waiting'),
+    approve: (id, approved) => call('computer:approve', id, approved),
+    teachDone: (id) => call('computer:teachDone', id)
   },
   browser: {
     attach: (id) => call('browser:attach', id),

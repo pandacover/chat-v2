@@ -6,9 +6,10 @@ import tailwindcss from '@tailwindcss/vite'
 const shared = { '@shared': resolve(__dirname, 'src/shared') }
 
 export default defineConfig({
-  // Every package is a devDependency, so it is bundled into out/ and electron-builder
-  // ships no node_modules. (A package under "dependencies" is left external and copied
-  // in whole: effect alone was 41 MB of app.asar.)
+  // Every package but one is a devDependency, so it is bundled into out/. (A package under
+  // "dependencies" is left external and copied in whole: effect alone was 41 MB of app.asar.)
+  // The one is the Claude Agent SDK, kept external on purpose: it finds and starts Claude Code,
+  // a native binary in its platform package, which electron-builder unpacks beside app.asar.
   main: {
     resolve: { alias: shared }
   },
@@ -16,8 +17,11 @@ export default defineConfig({
     resolve: { alias: shared },
     build: {
       rollupOptions: {
-        // The overlay that draws computer use on screen gets its own, much smaller bridge.
-        input: { index: resolve(__dirname, 'src/preload/index.ts'), overlay: resolve(__dirname, 'src/preload/overlay.ts') },
+        // The computer-use overlay (src/main/computer) gets its own, much smaller bridge.
+        input: {
+          index: resolve(__dirname, 'src/preload/index.ts'),
+          computer: resolve(__dirname, 'src/preload/computer.ts')
+        },
         // Sandboxed preloads must be a single CommonJS file.
         output: { format: 'cjs', entryFileNames: '[name].cjs' }
       }
@@ -30,11 +34,10 @@ export default defineConfig({
       // electron-vite leaves the renderer unminified by default: 740 KB of script to parse at startup.
       minify: true,
       rollupOptions: {
-        // The overlay and the hidden page that streams the screen for computer use are pages of their own.
+        // The computer-use overlay is a page of its own.
         input: {
           index: resolve(__dirname, 'src/renderer/index.html'),
-          overlay: resolve(__dirname, 'src/renderer/overlay.html'),
-          capture: resolve(__dirname, 'src/renderer/capture.html')
+          'computer-overlay': resolve(__dirname, 'src/renderer/computer-overlay.html')
         }
       }
     }

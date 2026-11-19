@@ -2,8 +2,11 @@
   import { tip } from '@/lib/tooltip'
   import { untrack } from 'svelte'
   import { parseContent, type ContentBlock } from '@shared/artifacts'
-  import { parseMoodboard } from '@shared/moodboard'
+  import { modelName } from '@shared/models'
   import { splitSteps, type Step } from '@shared/steps'
+  import { stopShortcutLabel } from '@shared/computer'
+  import { isMac } from '@/lib/keys'
+  import ComputerWaitCard from './ComputerWaitCard.svelte'
   import StepList from './StepList.svelte'
   import type { Attachment, PathNode } from '@shared/types'
   import { fade, fly } from '@/lib/motion'
@@ -29,6 +32,10 @@
       : []
   )
   const busy = $derived(app.streaming)
+  /** What computer use waits on in this reply. */
+  const wait = $derived(app.computerWait?.messageId === message.id ? app.computerWait : null)
+  // The Stop shortcut works while another app covers the chat; say so while a computer reply runs.
+  const computerRun = $derived(streaming && app.chat.computerEnabled && app.computerSupported)
   // The turn you just sent slides in; opening, switching or forking a chat renders still.
   const fresh = untrack(
     () => app.liveIds.has(node.message.id) || (!!node.message.activeChildId && app.liveIds.has(node.message.activeChildId))
@@ -98,11 +105,6 @@
     interrupted: 'Interrupted when the app closed.',
     stopped: 'Stopped.',
     error: 'Something went wrong.'
-  }
-
-  const shots = (json: string) => {
-    const n = parseMoodboard(json)?.shots.length ?? 0
-    return `${n} ${n === 1 ? 'shot' : 'shots'}`
   }
 
   const lines = (s: string) => {
@@ -213,13 +215,11 @@
           disabled={!block.complete}
           onclick={() => app.showArtifact({ identifier: block.identifier, messageId: message.id })}
         >
-          <span class="grid size-9 place-items-center rounded-md bg-hover text-fg-2"><Icon name={block.kind === 'moodboard' ? 'board' : 'window'} size={17} /></span>
+          <span class="grid size-9 place-items-center rounded-md bg-hover text-fg-2"><Icon name="window" size={17} /></span>
           <span class="min-w-0 flex-1">
             <span class="block truncate text-[13.5px] font-medium text-fg">{block.title}</span>
             <span class="block text-[12px] text-muted">
-              {#if block.kind === 'moodboard'}
-                {#if block.complete}Mood board · {shots(block.content)}{:else}Planning shots…{/if}
-              {:else if block.complete}HTML · {lines(block.content)}{:else}Writing… {lines(block.content)}{/if}
+              {#if block.complete}HTML · {lines(block.content)}{:else}Writing… {lines(block.content)}{/if}
             </span>
           </span>
           {#if block.complete}
@@ -251,10 +251,17 @@
       </div>
     {/if}
 
-    {#if streaming && app.control.active && blocks.at(-1)?.type !== 'steps'}
+    {#if wait}
+      <ComputerWaitCard {wait} />
+    {:else if streaming && app.control.active && blocks.at(-1)?.type !== 'steps'}
       <StepList steps={[]} live running />
     {:else if streaming && blocks.length === 0}
       <div class="thinking py-1 text-[13.5px]" aria-live="polite">Thinking</div>
+    {/if}
+    {#if computerRun}
+      <div class="-mt-1 text-[12px] text-muted" in:fade={{ duration: 200 }}>
+        <kbd class="font-[inherit] text-fg-2">{stopShortcutLabel(isMac)}</kbd> stops it from any app
+      </div>
     {/if}
 
     {#if message.status === 'interrupted' || message.status === 'stopped' || message.status === 'error'}
@@ -291,7 +298,7 @@
           <Icon name="branch" size={14} />
         </button>
         <BranchSwitcher {node} disabled={busy} />
-        {#if message.model}<span class="ml-2 truncate text-[11.5px] text-muted">{message.model}</span>{/if}
+        {#if message.model}<span class="ml-2 truncate text-[11.5px] text-muted">{modelName(message.model)}</span>{/if}
         {#if message.usage}
           <span class="px-0.5 text-[11.5px] text-muted/60" aria-hidden="true">·</span>
           <span class="shrink-0 text-[11.5px] text-muted tabular-nums" use:tip={usageDetail(message.usage)} in:fade={{ duration: 200 }}>{usageLabel(message.usage)}</span>
