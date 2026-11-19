@@ -27,6 +27,7 @@ ComputerUse.layer({
 - Before each input, focus goes back to the app the user was in. On Windows, when a chat-v2 window is in front, that app is the topmost app window under it in z-order. On macOS it is the app of the frontmost normal window that isn't chat-v2's.
 - If the mouse moves more than 28 px from where computer use left it, the reply pauses.
 - Windows only: a window running as administrator drops chat-v2's input, so the tools say so instead of trying.
+- Linux (`platform/linux.ts`) needs an X11 display (not Wayland) and the command-line tools `xdotool`, `xprop`, `wmctrl`, ImageMagick's `import`, `find`, `grep` and `xdg-open` (Debian: `xdotool x11-utils wmctrl imagemagick xdg-utils`). It can't read controls yet, so ui_elements tells the model to work from screenshots and pixels. Linux can't hide windows from capture, so chat-v2's windows and overlay can show in screenshots; the prompt tells the model to ignore them. Typing goes in short chunks so Stop never cuts a key press in half and leaves the key held down.
 - Every chat-v2 window has content protection while a computer reply runs, so none appears in screenshots. That also hides them from screen sharing for that time.
 
 ## Packaging
@@ -36,6 +37,7 @@ The Windows host (`host.ps1` and `host.cs`) is inlined in `platform/hostSource.t
 ## Tests
 
 - `bun test test/computer`: Control, the tools and the policy against a fake platform, and the real Windows host with read-only calls only.
+- `DISPLAY=:99 bun test test/computer/linux.test.ts`: the Linux parsers, and with an X display, window manager and xterm, the real Linux platform: windows, focus, screenshots, clicks, typing, Stop and file search. Without a display only the parsers run.
 - `bun run build && bun test/computer/render-overlay.ts [dir]`: renders the acting frame, a Show-me step and the notch (also around a MacBook camera) to PNGs without showing a window.
 - `bun test/computer/live-look.ts ["request"]`: one look-only reply with the real SDK (Haiku, teach mode). It uses the Claude Code login.
 - `bun test test/chat.test.ts -t "computer use"`: computer replies through the chat, with a fake `query` and platform.

@@ -1,5 +1,5 @@
 // Everything computer use can do to the computer. Coordinates are in the platform's input space:
-// physical pixels on Windows (the host is per-monitor DPI aware), points on macOS. Screenshots
+// physical pixels on Windows (the host is per-monitor DPI aware), points on macOS, X screen pixels on Linux. Screenshots
 // report the screen rect they cover so the model's image coordinates can be mapped back.
 
 export interface ScreenRect {
@@ -59,7 +59,7 @@ export interface FileHit {
 }
 
 export interface Platform {
-  readonly name: 'windows' | 'macos'
+  readonly name: 'windows' | 'macos' | 'linux'
   /** Remember the app the user was in before chat-v2's window came to the front. */
   remember(): Promise<WindowInfo>
   /** If chat-v2 has focus, give it back to the remembered app. */
