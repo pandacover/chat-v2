@@ -7,7 +7,7 @@
 //   bun run build
 //   node test/computer/e2e.mjs <playwright-core dir> <outDir>
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -22,7 +22,7 @@ mkdirSync(outDir, { recursive: true })
 
 const work = mkdtempSync(join(tmpdir(), 'chat-v2-computer-e2e-'))
 for (const name of ['e2e-query', 'e2e-platform']) {
-  const r = spawnSync('bun', ['build', join(repo, 'test/computer', `${name}.ts`), '--target=node', '--format=cjs', `--outfile=${join(work, `${name}.cjs`)}`], { stdio: 'inherit', shell: true })
+  const r = spawnSync('bun', ['build', join(repo, 'test/computer', `${name}.ts`), '--target=node', '--format=cjs', '--external=electron', `--outfile=${join(work, `${name}.cjs`)}`], { stdio: 'inherit', shell: true })
   if (r.status !== 0) throw new Error(`bundling ${name} failed`)
 }
 const data = join(work, 'data')
@@ -83,6 +83,16 @@ try {
   await page.getByRole('switch', { name: 'Computer' }).click()
   await page.getByRole('switch', { name: 'Computer', checked: true }).waitFor()
   ok((await page.getByRole('radiogroup', { name: 'Computer mode' }).count()) + (await page.getByRole('radio', { name: 'Show me' }).count()) === 0, 'the composer has no Do it / Show me control')
+
+  // Point before any computer reply: the overlay window is made for it, and its page still hears Point.
+  ok(!app.windows().some((w) => w.url().includes('computer-overlay.html')), 'no overlay window before computer use has run')
+  await page.getByRole('button', { name: 'Point', exact: true }).click()
+  await until(() => app.windows().some((w) => w.url().includes('computer-overlay.html')), 'Point makes the overlay window')
+  const early = app.windows().find((w) => w.url().includes('computer-overlay.html'))
+  await early.locator('[data-point]').waitFor({ timeout: 5000 })
+  ok(true, 'and its freshly loaded page shows Point')
+  await early.keyboard.press('Escape')
+  await until(async () => (await early.locator('[data-point]').count()) === 0, 'Esc ends it')
 
   // 1. An approval, clicked.
   await send('Delete the old files in Downloads')
@@ -220,6 +230,119 @@ try {
   await notch.getByRole('button', { name: 'Stop' }).click()
   await until(async () => (await lastReply().innerText()).includes('Stopped.'), "the notch's Stop stops the reply")
   await until(async () => (await notch.count()) === 0, 'and the notch goes')
+
+  // Point: the user marks part of the screen for the next message. The overlay is hidden, so its
+  // page gets Playwright's synthetic input; the fake platform answers pointAt and the capture.
+  await app.evaluate(({ screen }) => {
+    const b = screen.getPrimaryDisplay().bounds
+    globalThis.e2ePointer = { x: b.x + 300, y: b.y + 200 }
+  })
+  const pointButton = page.getByRole('button', { name: 'Point', exact: true })
+  ok((await pointButton.count()) === 1, 'the composer has a Point button while computer use is on')
+  await pointButton.hover()
+  await sleep(700)
+  await capture('point-button')
+  const layer = overlay.locator('[data-point]')
+  // The names on the draft's attachment chips that came from Point (only the draft's can be removed).
+  const draft = () =>
+    page.evaluate(() => [...document.querySelectorAll('button[aria-label^="Remove point-"]')].map((b) => b.getAttribute('aria-label').slice('Remove '.length)))
+  const pointsOn = () => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((w) => w.webContents.getURL().includes('computer-overlay.html')).getBounds())
+
+  // Started from the chat; hovering shows the control the click would pick.
+  await pointButton.click()
+  await layer.waitFor()
+  ok((await pointButton.getAttribute('aria-pressed')) === 'true', 'the Point button shows Point is on')
+  await until(takes, 'the overlay takes every click while pointing', 2000)
+  const primary = await app.evaluate(({ screen }) => screen.getPrimaryDisplay().bounds)
+  ok(JSON.stringify(await pointsOn()) === JSON.stringify(primary), 'the overlay covers the display under the pointer')
+  await capture('point-idle', 'computer-overlay.html')
+  ok((await overlay.locator('.hint.below-notch').count()) === 0, 'with no notch up, the hint sits at the top')
+  await overlay.mouse.move(300, 200)
+  await overlay.mouse.move(460, 318, { steps: 4 })
+  const highlight = overlay.locator('.control')
+  await until(async () => (await highlight.count()) === 1, 'hovering highlights the control under the pointer')
+  ok((await overlay.locator('.tag').innerText()) === 'Button · Save', 'and names it')
+  await capture('point-hover', 'computer-overlay.html')
+  await overlay.mouse.move(700, 600, { steps: 3 })
+  await until(async () => (await highlight.count()) === 0, 'the highlight goes when the pointer leaves the control')
+
+  // Esc cancels; nothing is added.
+  await overlay.keyboard.press('Escape')
+  await until(async () => (await layer.count()) === 0, 'Esc cancels Point')
+  await until(async () => (await pointButton.getAttribute('aria-pressed')) === 'false', 'and the chat shows it ended')
+  await until(lets, 'the overlay is click-through again', 2000)
+  ok((await draft()).length === 0, 'a cancelled Point adds nothing')
+
+  // The shortcut starts it; a second start (the notch's Point) while one is on changes nothing; the button cancels.
+  await composer.focus()
+  await page.keyboard.press('Control+p')
+  await layer.waitFor()
+  await overlay.evaluate(() => window.computerOverlay.press('point'))
+  await sleep(200)
+  ok((await layer.count()) === 1 && (await pointButton.getAttribute('aria-pressed')) === 'true', 'a second Point while one is on is ignored')
+  await pointButton.click()
+  await until(async () => (await layer.count()) === 0, "the chat's Point button cancels the one under way")
+
+  // A click on the control: the marked image and its note go into the draft.
+  await pointButton.click()
+  await layer.waitFor()
+  await overlay.mouse.move(455, 316, { steps: 3 })
+  await until(async () => (await highlight.count()) === 1, 'the control is highlighted again')
+  const fakeCaptures = fake('capture').length
+  await overlay.mouse.down()
+  await overlay.mouse.up()
+  await until(async () => (await draft()).length === 2, 'a click adds an image and a note to the draft')
+  ok(fake('capture').length === fakeCaptures + 1, 'the screen was captured once (by the fake platform)')
+  ok((await layer.count()) === 0 && (await pointButton.getAttribute('aria-pressed')) === 'false', 'Point ends with the click')
+  const names = await draft()
+  ok(names.some((n) => /^point-\d{6}\.png$/.test(n)) && names.some((n) => /^point-\d{6}\.md$/.test(n)), `the chips are the image and the note (${names.join(', ')})`)
+  // The image itself, as saved for the message: a PNG of the area around the control (360x220
+  // DIPs at least), in the display's own pixels. Copied out for looking at.
+  const scale = await app.evaluate(({ screen }) => (process.platform === 'win32' ? screen.getPrimaryDisplay().scaleFactor : 1))
+  const factor = await app.evaluate(({ screen }) => screen.getPrimaryDisplay().scaleFactor)
+  const saved = readdirSync(join(data, 'attachments')).filter((f) => f.endsWith('.png')).map((f) => join(data, 'attachments', f))
+  ok(saved.length === 1, 'one image was saved')
+  const png = readFileSync(saved[0])
+  const size = { w: png.readUInt32BE(16), h: png.readUInt32BE(20) }
+  ok(png.subarray(1, 4).toString() === 'PNG' && Math.abs(size.w - 360 * factor) <= 2 && Math.abs(size.h - 220 * factor) <= 2, `the image is the marked crop (${size.w}x${size.h})`)
+  writeFileSync(join(outDir, 'point-attached.png'), png)
+  await capture('point-chips')
+
+  // Sent, the model gets the note: the scripted model echoes it back.
+  await send('What is this?')
+  await until(async () => (await lastReply().innerText()).includes('Point note:'), 'the model gets the note with the message')
+  const echoed = await lastReply().innerText()
+  ok(echoed.includes('Control there: Button "Save"'), 'the note names the picked control')
+  ok(echoed.includes('Images: 1'), 'and the marked image goes with it')
+  // The fake screenshot is 1920x1080 at 0,0, captured to 1024x576, as look_at_screen's would be on a 1920x1080 monitor.
+  const m = /Point: (\d+), (\d+)/.exec(echoed)
+  ok(!!m, `the note gives the point in screenshot pixels (${m?.[0]})`)
+  const w = primary.width * scale
+  const k = Math.min(1, 1024 / w)
+  const expect = { x: Math.round(455 * scale * k), y: Math.round(316 * scale * k) }
+  ok(Math.abs(Number(m[1]) - expect.x) <= 1 && Math.abs(Number(m[2]) - expect.y) <= 1, `in the same pixels the tools take (expected ${expect.x}, ${expect.y})`)
+  ok(fake('click').length === 3, 'Point itself never clicked anything')
+
+  // A dragged box, and removing one of its chips removes both.
+  await pointButton.click()
+  await layer.waitFor()
+  await overlay.mouse.move(360, 260)
+  await overlay.mouse.down()
+  await overlay.mouse.move(700, 420, { steps: 6 })
+  ok((await overlay.locator('.box').count()) === 1, 'dragging draws a box')
+  await capture('point-box', 'computer-overlay.html')
+  await overlay.mouse.up()
+  await until(async () => (await draft()).length === 2, 'a box adds an image and a note')
+  const notes = readdirSync(join(data, 'attachments')).filter((f) => f.endsWith('.md')).map((f) => readFileSync(join(data, 'attachments', f), 'utf8'))
+  const boxNote = notes.find((n) => n.includes('marked a box'))
+  ok(!!boxNote && /- Box: \d+, \d+ to \d+, \d+/.test(boxNote) && !boxNote.includes('Control there'), 'the box note gives the box, not a control')
+  writeFileSync(join(outDir, 'point-box-note.md'), boxNote ?? '')
+  writeFileSync(join(outDir, 'point-note.md'), notes.find((n) => n.includes('pointed at a control')) ?? '')
+  await page.locator('.max-w-36', { hasText: /\.png$/ }).first().hover()
+  await page.getByRole('button', { name: /^Remove point-\d+\.png$/ }).click()
+  await sleep(500)
+  const left = await draft()
+  ok(left.length === 0, `removing a Point's image removes its note too (left: ${left.join(', ') || 'none'})`)
 } finally {
   await app.close()
 }

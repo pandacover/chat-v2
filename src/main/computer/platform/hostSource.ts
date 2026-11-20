@@ -100,6 +100,10 @@ public static class ChatV2Host
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int v, int size);
+    [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")] static extern int DwmGetWindowRect(IntPtr h, int attr, out RECT v, int size);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr h, ref POINT p);
+    [DllImport("user32.dll")] static extern IntPtr ChildWindowFromPointEx(IntPtr h, POINT p, uint flags);
 
     const uint INPUT_MOUSE = 0, INPUT_KEYBOARD = 1;
     const uint KEYEVENTF_EXTENDEDKEY = 0x1, KEYEVENTF_KEYUP = 0x2, KEYEVENTF_UNICODE = 0x4;
@@ -265,6 +269,7 @@ public static class ChatV2Host
             case "setValue": return SetValue(Int(p, "id"), Str(p, "text"));
             case "elementRect": return ElementRect(Int(p, "id"));
             case "elementAt": return ElementAt(Int(p, "x"), Int(p, "y"));
+            case "pointAt": return PointAt(Int(p, "x"), Int(p, "y"), Int(p, "budgetMs", 1500));
             case "sql": return Sql(Str(p, "query"));
             case "open":
                 {
@@ -767,6 +772,22 @@ public static class ChatV2Host
         if (hwnd == IntPtr.Zero) return null;
         uint pid; GetWindowThreadProcessId(hwnd, out pid);
         if (pid == ownerPid) return null;
+        AutomationElement found;
+        System.Windows.Rect r;
+        if (!SnapIn(hwnd, x, y, 1500, out found, out r)) return null;
+        return Rect((int)r.X, (int)r.Y, (int)r.Width, (int)r.Height);
+    }
+
+    /**
+     * The smallest interactive control of window "hwnd" containing the point (see ElementAt),
+     * with its name and type in the element's cache. A fallback search of the window stops
+     * after about "budgetMs".
+     */
+    static bool SnapIn(IntPtr hwnd, int x, int y, int budgetMs, out AutomationElement found, out System.Windows.Rect rect)
+    {
+        found = null;
+        rect = System.Windows.Rect.Empty;
+        uint pid; GetWindowThreadProcessId(hwnd, out pid);
         var mon = MonitorRect(hwnd);
         double limit = Convert.ToDouble(mon["width"]) * Convert.ToDouble(mon["height"]) * 0.2;
         if (snapCondition == null) snapCondition = TypeCondition(false, true);
@@ -774,6 +795,7 @@ public static class ChatV2Host
         cr.Add(AutomationElement.ControlTypeProperty);
         cr.Add(AutomationElement.BoundingRectangleProperty);
         cr.Add(AutomationElement.ProcessIdProperty);
+        cr.Add(AutomationElement.NameProperty);
         cr.TreeScope = TreeScope.Element;
         System.Windows.Rect r;
         using (cr.Activate())
@@ -788,13 +810,22 @@ public static class ChatV2Host
                 int hitPid = 0; try { hitPid = hit.Cached.ProcessId; } catch { }
                 if (hitPid != (int)pid) hit = null;
             }
+            // Something else covers the point (the Point overlay takes the mouse): start from the
+            // deepest child window there, which in Win32 apps is often the control itself.
+            AutomationElement under = null;
+            if (hit == null)
+            {
+                var child = DeepestChild(hwnd, x, y);
+                if (child != hwnd) try { under = AutomationElement.FromHandle(child).GetUpdatedCache(cr); } catch { }
+                hit = under;
+            }
             if (hit != null)
             {
                 var walker = TreeWalker.ControlViewWalker;
                 var el = hit;
                 for (int depth = 0; el != null && depth < 30; depth++)
                 {
-                    if (Snappable(el, x, y, limit, out r)) return Rect((int)r.X, (int)r.Y, (int)r.Width, (int)r.Height);
+                    if (Snappable(el, x, y, limit, out r)) { found = el; rect = r; return true; }
                     ControlType ct = null; System.Windows.Rect er = System.Windows.Rect.Empty;
                     try { ct = el.Cached.ControlType; er = el.Cached.BoundingRectangle; } catch { }
                     // Ancestors only get bigger: past the window or the size limit nothing can qualify.
@@ -804,18 +835,79 @@ public static class ChatV2Host
             }
             // FromPoint stopped at something that isn't a control (Chromium can answer
             // with a big layout group that doesn't even hold the control on top):
-            // search the whole window as before, with the filter inside UIA.
+            // search the window (or the child window under the point) with the filter inside UIA.
             System.Windows.Rect best = System.Windows.Rect.Empty;
+            AutomationElement bestEl = null;
             double bestArea = double.MaxValue;
-            FindInBranches(AutomationElement.FromHandle(hwnd), snapCondition, cr, 1500, delegate (AutomationElement el)
+            AutomationElement root = under;
+            if (root == null) root = AutomationElement.FromHandle(hwnd);
+            FindInBranches(root, snapCondition, cr, budgetMs, delegate (AutomationElement el)
             {
                 System.Windows.Rect er;
-                if (Snappable(el, x, y, limit, out er) && er.Width * er.Height < bestArea) { best = er; bestArea = er.Width * er.Height; }
+                if (Snappable(el, x, y, limit, out er) && er.Width * er.Height < bestArea) { best = er; bestEl = el; bestArea = er.Width * er.Height; }
                 return true;
             });
-            if (best.IsEmpty) return null;
-            return Rect((int)best.X, (int)best.Y, (int)best.Width, (int)best.Height);
+            if (best.IsEmpty) return false;
+            found = bestEl;
+            rect = best;
+            return true;
         }
+    }
+
+    /** The deepest visible child window of "hwnd" under a screen point. */
+    static IntPtr DeepestChild(IntPtr hwnd, int x, int y)
+    {
+        var h = hwnd;
+        for (int i = 0; i < 32; i++)
+        {
+            var pt = new POINT { X = x, Y = y };
+            if (!ScreenToClient(h, ref pt)) return h;
+            var c = ChildWindowFromPointEx(h, pt, 1 | 4 /* CWP_SKIPINVISIBLE | CWP_SKIPTRANSPARENT */);
+            if (c == IntPtr.Zero || c == h) return h;
+            h = c;
+        }
+        return h;
+    }
+
+    /**
+     * For the user's Point: the app window under a screen point, and the control there if
+     * there is a sensible one. Unlike ElementAt it looks past chat-v2's own windows, since the
+     * Point overlay covers the screen and takes the mouse while the user points. Null when no
+     * window is there.
+     */
+    static object PointAt(int x, int y, int budgetMs)
+    {
+        IntPtr hwnd = IntPtr.Zero;
+        EnumWindows(delegate (IntPtr h, IntPtr l)
+        {
+            if (!IsWindowVisible(h) || IsIconic(h) || IsOwn(h)) return true;
+            if ((GetWindowLong(h, -20) & 0x20) != 0) return true; // WS_EX_TRANSPARENT: other apps' click-through overlays
+            int cloaked; // suspended UWP apps and windows on other virtual desktops
+            if (DwmGetWindowAttribute(h, 14 /* DWMWA_CLOAKED */, out cloaked, 4) == 0 && cloaked != 0) return true;
+            RECT wr;
+            // The visible frame, without the invisible resize borders GetWindowRect counts.
+            if (DwmGetWindowRect(h, 9 /* DWMWA_EXTENDED_FRAME_BOUNDS */, out wr, Marshal.SizeOf(typeof(RECT))) != 0 && !GetWindowRect(h, out wr)) return true;
+            if (x < wr.Left || x >= wr.Right || y < wr.Top || y >= wr.Bottom) return true;
+            hwnd = h;
+            return false;
+        }, IntPtr.Zero);
+        if (hwnd == IntPtr.Zero) return null;
+        var res = new Dictionary<string, object>();
+        res["window"] = Describe(hwnd);
+        AutomationElement el;
+        System.Windows.Rect r;
+        if (SnapIn(hwnd, x, y, budgetMs, out el, out r))
+        {
+            var c = Rect((int)r.X, (int)r.Y, (int)r.Width, (int)r.Height);
+            string type = "", name = "";
+            try { type = el.Cached.ControlType.ProgrammaticName.Replace("ControlType.", ""); } catch { }
+            try { name = el.Cached.Name ?? ""; } catch { }
+            c["type"] = type;
+            c["name"] = name.Length > 120 ? name.Substring(0, 120) : name;
+            res["control"] = c;
+        }
+        else res["control"] = null;
+        return res;
     }
 
     static object Invoke(int id)

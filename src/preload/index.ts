@@ -76,7 +76,8 @@ const api: Api = {
     supported: () => call('computer:supported'),
     waiting: () => call('computer:waiting'),
     approve: (id, approved) => call('computer:approve', id, approved),
-    teachDone: (id) => call('computer:teachDone', id)
+    teachDone: (id) => call('computer:teachDone', id),
+    point: () => call('computer:point')
   },
   browser: {
     attach: (id) => call('browser:attach', id),

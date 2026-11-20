@@ -58,6 +58,12 @@ export interface FileHit {
   size: number | null
 }
 
+/** What is under a point the user marked: the app window, and the control there if there is one. */
+export interface PointHit {
+  window: WindowInfo
+  control: (ScreenRect & { type: string; name: string }) | null
+}
+
 export interface Platform {
   readonly name: 'windows' | 'macos' | 'linux'
   /** Remember the app the user was in before chat-v2's window came to the front. */
@@ -81,6 +87,12 @@ export interface Platform {
   elementRect(id: number): Promise<ScreenRect>
   /** The interactive control under a point (input space), if there is a sensible one. */
   elementAt(x: number, y: number): Promise<ScreenRect | null>
+  /**
+   * For the user's Point: the app window and control under a point (input space), looking past
+   * chat-v2's own windows, since the Point overlay covers the screen then. A fallback search
+   * stops after about `budgetMs`. Absent where controls can't be read (macOS, Linux).
+   */
+  pointAt?(x: number, y: number, budgetMs?: number): Promise<PointHit | null>
   search(q: SearchQuery): Promise<ReadonlyArray<FileHit>>
   open(target: string): Promise<void>
   reveal(path: string): Promise<void>

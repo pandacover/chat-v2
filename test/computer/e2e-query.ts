@@ -12,7 +12,12 @@ const script: Script = async function* (t) {
   // The new message comes last, after any turns the session doesn't have.
   const prompt = t.call.prompt.at(-1)?.text ?? ''
   yield* t.tool('mcp__computer__look_at_screen')
-  if (prompt.startsWith('[mode: teach]')) {
+  // A message with a Point attached: say back what came with it.
+  const note = t.call.prompt.find((b) => b.text?.startsWith('<file name="point-'))?.text
+  if (note) {
+    const images = t.call.prompt.filter((b) => b.type === 'image').length
+    yield* t.text(`Point note: ${note}\n\nImages: ${images}`)
+  } else if (prompt.startsWith('[mode: teach]')) {
     for (const [step, instruction] of ['Click Display', 'Click Night light', 'Turn it on'].entries())
       yield* t.tool('mcp__computer__teach_step', { instruction, step: step + 1, total: 3, x: 300, y: 200 + step * 60 })
     yield* t.text('Night light is on.')

@@ -206,6 +206,8 @@ export type StreamEvent =
   | { type: 'attachment'; messageId: string; attachment: Attachment }
   /** What computer use waits on the user for (an approval, a Show-me step); null once nothing. */
   | { type: 'computer'; waiting: ComputerWait }
+  /** Point: the user is marking part of the screen (active), or finished; a finished mark brings its image and note for the next message. */
+  | { type: 'point'; active: boolean; attachments: Attachment[]; error?: string }
 
 export interface AppError {
   tag: string
@@ -301,6 +303,8 @@ export interface Api {
     approve(id: string, approved: boolean): Promise<void>
     /** Ends the Show-me step `id` as done. */
     teachDone(id: string): Promise<void>
+    /** Starts Point (the user marks a spot or box on screen for the next message), or cancels the one under way. True once it is on. */
+    point(): Promise<boolean>
   }
   updates: {
     get(): Promise<UpdateState>

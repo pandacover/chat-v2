@@ -147,7 +147,11 @@
       <span class="text">{n.text}</span>
     </button>
     {#if n.camera}<span class="housing" aria-hidden="true"></span>{/if}
-    <button class="stop" onclick={() => bridge.press('stop')}>Stop</button>
+    <span class="actions">
+      <!-- Point: mark something on screen for the next message (PointLayer.svelte). -->
+      <button class="stop" onclick={() => bridge.press('point')} title="Point at something on screen for your next message">Point</button>
+      <button class="stop" onclick={() => bridge.press('stop')}>Stop</button>
+    </span>
   </div>
 {/if}
 
@@ -360,8 +364,14 @@
   .housing {
     height: 100%;
   }
-  .notch.camera .stop {
+  .notch.camera .stop,
+  .notch.camera .actions {
     justify-self: end;
+  }
+  .actions {
+    display: flex;
+    flex: none;
+    gap: 4px;
   }
   .status {
     display: flex;
