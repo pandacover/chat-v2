@@ -69,6 +69,12 @@ export interface Platform {
   focusWindow(title: string): Promise<WindowInfo>
   screenshot(maxWidth: number): Promise<Screenshot>
   cursor(): Promise<{ x: number; y: number }>
+  /**
+   * Whether the user pressed the primary mouse button: it is down now, or went down since the
+   * last call. A cheap read-only query of the button state (no hook), polled while a Show-me step
+   * waits. Absent where it isn't cheap (macOS and Linux would spawn a process per read).
+   */
+  pressed?(): Promise<boolean>
   click(x: number, y: number, button: 'left' | 'right' | 'middle', count: number): Promise<void>
   drag(x1: number, y1: number, x2: number, y2: number): Promise<void>
   scroll(x: number, y: number, dy: number, dx: number): Promise<void>

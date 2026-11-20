@@ -1,6 +1,7 @@
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { Cause, Effect } from 'effect'
 import { z } from 'zod'
+import type { ComputerDoing } from '@shared/computer'
 import type { Step } from '@shared/steps'
 import { ControlError, type Control } from './control'
 import type { Interaction, Owner } from './interaction'
@@ -19,6 +20,10 @@ export interface ToolDeps {
   readonly remember: (fact: string) => Promise<void>
   /** Shows a finished step in the reply. */
   readonly step: (step: Step) => void
+  /** Shows the tool running now in the reply's step list (null once it ends). */
+  readonly doing: (doing: ComputerDoing | null) => void
+  /** The reply's mode now; the user can switch it mid-reply. */
+  readonly mode: () => Mode
   /** Aborted when the reply ends. */
   readonly signal: AbortSignal
   /** Counts a tool call; false once the reply has made too many. */
@@ -73,28 +78,56 @@ const whenAborted = (signal: AbortSignal): Effect.Effect<void> =>
         return Effect.sync(() => signal.removeEventListener('abort', on))
       })
 
+/** What the model is told the first time a tool returns after the user switched the mode mid-reply. */
+export const MODE_SWITCHED: Record<Mode, string> = {
+  do: 'The user switched to do mode: from now on, do the rest yourself instead of showing them.',
+  teach: "The user switched to show-me mode: from now on, don't act for them; guide them with teach_step."
+}
+
+/** How often a waiting Show-me step re-reads where its control is. */
+export const FOLLOW_MS = 1000
+/** A control that moved or resized by more than this (input pixels) moves the spotlight. */
+const FOLLOW_PX = 2
+
+const movedRect = (a: ScreenRect, b: ScreenRect) =>
+  Math.abs(a.x - b.x) > FOLLOW_PX || Math.abs(a.y - b.y) > FOLLOW_PX || Math.abs(a.width - b.width) > FOLLOW_PX || Math.abs(a.height - b.height) > FOLLOW_PX
+
 /** The computer tools, as definitions (tests call their handlers directly). */
 export const toolDefs = (d: ToolDeps) => {
+  /** The mode the model last heard of; a switch since is told with the next tool result. */
+  let told = d.mode()
+  const withModeNote = (r: CallToolResult): CallToolResult => {
+    const now = d.mode()
+    if (now === told) return r
+    told = now
+    return { ...r, content: [...r.content, { type: 'text', text: MODE_SWITCHED[now] }] }
+  }
+
   /**
-   * Run one tool's effect and show it as a step in the reply. Once the user stops the reply, a
-   * tool that hasn't started does nothing, and one that is running (a typing run, a slow control
-   * read, a wait, an approval) is cut off.
+   * Run one tool's effect and show it as a step in the reply: live while it runs (`live` is the
+   * line quiet tools show then; false for none), then as a finished step. Once the user stops the
+   * reply, a tool that hasn't started does nothing, and one that is running (a typing run, a slow
+   * control read, a wait, an approval) is cut off.
    */
   const run = (
     name: string,
     label: string,
     detail: string,
     eff: Effect.Effect<CallToolResult, { readonly _tag: string; readonly message?: string }>,
-    opts: { acting?: boolean; quiet?: boolean; ok?: (r: CallToolResult) => boolean; detail?: () => string } = {}
+    opts: { acting?: boolean; quiet?: boolean; live?: string | false; detail?: () => string; outcome?: () => 'denied' | null } = {}
   ): Promise<CallToolResult> => {
     if (d.control.stopped() || d.signal.aborted) return Promise.resolve(text(STOPPED_TEXT, true))
     if (!d.count()) return Promise.resolve(text(TOO_MANY_TEXT, true))
+    if (opts.live !== false)
+      d.doing(opts.quiet ? { label: opts.live ?? label, quiet: true } : { label, ...(detail ? { detail } : {}), quiet: false })
     let marked = false
     const mark = (ok: boolean) => {
       if (opts.quiet || marked) return
       marked = true
       const shown = opts.detail?.() ?? detail
-      d.step({ tool: `computer_${name}`, label, ok, ...(shown ? { detail: shown } : {}) })
+      const step: Step = { tool: `computer_${name}`, label, ok, ...(shown ? { detail: shown } : {}) }
+      // The user said no: shown neutrally, not as a failure.
+      d.step(ok && opts.outcome?.() === 'denied' ? { ...step, label: 'Denied', denied: true } : step)
     }
     if (opts.acting) d.setActing(true)
     const stopped = Effect.sync(() => {
@@ -104,8 +137,8 @@ export const toolDefs = (d: ToolDeps) => {
     return Effect.runPromise(
       eff.pipe(
         Effect.map((r) => {
-          mark(opts.ok ? opts.ok(r) : !r.isError)
-          return r
+          mark(!r.isError)
+          return withModeNote(r)
         }),
         Effect.catch((e) =>
           Effect.sync(() => {
@@ -130,7 +163,9 @@ export const toolDefs = (d: ToolDeps) => {
             const e = Cause.squash(cause)
             return text(`That failed unexpectedly: ${e instanceof Error ? e.message : String(e)}`.slice(0, 300), true)
           })
-        )
+        ),
+        // The live line goes once the tool is over (after its finished step, which replaces it).
+        Effect.ensuring(Effect.sync(() => d.doing(null)))
       )
     )
   }
@@ -147,9 +182,33 @@ export const toolDefs = (d: ToolDeps) => {
       .elementAtImagePoint(x, y)
       .pipe(
         Effect.flatMap(({ rect }) =>
-          rect ? Effect.succeed(rect) : toScreenRect({ x: x - (width ?? 36) / 2, y: y - (height ?? 36) / 2, width: width ?? 36, height: height ?? 36 })
+          rect
+            ? Effect.succeed({ rect, snapped: true })
+            : toScreenRect({ x: x - (width ?? 36) / 2, y: y - (height ?? 36) / 2, width: width ?? 36, height: height ?? 36 }).pipe(
+                Effect.map((rect) => ({ rect, snapped: false }))
+              )
         )
       )
+
+  /**
+   * While a Show-me step waits, its spotlight follows the control: about once a second it reads
+   * the control's rect again (by element id, or the control now at the middle of a snapped one)
+   * and moves the spotlight if the control moved. A failed read keeps the spotlight where it is.
+   */
+  const follow = (reread: (last: ScreenRect) => Effect.Effect<ScreenRect | null, ControlError>, first: ScreenRect): Effect.Effect<never> =>
+    Effect.gen(function* () {
+      let last = first
+      let id: string | undefined
+      for (;;) {
+        yield* Effect.sleep(FOLLOW_MS)
+        id ??= d.interaction.teachTarget()?.id
+        if (!id) continue
+        const r = yield* reread(last).pipe(Effect.orElseSucceed(() => null))
+        if (!r || r.width <= 0 || r.height <= 0 || !movedRect(last, r)) continue
+        if (!(yield* d.interaction.moveTeach(id, r))) continue
+        last = r
+      }
+    })
 
   const describe = (id: number) => {
     const n = d.control.elementName(id)
@@ -179,7 +238,7 @@ export const toolDefs = (d: ToolDeps) => {
               })
             )
           ),
-          { quiet: true }
+          { quiet: true, live: 'Looking at the screen' }
         ),
       { searchHint: 'screenshot see view screen desktop what is on screen computer' }
     ),
@@ -205,7 +264,7 @@ export const toolDefs = (d: ToolDeps) => {
             const more = total > lines.length ? ` (first ${lines.length} of ${total}; pass name to narrow)` : ''
             return text(`${head}${more}:\n${lines.join('\n')}`)
           }),
-          { quiet: true }
+          { quiet: true, live: name ? `Looking for “${name}”` : 'Reading the controls' }
         ),
       { searchHint: 'accessibility tree buttons controls elements find button by name ui automation' }
     ),
@@ -222,7 +281,7 @@ export const toolDefs = (d: ToolDeps) => {
           d.control
             .windows()
             .pipe(Effect.map((ws) => text(ws.map((w) => `"${w.title}" — ${w.process}${w.minimized ? ' (minimized)' : ''}`).join('\n') || 'No windows.'))),
-          { quiet: true }
+          { quiet: true, live: 'Listing the windows' }
         ),
       { searchHint: 'open windows apps running programs taskbar switch' }
     ),
@@ -348,7 +407,7 @@ export const toolDefs = (d: ToolDeps) => {
         run(
           'scroll',
           'Scroll',
-          `${a.amount > 0 ? 'down' : 'up'} ${Math.abs(a.amount)}`,
+          `${a.horizontal ? (a.amount > 0 ? 'right' : 'left') : a.amount > 0 ? 'down' : 'up'} ${Math.abs(a.amount)}`,
           Effect.gen(function* () {
             const p = yield* d.control.toScreen(a.x, a.y)
             yield* d.control.scroll(p.x, p.y, a.horizontal ? 0 : a.amount, a.horizontal ? a.amount : 0)
@@ -407,13 +466,13 @@ export const toolDefs = (d: ToolDeps) => {
       'wait',
       'Wait for something on the user\'s computer to load.',
       { seconds: z.number().min(0.2).max(10) },
-      ({ seconds }) => run('wait', 'Wait', `${seconds}s`, Effect.sleep(`${seconds} seconds`).pipe(Effect.as(text('Waited.'))), { quiet: true }),
+      ({ seconds }) => run('wait', 'Wait', `${seconds}s`, Effect.sleep(`${seconds} seconds`).pipe(Effect.as(text('Waited.'))), { quiet: true, live: 'Waiting for it to load' }),
       { searchHint: 'wait pause sleep let it load' }
     ),
 
     tool(
       'teach_step',
-      'Show-me mode: highlight one control on screen with an instruction and wait until the user has done it (they press Done, on screen or in the chat, or reply). Target an element id from ui_elements (most precise), or else the CENTER point of the control in the latest screenshot (x, y); the highlight snaps to the control found there.',
+      'Show-me mode: highlight one control on screen with an instruction and wait until the user has done it (they press Done or click the control, press “Can’t find it” or “Do it for me”, or reply). Target an element id from ui_elements (most precise), or else the CENTER point of the control in the latest screenshot (x, y); the highlight snaps to the control found there.',
       {
         instruction: z.string().describe('One short action, e.g. "Click Display"'),
         step: z.number().int().min(1),
@@ -425,32 +484,65 @@ export const toolDefs = (d: ToolDeps) => {
         height: z.number().optional()
       },
       (a) => {
-        // What the user typed instead of pressing Done goes into the step line.
-        let said = ''
+        // What the user typed or pressed instead of Done goes into the step line.
+        let after = ''
         return run(
           'teach_step',
           `Step ${a.step} of ${a.total}`,
           a.instruction,
           Effect.gen(function* () {
             d.setActing(false)
-            const rect =
+            const target =
               a.element != null
-                ? yield* d.control.elementRect(a.element)
+                ? { rect: yield* d.control.elementRect(a.element), snapped: true }
                 : a.x != null && a.y != null
                   ? yield* pointTarget(a.x, a.y, a.width, a.height)
                   : null
-            if (!rect) return text('Give an element id or x/y.', true)
-            const outcome = yield* d.interaction.teach(d.owner, { rect, instruction: a.instruction, step: a.step, total: a.total })
+            if (!target) return text('Give an element id or x/y.', true)
+            const { rect } = target
+            // After the user typed or pressed Done in the chat, chat-v2 is in front: bring the
+            // target app back so the spotlit control isn't under the chat window.
+            yield* Effect.ignore(d.control.restoreFocus())
+            const element = a.element
+            // The spotlight follows a control it knows (an element id, or a snapped control of
+            // about the same size found again at its middle); a bare pixel box stays put.
+            const near = (n: number, m: number) => Math.abs(n - m) <= Math.max(4, m / 4)
+            const reread =
+              element != null
+                ? () => d.control.elementRect(element)
+                : target.snapped
+                  ? (last: ScreenRect) =>
+                      d.control
+                        .elementAt(Math.round(last.x + last.width / 2), Math.round(last.y + last.height / 2))
+                        .pipe(Effect.map((r) => (r && near(r.width, rect.width) && near(r.height, rect.height) ? r : null)))
+                  : null
+            const waiting = d.interaction.teach(d.owner, { rect, instruction: a.instruction, step: a.step, total: a.total })
+            const outcome = yield* reread ? Effect.raceFirst(waiting, follow(reread, rect)) : waiting
             d.control.resetTakeover()
             yield* d.interaction.clearTeach()
-            if (outcome.kind === 'done') return text('The user did it. Look at the screen before the next step.')
-            if (outcome.kind === 'said') {
-              said = outcome.text
-              return text(`The user said: "${outcome.text}"`)
+            switch (outcome.kind) {
+              case 'done':
+                return text('The user did it. Look at the screen before the next step.')
+              case 'clicked':
+                return text('The user clicked the highlighted control. Look at the screen before the next step.')
+              case 'cant_find':
+                after = "Couldn't find it"
+                return text(
+                  "The user pressed \"Can't find it\": they don't see that control. Look at the screen again, then point to it more precisely (say where it is) or show another way to get there (a menu, a search box, a shortcut)."
+                )
+              case 'hand_over':
+                after = 'Handed over'
+                // The mode note would repeat this.
+                told = 'do'
+                return text('The user pressed "Do it for me": the mode is do from now on. Do this step and the rest yourself.')
+              case 'said':
+                after = `You said “${outcome.text}”`
+                return text(`The user said: "${outcome.text}"`)
+              default:
+                return text('The user stopped the lesson.')
             }
-            return text('The user stopped the lesson.')
           }),
-          { detail: () => (said ? `${a.instruction} · You said “${said}”` : a.instruction) }
+          { detail: () => (after ? `${a.instruction} · ${after}` : a.instruction) }
         )
       },
       { searchHint: 'show me teach guide highlight spotlight step tutorial how to' }
@@ -460,7 +552,7 @@ export const toolDefs = (d: ToolDeps) => {
       'clear_highlight',
       'Remove any on-screen highlight.',
       {},
-      () => run('clear_highlight', 'Clear', '', d.interaction.clearTeach().pipe(Effect.as(text('Cleared.'))), { quiet: true }),
+      () => run('clear_highlight', 'Clear', '', d.interaction.clearTeach().pipe(Effect.as(text('Cleared.'))), { quiet: true, live: false }),
       { searchHint: 'clear remove highlight spotlight' }
     ),
 
@@ -471,19 +563,22 @@ export const toolDefs = (d: ToolDeps) => {
         action: z.string().describe('One plain sentence, e.g. "Delete 3 files from Downloads"'),
         detail: z.string().describe('The exact target: file names, recipient, command')
       },
-      (a) =>
-        run(
+      (a) => {
+        let denied = false
+        return run(
           'ask_approval',
           'Approval',
           a.action,
           Effect.gen(function* () {
             d.setActing(false)
             const ok = yield* d.interaction.requestApproval(d.owner, a.action, a.detail)
+            denied = !ok
             return text(ok ? 'Approved. Go ahead.' : "Denied. Don't do it; ask what they'd like instead.")
           }),
-          // A denial is shown as a failed step.
-          { ok: (r) => r.content[0]?.type === 'text' && r.content[0].text.startsWith('Approved') }
-        ),
+          // A denial is the user's choice, not a failure: a neutral "Denied" step.
+          { outcome: () => (denied ? 'denied' : null) }
+        )
+      },
       { searchHint: 'approve confirm permission ask before delete send buy install' }
     ),
 

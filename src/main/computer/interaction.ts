@@ -13,9 +13,22 @@ export interface TeachTarget {
   instruction: string
   step: number
   total: number
+  /** The wait's id, set once it waits, so a press on the overlay answers this step and no other. */
+  id?: string
 }
 
-export type TeachOutcome = { kind: 'done' } | { kind: 'said'; text: string } | { kind: 'stopped' }
+/**
+ * How a Show-me step ended: done (Done, or "ok" typed), clicked (the user clicked inside the
+ * spotlight), they couldn't find it, they handed the rest over ("Do it for me"), said something
+ * else, or the reply was stopped.
+ */
+export type TeachOutcome =
+  | { kind: 'done' }
+  | { kind: 'clicked' }
+  | { kind: 'cant_find' }
+  | { kind: 'hand_over' }
+  | { kind: 'said'; text: string }
+  | { kind: 'stopped' }
 
 /** What computer use is waiting on the human for; null when the wait is over. */
 export type Waiting =
@@ -34,7 +47,7 @@ export const makeInteraction = (hooks: {
   readonly notActing: () => void
 }) => {
   let approval: { wait: Extract<Waiting, { kind: 'approval' }>; done: Deferred.Deferred<boolean> } | null = null
-  let teach: { wait: Extract<Waiting, { kind: 'teach' }>; done: Deferred.Deferred<TeachOutcome> } | null = null
+  let teach: { wait: Extract<Waiting, { kind: 'teach' }>; target: TeachTarget; done: Deferred.Deferred<TeachOutcome> } | null = null
   let seq = 0
   const listeners = new Set<(w: Waiting) => void>()
   const current = (): Waiting => approval?.wait ?? teach?.wait ?? null
@@ -91,9 +104,10 @@ export const makeInteraction = (hooks: {
         if (teach) yield* resolveTeach({ kind: 'stopped' })
         const done = yield* Deferred.make<TeachOutcome>()
         const { instruction, step, total } = target
-        const entry = { wait: { kind: 'teach' as const, id: `t_${++seq}`, instruction, step, total, ...owner }, done }
+        const id = `t_${++seq}`
+        const entry = { wait: { kind: 'teach' as const, id, instruction, step, total, ...owner }, target: { ...target, id }, done }
         teach = entry
-        hooks.spotlight(target)
+        hooks.spotlight(entry.target)
         changed()
         return yield* Deferred.await(done).pipe(
           Effect.onInterrupt(() =>
@@ -107,6 +121,18 @@ export const makeInteraction = (hooks: {
       }),
     resolveTeach,
     teachPending: () => teach !== null,
+    /** The Show-me step waiting now, even while an approval waits too. */
+    teachWait: () => teach?.wait ?? null,
+    /** The spotlight of the step waiting now (input space), if one waits. */
+    teachTarget: (): TeachTarget | null => teach?.target ?? null,
+    /** The control of step `id` moved: the spotlight follows it. Ignored once that step is over. */
+    moveTeach: (id: string, rect: ScreenRect) =>
+      Effect.sync(() => {
+        if (!teach || teach.wait.id !== id) return false
+        teach.target = { ...teach.target, rect }
+        hooks.spotlight(teach.target)
+        return true
+      }),
     current,
     subscribe: (f: (w: Waiting) => void) => {
       listeners.add(f)

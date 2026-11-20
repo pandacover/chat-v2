@@ -177,6 +177,8 @@ export const makeControl = (p: Platform) => {
           )
         )
       ),
+    /** The control at a point in screen space, if any (read again while a Show-me step waits). */
+    elementAt: (x: number, y: number): Ctl<ScreenRect | null> => lift(() => p.elementAt(x, y)),
     windows: (): Ctl<ReadonlyArray<WindowInfo & { minimized?: boolean }>> => lift(() => p.windows()),
     focusWindow: (title: string): Ctl<WindowInfo> => lift(() => p.focusWindow(title)),
     foreground: (): Ctl<WindowInfo> => lift(() => p.foreground()),

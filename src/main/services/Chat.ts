@@ -92,6 +92,11 @@ export class Chat extends Context.Service<
     readonly regenerate: (input: { sessionId: string; assistantId: string }) => Effect.Effect<SessionView, ChatError>
     readonly continue: (input: { sessionId: string; assistantId: string }) => Effect.Effect<SessionView, ChatError>
     readonly stop: (messageId: string) => Effect.Effect<void>
+    /**
+     * Switches a running computer reply between doing it and showing how, from its next tool call
+     * on. To do while a Show-me step of it waits: that step is handed over, as "just do it" would.
+     */
+    readonly setComputerMode: (input: { sessionId: string; messageId: string; mode: Mode }) => Effect.Effect<void>
     readonly switchBranch: (input: { sessionId: string; messageId: string }) => Effect.Effect<SessionView, ChatError>
     readonly linesSince: (
       messageId: string,
@@ -115,6 +120,9 @@ export class Chat extends Context.Service<
       // Open windows show what computer use waits on (an approval, a Show-me step) in its chat.
       const unsubscribe = computer.subscribe((waiting) => broadcaster.send({ type: 'computer', waiting }))
       yield* Effect.addFinalizer(() => Effect.sync(unsubscribe))
+      // And the computer tool each reply is running, live, in its step list.
+      const undoing = computer.onDoing((e) => broadcaster.send({ type: 'computerDoing', messageId: e.messageId, doing: e.doing }))
+      yield* Effect.addFinalizer(() => Effect.sync(undoing))
 
       const computerOn = (session: Session) => session.computerEnabled && computer.supported
       /** What the chat's last message was read as (do it, or show me how); a follow-up like "next" keeps it. */
@@ -127,6 +135,14 @@ export class Chat extends Context.Service<
        * use for. "Just do it" typed during a Show-me step switches it.
        */
       const computerReplies = new Map<string, Mode>()
+      /** A running reply's mode changes: kept for its next tool call and the chat's next message, and shown on the reply. */
+      const switchMode = (sessionId: string, messageId: string, mode: Mode) => {
+        if (!computerReplies.has(messageId) || computerReplies.get(messageId) === mode) return false
+        computerReplies.set(messageId, mode)
+        saveMode(sessionId, mode)
+        broadcaster.send({ type: 'computerMode', messageId, mode })
+        return true
+      }
 
       /** The tool sets a reply in `session` gets, built afresh for each reply. */
       const toolSets = (session: Session): ToolModuleFactory[] => [
@@ -134,7 +150,11 @@ export class Chat extends Context.Service<
         ...(computerOn(session)
           ? [
               (ctx: Parameters<ToolModuleFactory>[0]) =>
-                computer.module(ctx, { mode: () => computerReplies.get(ctx.messageId) ?? 'do', stop: () => void Effect.runFork(stop(ctx.messageId)) })
+                computer.module(ctx, {
+                  mode: () => computerReplies.get(ctx.messageId) ?? 'do',
+                  setMode: (mode) => void switchMode(ctx.sessionId, ctx.messageId, mode),
+                  stop: () => void Effect.runFork(stop(ctx.messageId))
+                })
             ]
           : [])
       ]
@@ -296,7 +316,10 @@ export class Chat extends Context.Service<
           // Claimed before it runs, so a reply started meanwhile from the same place forks.
           const sessionId = plan.resume && !plan.resume.fork ? plan.resume.session : randomUUID()
           yield* db.use((d) => d.claimAgentSession(assistant.id, sessionId))
-          if (mode) computerReplies.set(assistant.id, mode)
+          if (mode) {
+            computerReplies.set(assistant.id, mode)
+            broadcaster.send({ type: 'computerMode', messageId: assistant.id, mode })
+          }
           const hooks: ReplyHooks = {
             text: (delta) => Effect.runSync(Effect.forEach(buffer.push(delta), emit, { discard: true })),
             step: (step) => Effect.runPromise(endLine.pipe(Effect.andThen(emit(stepLine(step))))),
@@ -484,10 +507,7 @@ export class Chat extends Context.Service<
         const waiting = computer.waiting()
         if (waiting?.kind === 'teach' && waiting.sessionId === input.sessionId && input.text.trim()) {
           // "Just do it": the reply may act from the next tool call on.
-          if (handsOver(input.text) && computerReplies.has(waiting.messageId)) {
-            computerReplies.set(waiting.messageId, 'do')
-            saveMode(input.sessionId, 'do')
-          }
+          if (handsOver(input.text)) switchMode(input.sessionId, waiting.messageId, 'do')
           yield* computer.teachDone(waiting.id, teachAnswer(input.text))
           return yield* view(input.sessionId)
         }
@@ -549,6 +569,15 @@ export class Chat extends Context.Service<
           yield* FiberMap.remove(generations, messageId)
         })
 
+      const setComputerMode = (input: { sessionId: string; messageId: string; mode: Mode }) =>
+        Effect.gen(function* () {
+          if (!switchMode(input.sessionId, input.messageId, input.mode)) return
+          // Doing it now: a step of this reply waiting on the user is handed over.
+          const waiting = computer.waiting()
+          if (input.mode === 'do' && waiting?.kind === 'teach' && waiting.messageId === input.messageId)
+            yield* computer.teachDone(waiting.id, { kind: 'hand_over' })
+        })
+
       const switchBranch = Effect.fn('Chat.switchBranch')(function* (input: { sessionId: string; messageId: string }) {
         yield* messageIn(input.sessionId, input.messageId)
         yield* db.use((d) => d.activate(input.messageId))
@@ -568,6 +597,7 @@ export class Chat extends Context.Service<
         regenerate,
         continue: continueReply,
         stop,
+        setComputerMode,
         switchBranch,
         linesSince,
         lastMemoryRun: Effect.sync(() => lastMemoryRun)

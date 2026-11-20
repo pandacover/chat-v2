@@ -1,8 +1,10 @@
 // End to end: computer use in the real app, hidden (CHAT_V2_HEADLESS=1), with a scripted model
 // (e2e-query.ts) and a fake platform (e2e-platform.ts), so nothing reaches the desktop. It drives
 // the chat window: a task with an approval (clicked, denied with Esc, approved with Ctrl+Enter
-// once armed), "show me how" (the overlay's Done, the chat's Done, a typed answer), and Stop in
-// the middle of typing. Captures of the cards go to <outDir>.
+// once armed), "show me how" (the overlay's Done, the chat's Done, a typed answer, Can't find it,
+// Do it for me, a click inside the spotlight as it follows its control), the mode chip, an
+// approval answered from the notch, the step under way shown live, and Stop in the middle of
+// typing. Captures of the cards go to <outDir>.
 //
 //   bun run build
 //   node test/computer/e2e.mjs <playwright-core dir> <outDir>
@@ -198,9 +200,65 @@ try {
   ok((await lastReply().innerText()).includes('You said “There is no switch for it”'), 'the step line keeps what was typed')
   await capture('show-me-done')
 
+  // The callout's other answers: "Can't find it" (the model asks again), then "Do it for me".
+  const calloutSays = async (text) => (await overlay.locator('.callout p').count()) === 1 && (await overlay.locator('.callout p').innerText()) === text
+  const clicksBefore = fake('click').length
+  await send('Show me how to change the scale')
+  await step.waitFor()
+  await until(() => calloutSays('Click Scale'), 'the scale step shows on the overlay')
+  ok((await lastReply().locator('[data-computer-mode]').innerText()) === 'Showing you', 'the reply shows it is showing you how')
+  await capture('mode-chip')
+  await overlay.getByRole('button', { name: 'Can’t find it' }).click()
+  await until(async () => (await lastReply().innerText()).includes("Couldn't find it"), "Can't find it ends the step, and the step line says so")
+  await until(() => calloutSays('Click Scale'), 'the model shows the step again')
+  await overlay.getByRole('button', { name: 'Do it for me' }).click()
+  await until(async () => (await lastReply().innerText()).includes('Changed the scale.'), 'Do it for me hands over: the reply may act')
+  ok(fake('click').length === clicksBefore + 1, 'and its click reached the platform')
+
+  // The mode chip switches a running reply: from showing to doing, mid-step.
+  await send('Show me how to pin the tab')
+  await step.waitFor()
+  await lastReply().locator('[data-computer-mode="teach"]').click()
+  await until(async () => (await lastReply().innerText()).includes('Pinned it.'), 'the chip switches the reply to doing it, and the waiting step is handed over')
+
+  // An approval answered from the notch, while the chat is out of sight.
+  await send('Delete them once more')
+  await card.waitFor()
+  const asking = overlay.locator('.notch.asking')
+  await until(async () => (await asking.count()) === 1 && (await asking.innerText()).includes('Delete 3 files from Downloads'), 'the notch asks the approval')
+  const approve = asking.getByRole('button', { name: 'Approve' })
+  ok(await approve.isDisabled(), "the notch's Approve is not armed at once")
+  await capture('notch-approval', 'computer-overlay.html')
+  await until(async () => !(await approve.isDisabled()), "and arms after a beat", 2000)
+  await approve.click()
+  await until(async () => (await lastReply().innerText()).includes('Deleted them.'), "the notch's Approve lets the reply go on")
+  ok((await card.count()) === 0, "the chat's card went with it")
+
+  // A click inside the spotlight ends a click step; the spotlight follows the control as it moves.
+  await send('Show me how to open settings')
+  await step.waitFor()
+  await until(() => calloutSays('Click Settings'), 'the settings step shows on the overlay')
+  const spotLeft = () => overlay.locator('.spot').evaluate((el) => el.style.left)
+  const before2 = await spotLeft()
+  await app.evaluate(() => void (globalThis.e2eRect = { x: 700, y: 420, width: 80, height: 30 }))
+  await until(async () => (await spotLeft()) !== before2, `the spotlight follows the control (${before2} → moved)`, 3000)
+  await app.evaluate(() => {
+    globalThis.e2eUserCursor = { x: 710, y: 430 }
+    globalThis.e2ePressed = true
+  })
+  await until(async () => (await lastReply().innerText()).includes('Settings are open.'), 'a click inside the spotlight ends the step', 3000)
+  await app.evaluate(() => {
+    globalThis.e2eUserCursor = null
+    globalThis.e2eRect = undefined
+  })
+
   // Stop in the middle of typing.
   await send('Please type a lot')
   await until(async () => fake('type').length > 0, 'typing started')
+  // Live progress: the tool under way shows in the reply while it runs, with the reply's mode.
+  await until(async () => (await lastReply().locator('[data-step-line="now"]').count()) === 1 && (await lastReply().locator('[data-step-line="now"]').innerText()).includes('Type'), 'the step under way shows live')
+  ok((await lastReply().locator('[data-computer-mode]').innerText()) === 'Doing it', 'the reply shows it is doing it')
+  await capture('live-step')
   const stop = page.getByRole('button', { name: 'Stop', exact: true })
   await stop.waitFor()
   const atClick = fake('type').length

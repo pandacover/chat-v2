@@ -4,7 +4,17 @@ import type { TeachTarget } from './interaction'
 export interface Activity {
   readonly text: string
   readonly waiting: boolean
+  /** An approval waiting: the notch asks it, with Approve and Deny. */
+  readonly approval?: { readonly id: string; readonly title: string; readonly detail: string }
 }
+
+/**
+ * A press on the overlay that answers a wait, with the wait's id: the Show-me callout's Done,
+ * Can't find it and Do it for me, or the notch's Approve and Deny.
+ */
+export type OverlayAnswer =
+  | { readonly kind: 'done' | 'cant_find' | 'hand_over'; readonly id: string }
+  | { readonly kind: 'approve' | 'deny'; readonly id: string }
 
 /**
  * What computer use needs from the desktop besides the platform: the overlay window, content
@@ -20,8 +30,10 @@ export interface OverlayPort {
   readonly show: (acting: boolean, teach: TeachTarget | null, activity: Activity | null) => void
   /** Content protection on every chat-v2 window, so none of them appears in screenshots. */
   readonly protect: (on: boolean) => void
-  /** Called when the user presses Done on the overlay's callout. */
-  readonly onDone: (listener: () => void) => void
+  /** Called when the user answers a wait on the overlay (the callout's buttons, the notch's Approve / Deny). */
+  readonly onAnswer: (listener: (answer: OverlayAnswer) => void) => void
+  /** Whether the pointer is on one of the overlay's own controls now (so a click there isn't a click on the app). */
+  readonly pointerOnControl?: () => boolean
   /** Holds the global Stop shortcut (on) or lets it go (off). Held only while a computer reply runs. */
   readonly stopKey: (on: boolean) => void
   /** Called when the user presses the Stop shortcut, or Stop in the notch. */
@@ -52,7 +64,7 @@ export const cameraHousing = (d: { internal: boolean; bounds: Rect; workArea: Re
 export const noOverlay: OverlayPort = {
   show: () => {},
   protect: () => {},
-  onDone: () => {},
+  onAnswer: () => {},
   stopKey: () => {},
   onStopKey: () => {},
   dispose: () => {}

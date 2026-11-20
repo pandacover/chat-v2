@@ -252,7 +252,9 @@ const handlers: Record<string, Handler> = {
   'computer:supported': () => ComputerUse.use((c) => Effect.succeed(c.supported)),
   'computer:waiting': () => ComputerUse.use((c) => Effect.sync(c.waiting)),
   'computer:approve': (id, approved) => ComputerUse.use((c) => c.approve(str(id, 'id'), approved === true)),
-  'computer:teachDone': (id) => ComputerUse.use((c) => c.teachDone(str(id, 'id')))
+  'computer:teachDone': (id) => ComputerUse.use((c) => c.teachDone(str(id, 'id'))),
+  'computer:setMode': (sessionId, messageId, mode) =>
+    Chat.use((c) => c.setComputerMode({ sessionId: str(sessionId, 'sessionId'), messageId: str(messageId, 'messageId'), mode: mode === 'teach' ? 'teach' : 'do' }))
 }
 
 /** Calls made while the app quits are never answered; the window closes before it could use one. */

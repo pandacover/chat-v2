@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ComputerWait } from '@shared/computer'
+  import { APPROVE_ARM_MS, type ComputerWait } from '@shared/computer'
   import { modKey, shortcut } from '@/lib/keys'
   import { fly } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
@@ -7,8 +7,8 @@
   /** What computer use waits on in this reply: an approval, or a Show-me step for the user to do. */
   let { wait }: { wait: NonNullable<ComputerWait> } = $props()
 
-  // Approve arms after a short beat, so a key pressed for something else can't say yes.
-  const ARM_MS = 700
+  // Approve arms after a short beat, so a key pressed for something else can't say yes (the notch's too).
+  const ARM_MS = APPROVE_ARM_MS
   let armed = $state(false)
   $effect(() => {
     void wait.id

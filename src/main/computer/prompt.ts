@@ -1,4 +1,5 @@
 import { homedir } from 'node:os'
+import { handsOver } from './intent'
 
 /** The system prompt section for computer use: the modes, operating the computer, safety and memory. */
 export const instructions = (platform: 'windows' | 'macos' | 'linux', home = homedir()) => {
@@ -52,6 +53,14 @@ When the user tells you a lasting preference ("call me Sam", "my projects live i
 /** The mode tag the driver puts in front of each user message while computer use is on. */
 export const modeTag = (mode: 'do' | 'teach', text: string) => `[mode: ${mode}] ${text}`
 
-/** A message the user typed while a Show-me step waits: "done" and the like finish the step; anything else is passed on. */
-export const teachAnswer = (text: string): { kind: 'done' } | { kind: 'said'; text: string } =>
-  /^(done|next|ok(ay)?|got it|did it|finished|yes)\b/i.test(text.trim()) ? { kind: 'done' } : { kind: 'said', text: text.trim() }
+/** A whole message that only acknowledges the step ("ok", "Done!"); "ok, but I can't find it" isn't one. */
+const ACK = /^(ok(ay)?|k|done|next|yes|yep|yeah|got it|did it|i did it|finished)[.!]*$/i
+
+/**
+ * A message the user typed while a Show-me step waits: a bare acknowledgement finishes the step;
+ * anything else, including handing the task over ("ok, just do it"), reaches the model as said.
+ */
+export const teachAnswer = (text: string): { kind: 'done' } | { kind: 'said'; text: string } => {
+  const t = text.trim()
+  return !handsOver(t) && ACK.test(t) ? { kind: 'done' } : { kind: 'said', text: t }
+}

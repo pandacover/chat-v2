@@ -10,7 +10,7 @@ const bridge: ComputerOverlayBridge = {
     return () => void ipcRenderer.off('computer-overlay:state', on)
   },
   hits: (rects) => ipcRenderer.send('computer-overlay:hits', rects),
-  press: (what) => ipcRenderer.send('computer-overlay:press', what)
+  press: (what: string, id?: string) => ipcRenderer.send('computer-overlay:press', what, id)
 }
 
 contextBridge.exposeInMainWorld('computerOverlay', bridge)
