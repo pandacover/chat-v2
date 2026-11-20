@@ -7,6 +7,7 @@ import {
   BUILTIN_TOOLS,
   CLICK_SETTLE_MS,
   CLICK_STEP,
+  MAX_TASK_READS,
   MAX_TASK_TOOLS,
   STOPPED_TEXT,
   builtinStep,
@@ -62,7 +63,7 @@ describe('stopping mid-task', () => {
     const remembered = h.calls.filter((c) => c === 'remember').length
     await h.run(h.cu.userTurn)
     expect(h.calls.filter((c) => c === 'remember').length).toBe(remembered + 1)
-    expect(textOf(await r.tool('press_keys', { combo: 'ctrl+s' }))).toBe('Pressed.')
+    expect(textOf(await r.tool('press_keys', { combo: 'ctrl+s' }))).toStartWith('Pressed.')
   })
 
   test('Stop during an approval releases it as denied', async () => {
@@ -271,15 +272,19 @@ describe('policy', () => {
     const h = await harness()
     h.setMode('teach')
     const r = await h.reply()
-    for (const name of ['click', 'type_text', 'press_keys', 'scroll', 'drag', 'open', 'focus_window']) {
+    for (const name of ['click', 'type_text', 'press_keys', 'scroll', 'drag', 'move_mouse', 'open', 'focus_window']) {
       const res = (await r.tool(name, {})) as { denied?: string }
       expect(res.denied).toContain('The user wants to learn this')
     }
     expect(textOf(await r.tool('look_at_screen'))).toContain('Screenshot 1024x576px')
     // Switched mid-reply: the next result tells the model, once.
     h.setMode('do')
-    expect(textOf(await r.tool('press_keys', { combo: 'enter' }))).toBe(`Pressed.${MODE_SWITCHED.do}`)
-    expect(textOf(await r.tool('press_keys', { combo: 'enter' }))).toBe('Pressed.')
+    const switched = textOf(await r.tool('press_keys', { combo: 'enter' }))
+    expect(switched).toStartWith('Pressed.')
+    expect(switched).toEndWith(MODE_SWITCHED.do)
+    const after = textOf(await r.tool('press_keys', { combo: 'enter' }))
+    expect(after).toStartWith('Pressed.')
+    expect(after).not.toContain(MODE_SWITCHED.do)
   })
 
   test('read-only shell commands run; others, and file writes, ask first', async () => {
@@ -312,8 +317,8 @@ describe('policy', () => {
   test(`a runaway reply is stopped after ${MAX_TASK_TOOLS} tool calls`, async () => {
     const h = await harness()
     const r = await h.reply()
-    for (let i = 0; i < MAX_TASK_TOOLS; i++) await r.tool('list_windows')
-    const over = await r.tool('list_windows')
+    for (let i = 0; i < MAX_TASK_TOOLS; i++) await r.tool('press_keys', { combo: 'tab', screenshot: false })
+    const over = await r.tool('press_keys', { combo: 'tab', screenshot: false })
     expect(textOf(over)).toContain(`Stopped after ${MAX_TASK_TOOLS} steps`)
     expect(r.steps.at(-1)).toEqual({ tool: 'computer_stop', label: `Stopped after ${MAX_TASK_TOOLS} steps`, ok: false })
     expect(await r.tool('look_at_screen')).toEqual({ denied: STOPPED_TEXT })
@@ -325,8 +330,80 @@ describe('tools', () => {
     const h = await harness()
     const r = await h.reply()
     const res = await r.tool('type_text', { text: 'cats', element: 7, submit: true })
-    expect(textOf(res)).toBe('Typed and pressed Enter.')
+    expect(textOf(res)).toStartWith("Replaced the field's text and pressed Enter.")
     expect(h.calls.filter((c) => c !== 'remember')).toEqual(['set 7 cats', 'click 120,110', 'keys enter'])
+  })
+
+  test('type_text says whether it replaced a field or typed at the cursor', async () => {
+    const h = await harness({ setValue: async () => 'typed' })
+    const r = await h.reply()
+    expect(textOf(await r.tool('type_text', { text: 'x', element: 3, screenshot: false }))).toBe('Typed.')
+    expect(textOf(await r.tool('type_text', { text: 'x', screenshot: false }))).toBe('Typed.')
+    const { tools } = await r.client.listTools()
+    expect(tools.find((t) => t.name === 'type_text')?.description).toContain("the field's text is replaced")
+  })
+
+  test('ui_elements tells the model when the list was cut short, with a real count', async () => {
+    const els = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, type: 'Button', name: `Item ${i}`, x: 0, y: 0, width: 20, height: 10 }))
+    let asked = 0
+    const h = await harness({
+      uiTree: async (max) => {
+        asked = max
+        return { window: { title: 'Big', process: 'big' }, elements: els, truncated: true }
+      }
+    })
+    const r = await h.reply()
+    const all = textOf(await r.tool('ui_elements', {}))
+    expect(asked).toBeGreaterThan(80) // reads more than it shows, so it can count
+    expect(all).toContain('(first 80 of 100+; pass name to narrow)')
+    expect(all).toContain('The list was cut short')
+    const none = textOf(await r.tool('ui_elements', { name: 'save' }))
+    expect(none).toBe('Window "Big" (big): no control named like "save" among those read. The list was cut short (time or size limit), so more controls may exist: narrow by name or call again.')
+  })
+
+  test('ui_elements without truncation: plain count and plain miss', async () => {
+    const els = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, type: 'Button', name: `Item ${i}`, x: 0, y: 0, width: 20, height: 10 }))
+    const h = await harness({ uiTree: async () => ({ window: { title: 'W', process: 'w' }, elements: els }) })
+    const r = await h.reply()
+    const all = textOf(await r.tool('ui_elements', {}))
+    expect(all).toContain('(first 80 of 100; pass name to narrow)')
+    expect(all).not.toContain('cut short')
+    expect(textOf(await r.tool('ui_elements', { name: 'save' }))).toBe('Window "W" (w): no control named like "save".')
+  })
+
+  test('a step label names an element from an older list', async () => {
+    let n = 0
+    const h = await harness({
+      uiTree: async () => {
+        n++
+        return { window: { title: 'W', process: 'w' }, elements: [{ id: n * 10, type: 'Button', name: `Button ${n}`, x: 0, y: 0, width: 20, height: 10 }] }
+      }
+    })
+    const r = await h.reply()
+    await r.tool('ui_elements', {})
+    await r.tool('ui_elements', {})
+    await r.tool('click', { element: 10 })
+    expect(r.steps.at(-1)?.detail).toBe('“Button 1”')
+  })
+
+  test("a new reply doesn't use the last reply's screenshot for coordinates", async () => {
+    const h = await harness()
+    const r1 = await h.reply()
+    await r1.tool('look_at_screen')
+    expect(textOf(await r1.tool('click', { x: 1, y: 1, screenshot: false }))).toBe('Clicked.')
+    r1.abort.abort()
+    const r2 = await h.reply()
+    expect(textOf(await r2.tool('click', { x: 1, y: 1 }))).toContain('Call look_at_screen first')
+  })
+
+  test("where controls can't be read, ui_elements isn't offered or named in the prompt", async () => {
+    const h = await harness({ name: 'linux', controls: false })
+    const r = await h.reply()
+    const { tools } = await r.client.listTools()
+    expect(tools.map((t) => t.name)).not.toContain('ui_elements')
+    expect(tools.map((t) => t.name)).toContain('click')
+    expect(r.mod.instructions).not.toContain('mcp__computer__ui_elements')
+    expect(r.mod.instructions).not.toContain('call ui_elements')
   })
 
   test('a tool that throws reports an error instead of hanging', async () => {
@@ -373,7 +450,7 @@ describe('tools', () => {
     const r = await h.reply()
     const { tools } = await r.client.listTools()
     expect(tools.map((t) => t.name).sort()).toEqual(
-      ['ask_approval', 'clear_highlight', 'click', 'drag', 'find_files', 'focus_window', 'list_windows', 'look_at_screen', 'open', 'press_keys', 'remember', 'reveal_file', 'scroll', 'teach_step', 'type_text', 'ui_elements', 'wait'].sort()
+      ['ask_approval', 'clear_highlight', 'click', 'drag', 'find_files', 'focus_window', 'list_windows', 'look_at_screen', 'move_mouse', 'open', 'press_keys', 'remember', 'reveal_file', 'scroll', 'teach_step', 'type_text', 'ui_elements', 'wait'].sort()
     )
     for (const t of tools) {
       expect(String(t._meta?.['anthropic/searchHint'] ?? '').length).toBeGreaterThan(5)
@@ -518,7 +595,9 @@ describe('user controls', () => {
     expect(h.mode()).toBe('do')
     expect(r.steps.at(-1)?.detail).toBe('Click Display · Handed over')
     // The hand-over said it: no second note on the next result.
-    expect(textOf(await r.tool('press_keys', { combo: 'enter' }))).toBe('Pressed.')
+    const next = textOf(await r.tool('press_keys', { combo: 'enter' }))
+    expect(next).toStartWith('Pressed.')
+    expect(next).not.toContain(MODE_SWITCHED.do)
   })
 
   test('the notch asks a waiting approval; Approve only counts once armed, through the same path as the chat', async () => {
@@ -623,5 +702,243 @@ describe('user controls', () => {
     expect(h.overlay.last().teach?.rect.x).toBe(40)
     h.overlay.pressDone()
     await step
+  })
+})
+
+type Content = Array<{ type: string; text?: string; data?: string }>
+const content = (r: unknown) => (r as { content: Content }).content
+const plain = { data: '', mime: 'image/jpeg' as const, imageWidth: 1024, imageHeight: 576, screen: { x: 0, y: 0, width: 2048, height: 1152 }, window: { title: 'W', process: 'w' } }
+
+describe('acting with feedback', () => {
+
+  test('an action answers with a fresh screenshot after a settle, which becomes the frame', async () => {
+    let n = 0
+    let shotAt = 0
+    let clickedAt = 0
+    const h = await harness(
+      {
+        // The first shot covers a 2048-wide monitor, the next ones a 1024-wide one at x 3000.
+        screenshot: async () => {
+          shotAt = Date.now()
+          n++
+          return {
+            data: Buffer.from(`shot${n}`).toString('base64'),
+            mime: 'image/jpeg',
+            imageWidth: 1024,
+            imageHeight: 576,
+            screen: n === 1 ? { x: 0, y: 0, width: 2048, height: 1152 } : { x: 3000, y: 0, width: 1024, height: 576 },
+            window: n === 1 ? { title: 'Inbox', process: 'mail' } : { title: 'New message', process: 'mail' },
+            cursor: { x: 3100, y: 50 }
+          }
+        },
+        click: async () => void (clickedAt = Date.now()),
+        // Where the click left the pointer (10,10 in the first frame).
+        cursor: async () => ({ x: 20, y: 20 })
+      },
+      { settleMs: 60 }
+    )
+    const r = await h.reply()
+    await r.tool('look_at_screen')
+    const res = content(await r.tool('click', { x: 10, y: 10 }))
+    expect(shotAt - clickedAt).toBeGreaterThanOrEqual(50)
+    expect(res[0]).toEqual({ type: 'text', text: 'Clicked.' })
+    expect(res[1]).toMatchObject({ type: 'image', data: Buffer.from('shot2').toString('base64') })
+    expect(res[2]!.text).toBe(
+      'Screenshot 1024x576px. Active window: "New message" (mail), changed from "Inbox" (mail). Pointer at 100,50. This is now the frame for coordinates.'
+    )
+    // The next pixel action maps through the new frame.
+    h.calls.length = 0
+    expect(textOf(await r.tool('move_mouse', { x: 100, y: 100, screenshot: false }))).toBe('Moved the pointer.')
+    expect(h.calls).toEqual(['move 3100,100'])
+  })
+
+  test('screenshot: false answers with text only and takes no screenshot', async () => {
+    let shots = 0
+    const h = await harness({
+      screenshot: async () => {
+        shots++
+        return plain
+      }
+    })
+    const r = await h.reply()
+    await r.tool('look_at_screen')
+    const calls: Array<[string, Record<string, unknown>]> = [
+      ['click', { x: 1, y: 1 }],
+      ['scroll', { x: 1, y: 1, amount: 3 }],
+      ['drag', { from_x: 1, from_y: 1, to_x: 5, to_y: 5 }],
+      ['press_keys', { combo: 'tab' }],
+      ['type_text', { text: 'hi' }],
+      ['move_mouse', { x: 3, y: 3 }]
+    ]
+    for (const [name, args] of calls) {
+      const res = content(await r.tool(name, { ...args, screenshot: false }))
+      expect([name, res.map((c) => c.type)]).toEqual([name, ['text']])
+    }
+    expect(shots).toBe(1)
+    for (const [name, args] of calls) expect([name, content(await r.tool(name, args)).map((c) => c.type)]).toEqual([name, ['text', 'image', 'text']])
+    expect(shots).toBe(1 + calls.length)
+  })
+
+  test('typing and keys say which control has focus; a failed follow-up shot is a note, not an error', async () => {
+    let fail = false
+    const h = await harness({
+      focused: async () => ({ type: 'Edit', name: 'Search', value: 'cats' }),
+      screenshot: async () => {
+        if (fail) throw new Error('Capture failed.')
+        return plain
+      }
+    })
+    const r = await h.reply()
+    await r.tool('look_at_screen')
+    expect(content(await r.tool('type_text', { text: 'cats' }))[0]!.text).toBe('Typed. Focus: Edit "Search" value="cats".')
+    expect(content(await r.tool('scroll', { x: 1, y: 1, amount: 1 }))[0]!.text).toBe('Scrolled.')
+    fail = true
+    const res = (await r.tool('press_keys', { combo: 'tab' })) as { isError?: boolean }
+    expect(res.isError).toBeUndefined()
+    expect(textOf(res)).toBe('Pressed. Focus: Edit "Search" value="cats". (No screenshot after it: Capture failed. Call look_at_screen.)')
+  })
+
+  test('Stop during the settle cuts the action short', async () => {
+    const h = await harness({}, { settleMs: 5000 })
+    const r = await h.reply()
+    await r.tool('look_at_screen')
+    const click = r.tool('click', { x: 1, y: 1 })
+    await sleep(50)
+    const t0 = Date.now()
+    await h.run(h.cu.stop)
+    expect(textOf(await click)).toBe(STOPPED_TEXT)
+    expect(Date.now() - t0).toBeLessThan(500)
+  })
+})
+
+describe('zoom', () => {
+  test('a region is captured from screen space at higher resolution and does not become the frame', async () => {
+    const asked: Array<{ maxWidth: number; region?: unknown; maxHeight?: number | undefined }> = []
+    const h = await harness({
+      screenshot: async (maxWidth, o) => {
+        asked.push({ maxWidth, ...(o?.region ? { region: o.region, maxHeight: o.maxHeight } : {}) })
+        // A 3840x2160 monitor at 1024 wide; a region is captured 1:1 up to 1024x768.
+        if (!o?.region) return { data: 'ZnVsbA==', mime: 'image/jpeg', imageWidth: 1024, imageHeight: 576, screen: { x: 0, y: 0, width: 3840, height: 2160 }, window: { title: 'W', process: 'w' } }
+        const k = Math.min(1, 1024 / o.region.width, 768 / o.region.height)
+        return { data: 'em9vbQ==', mime: 'image/jpeg', imageWidth: Math.round(o.region.width * k), imageHeight: Math.round(o.region.height * k), screen: o.region, window: { title: 'W', process: 'w' } }
+      }
+    })
+    const r = await h.reply()
+    expect(textOf(await r.tool('look_at_screen', { region: { x: 0, y: 0, width: 100, height: 100 } }))).toContain('Call look_at_screen first')
+    await r.tool('look_at_screen')
+    const z = content(await r.tool('look_at_screen', { region: { x: 200, y: 100, width: 200, height: 100 } }))
+    expect(asked.at(-1)).toEqual({ maxWidth: 1024, region: { x: 750, y: 375, width: 750, height: 375 }, maxHeight: 768 })
+    expect(z[0]).toMatchObject({ type: 'image', data: 'em9vbQ==' })
+    expect(z[1]!.text).toBe(
+      "Zoom of the screenshot's region x 200–400, y 100–200, at 3.75x (750x375px). Only for looking: coordinates you pass to tools stay in the full screenshot. A point (u, v) here is (200 + u/3.75, 100 + v/3.75) there; e.g. this image's centre 375,188 is 300,150."
+    )
+    // Clicks still map through the full screenshot.
+    await r.tool('click', { x: 512, y: 288, screenshot: false })
+    expect(h.calls.at(-1)).toBe('click 1920,1080')
+    // A region past the edge is clipped; one too small is refused.
+    await r.tool('look_at_screen', { region: { x: 1000, y: 500, width: 300, height: 300 } })
+    expect(asked.at(-1)!.region).toEqual({ x: 3750, y: 1875, width: 90, height: 285 })
+    const tiny = (await r.tool('look_at_screen', { region: { x: 1020, y: 10, width: 50, height: 50 } })) as { isError?: boolean }
+    expect(tiny.isError).toBe(true)
+    expect(textOf(tiny)).toContain('at least 8x8')
+  })
+})
+
+describe('more input', () => {
+  test('modifiers, double and triple clicks go to the platform; by element they click its centre', async () => {
+    const h = await harness()
+    const r = await h.reply()
+    await r.tool('look_at_screen')
+    h.calls.length = 0
+    await r.tool('click', { x: 10, y: 10, modifiers: ['ctrl', 'shift', 'ctrl'], screenshot: false })
+    await r.tool('click', { x: 10, y: 10, triple: true, screenshot: false })
+    await r.tool('click', { element: 5, modifiers: ['shift'], screenshot: false })
+    await r.tool('click', { element: 5, screenshot: false })
+    expect(h.calls).toEqual(['click 20,20 ctrl+shift', 'click 20,20 x3', 'click 120,110 shift'])
+    expect(r.steps.map((s) => s.label)).toEqual(['Ctrl+Shift+click', 'Triple-click', 'Shift+click', 'Click'])
+  })
+
+  test('move_mouse hovers over an element or a point without clicking, and counts as acting', async () => {
+    const h = await harness()
+    const r = await h.reply()
+    await r.tool('look_at_screen')
+    h.calls.length = 0
+    await r.tool('move_mouse', { element: 3, screenshot: false })
+    await r.tool('move_mouse', { x: 50, y: 60, screenshot: false })
+    expect(h.calls).toEqual(['move 120,110', 'move 100,120'])
+    expect(r.steps.map((s) => s.label)).toEqual(['Hover', 'Hover'])
+    // The user moving the mouse afterwards is a takeover, as after a click.
+    h.moveMouse(900, 900)
+    expect(textOf(await r.tool('move_mouse', { x: 1, y: 1 }))).toContain('they have taken over')
+  })
+
+  test('press_keys lists the key names for the platform', async () => {
+    const h = await harness()
+    const r = await h.reply()
+    const { tools } = await r.client.listTools()
+    const desc = tools.find((t) => t.name === 'press_keys')?.description ?? ''
+    expect(desc).toContain('"ctrl+/"')
+    expect(desc).toContain('pagedown')
+    expect(desc).toContain('Modifiers: ctrl, shift, alt, win')
+  })
+})
+
+describe('control state and other windows', () => {
+  test('ui_elements lines carry value, checked, selected, expanded and disabled', () => {
+    const el = (o: object) => ({ id: 1, type: 'Edit', name: 'Search', x: 0, y: 0, width: 20, height: 10, ...o })
+    const f = (o: object) => formatElements([el(o)], () => null, { max: 5 }).lines[0]
+    expect(f({ value: 'cats' })).toBe('1 Edit "Search" value="cats"')
+    expect(f({ value: 'Search' })).toBe('1 Edit "Search"') // the same as the name: left out
+    expect(f({ value: 'x'.repeat(50) })).toBe(`1 Edit "Search" value="${'x'.repeat(40)}…"`)
+    expect(f({ type: 'CheckBox', checked: true, disabled: true })).toBe('1 CheckBox "Search" checked disabled')
+    expect(f({ type: 'CheckBox', checked: false })).toBe('1 CheckBox "Search" unchecked')
+    expect(f({ type: 'CheckBox', checked: 'mixed' })).toBe('1 CheckBox "Search" mixed')
+    expect(f({ type: 'TabItem', selected: true })).toBe('1 TabItem "Search" selected')
+    expect(f({ type: 'ComboBox', value: 'Arial', expanded: false })).toBe('1 ComboBox "Search" value="Arial" collapsed')
+  })
+
+  test('ui_elements can read another window where the platform supports it', async () => {
+    const asked: Array<string | undefined> = []
+    const h = await harness({
+      otherWindows: true,
+      uiTree: async (_max, o) => {
+        asked.push(o?.window)
+        return { window: { title: o?.window ? 'Calculator' : 'Notepad', process: o?.window ? 'calc' : 'notepad' }, elements: [{ id: 1, type: 'Button', name: 'Seven', x: 0, y: 0, width: 10, height: 10 }] }
+      }
+    })
+    const r = await h.reply()
+    const { tools } = await r.client.listTools()
+    expect(Object.keys(tools.find((t) => t.name === 'ui_elements')?.inputSchema.properties ?? {})).toContain('window')
+    expect(textOf(await r.tool('ui_elements', { window: 'calc' }))).toStartWith('Window "Calculator" (calc), which may not be in front: call focus_window before you click in it')
+    expect(textOf(await r.tool('ui_elements', {}))).toStartWith('Window "Notepad" (notepad):')
+    expect(asked).toEqual(['calc', undefined])
+  })
+
+  test("where only the active window can be read, there's no window option", async () => {
+    const h = await harness()
+    const r = await h.reply()
+    const { tools } = await r.client.listTools()
+    expect(Object.keys(tools.find((t) => t.name === 'ui_elements')?.inputSchema.properties ?? {})).not.toContain('window')
+  })
+})
+
+describe('the step cap', () => {
+  test('reads count separately from actions, at a higher cap', async () => {
+    const h = await harness()
+    const r = await h.reply()
+    for (let i = 0; i < 120; i++) await r.tool('list_windows')
+    // 120 reads haven't used up any of the acting budget.
+    for (let i = 0; i < MAX_TASK_TOOLS; i++) expect(textOf(await r.tool('press_keys', { combo: 'tab', screenshot: false }))).toBe('Pressed.')
+    expect(textOf(await r.tool('press_keys', { combo: 'tab', screenshot: false }))).toContain(`Stopped after ${MAX_TASK_TOOLS} steps`)
+  })
+
+  test(`a reply that only looks is stopped after ${MAX_TASK_READS} reads`, async () => {
+    const h = await harness()
+    const r = await h.reply()
+    for (let i = 0; i < MAX_TASK_READS; i++) await r.tool('list_windows')
+    const over = await r.tool('look_at_screen')
+    expect(textOf(over)).toContain(`Stopped after ${MAX_TASK_READS} looks`)
+    expect(r.steps.at(-1)).toEqual({ tool: 'computer_stop', label: `Stopped after ${MAX_TASK_READS} looks`, ok: false })
+    expect(await r.tool('click', { x: 1, y: 1 })).toEqual({ denied: STOPPED_TEXT })
   })
 })

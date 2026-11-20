@@ -12,14 +12,14 @@ import type { Platform } from './platform/types'
 import { makePolicy, builtinStep, BUILTIN_TOOLS } from './policy'
 import type { Activity, OverlayPort } from './port'
 import { instructions } from './prompt'
-import { MAX_TASK_TOOLS, SERVER, makeServer, type Mode } from './tools'
+import { MAX_TASK_READS, MAX_TASK_TOOLS, SERVER, makeServer, type Mode } from './tools'
 
 export { supported, makePlatform } from './platform'
 export { noOverlay, type Activity, type OverlayAnswer, type OverlayPort } from './port'
 export { builtinStep, isReadOnlyCommand, BUILTIN_TOOLS } from './policy'
 export { modeTag, teachAnswer } from './prompt'
 export { decideMode, handsOver } from './intent'
-export { MAX_TASK_TOOLS, STOPPED_TEXT, type Mode } from './tools'
+export { MAX_TASK_READS, MAX_TASK_TOOLS, STOPPED_TEXT, type Mode } from './tools'
 export type { Waiting, TeachOutcome } from './interaction'
 export type { Platform } from './platform/types'
 
@@ -40,7 +40,8 @@ export interface ComputerUseApi {
   readonly stop: Effect.Effect<void>
   /**
    * A new user message (a new reply, or steering one that runs): input is allowed again, the
-   * takeover check starts afresh, and the app the user was in is remembered. `module` calls it too.
+   * takeover check starts afresh, the last screenshot is forgotten (coordinates need a fresh
+   * look), and the app the user was in is remembered. `module` calls it too.
    */
   readonly userTurn: Effect.Effect<void>
   /** What computer use is waiting on the human for right now. */
@@ -60,6 +61,8 @@ export interface ComputerUseOptions {
   readonly overlay: OverlayPort
   /** Saves a fact the model was told to remember (chat-v2's memory). */
   readonly remember: (fact: string, ctx: RunContext) => Promise<void>
+  /** How long an action gets to show its effect before the screenshot after it (tests shorten it). */
+  readonly settleMs?: number
 }
 
 /** The notch is narrow: longer step lines are cut (it ellipsizes any remainder itself). */
@@ -175,6 +178,7 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
   const userTurn = Effect.suspend(() => {
     if (!control) return Effect.void
     control.resetTakeover()
+    control.forgetShot()
     control.resume()
     return control.remember().pipe(Effect.ignore)
   })
@@ -196,7 +200,9 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
     if (!control || !p) throw new Error('Computer use needs Windows, macOS, or Linux with an X11 display.')
     const owner: Owner = { sessionId: ctx.sessionId, messageId: ctx.messageId }
     let ended = false
-    let calls = 0
+    let acts = 0
+    let reads = 0
+    let tripped = false
     const stopReply = opts.stop ?? (() => {})
     /** The last finished step's line, saved and shown; the live line goes only after it. */
     let lastLine: Promise<void> = Promise.resolve()
@@ -227,11 +233,12 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
       else if (acting === owner) acting = null
       draw()
     }
-    // A runaway reply is stopped after MAX_TASK_TOOLS calls.
-    const count = () => {
-      if (++calls <= MAX_TASK_TOOLS) return true
-      if (calls === MAX_TASK_TOOLS + 1) {
-        step({ tool: 'computer_stop', label: `Stopped after ${MAX_TASK_TOOLS} steps`, ok: false })
+    // A runaway reply is stopped after MAX_TASK_TOOLS acting calls, or MAX_TASK_READS reads.
+    const count = (kind: 'act' | 'read' = 'act') => {
+      if (kind === 'read' ? ++reads <= MAX_TASK_READS : ++acts <= MAX_TASK_TOOLS) return true
+      if (!tripped) {
+        tripped = true
+        step({ tool: 'computer_stop', label: kind === 'read' ? `Stopped after ${MAX_TASK_READS} looks` : `Stopped after ${MAX_TASK_TOOLS} steps`, ok: false })
         control.cancel()
         setActing(false)
         void Effect.runPromise(interaction.cancelAll(owner))
@@ -280,7 +287,8 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
         doing,
         mode: opts.mode,
         signal: ctx.signal,
-        count
+        count,
+        ...(o.settleMs != null ? { settleMs: o.settleMs } : {})
       }),
       builtins: BUILTIN_TOOLS,
       stepFor: builtinStep,

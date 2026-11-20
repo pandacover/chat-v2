@@ -41,8 +41,12 @@ export const fakePlatform = (over: Partial<Platform> = {}) => {
       window: { title: 'Notepad', process: 'notepad' }
     }),
     cursor: async () => cursor,
-    click: async (x, y) => {
-      calls.push(`click ${x},${y}`)
+    move: async (x, y) => {
+      calls.push(`move ${x},${y}`)
+      cursor = { x, y }
+    },
+    click: async (x, y, button, count, mods) => {
+      calls.push(`click ${x},${y}${count > 1 ? ` x${count}` : ''}${mods?.length ? ` ${mods.join('+')}` : ''}`)
       cursor = { x, y }
     },
     drag: async () => {},
@@ -110,12 +114,12 @@ export const disposeAll = async () => {
   for (const rt of open.splice(0)) await rt.dispose()
 }
 
-export const harness = async (over: Partial<Platform> = {}) => {
+export const harness = async (over: Partial<Platform> = {}, opts: { settleMs?: number } = {}) => {
   const { p, calls, moveMouse } = fakePlatform(over)
   const overlay = fakeOverlay()
   const facts: string[] = []
   const rt = ManagedRuntime.make(
-    ComputerUse.layer({ platform: p, overlay: overlay.port, remember: async (fact) => void facts.push(fact) })
+    ComputerUse.layer({ platform: p, overlay: overlay.port, remember: async (fact) => void facts.push(fact), settleMs: opts.settleMs ?? 5 })
   )
   open.push(rt)
   const cu = await rt.runPromise(ComputerUse.use((c) => Effect.succeed(c)))

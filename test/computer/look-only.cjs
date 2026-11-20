@@ -6,7 +6,7 @@ const refuse = (what) => async () => {
   throw new Error(`${what} is off in this test run.`)
 }
 
-const ACTS = ['restoreFocus', 'focusWindow', 'click', 'drag', 'scroll', 'type', 'keys', 'invoke', 'setValue', 'open', 'reveal']
+const ACTS = ['restoreFocus', 'focusWindow', 'move', 'click', 'drag', 'scroll', 'type', 'keys', 'invoke', 'setValue', 'open', 'reveal']
 
 exports.wrap = (platform) => {
   const looked = { ...platform }

@@ -27,6 +27,10 @@ export const platform: Platform = {
     g.e2ePressed = false
     return down
   },
+  move: async (x, y) => {
+    log(`move ${x},${y}`)
+    cursor = { x, y }
+  },
   click: async (x, y, button, count) => {
     log(`click ${x},${y} ${button} x${count}`)
     cursor = { x, y }
