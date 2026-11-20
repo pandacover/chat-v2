@@ -33,6 +33,8 @@ export interface ToolDeps {
   readonly count: (kind?: 'act' | 'read') => boolean
   /** How long an action's effect is given to show before the screenshot after it (default SETTLE_MS). */
   readonly settleMs?: number
+  /** Takes the computer for this reply; the refusal to give the model if another chat has it. */
+  readonly claim: () => string | null
 }
 
 export const SERVER = 'computer'
@@ -184,7 +186,10 @@ const allToolDefs = (d: ToolDeps) => {
       outcome?: () => 'denied' | null
     } = {}
   ): Promise<CallToolResult> => {
-    if (d.control.stopped() || d.signal.aborted) return Promise.resolve(text(STOPPED_TEXT, true))
+    if (d.signal.aborted) return Promise.resolve(text(STOPPED_TEXT, true))
+    const busy = d.claim()
+    if (busy) return Promise.resolve(text(busy, true))
+    if (d.control.stopped()) return Promise.resolve(text(STOPPED_TEXT, true))
     if (!d.count(opts.read ? 'read' : 'act')) return Promise.resolve(text(opts.read ? TOO_MANY_READS_TEXT : TOO_MANY_TEXT, true))
     if (opts.live !== false)
       d.doing(opts.quiet ? { label: opts.live ?? label, quiet: true } : { label, ...(detail ? { detail } : {}), quiet: false })
@@ -738,7 +743,8 @@ const allToolDefs = (d: ToolDeps) => {
           a.action,
           Effect.gen(function* () {
             d.setActing(false)
-            const ok = yield* d.interaction.requestApproval(d.owner, a.action, a.detail)
+            // The user moved the mouse to answer; that isn't taking over.
+            const ok = yield* d.interaction.requestApproval(d.owner, a.action, a.detail).pipe(Effect.ensuring(Effect.sync(() => d.control.resetTakeover())))
             denied = !ok
             return text(ok ? 'Approved. Go ahead.' : "Denied. Don't do it; ask what they'd like instead.")
           }),

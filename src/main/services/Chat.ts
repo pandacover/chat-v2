@@ -565,7 +565,7 @@ export class Chat extends Context.Service<
           if (!(yield* FiberMap.has(generations, messageId))) return
           stopRequested.add(messageId)
           // Input in progress is cut off and its waits are denied before the reply goes.
-          if (computerReplies.has(messageId)) yield* computer.stop
+          if (computerReplies.has(messageId)) yield* computer.stopReply(messageId)
           yield* FiberMap.remove(generations, messageId)
         })
 

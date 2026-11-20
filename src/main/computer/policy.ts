@@ -19,14 +19,40 @@ const AUTO_ALLOW = new Set<string>([...SAFE_TOOLS, 'Read', 'Glob', 'Grep', 'WebS
 /** Built-ins this policy answers for: the ones it brings, and file writes, which always need approval. */
 const OWNED_BUILTINS = new Set<string>([...BUILTIN_TOOLS, 'Write', 'Edit'])
 
+/** git accepts any unambiguous prefix of a long option, so `--outp=x` is `--output=x`. */
+const gitOutput = (t: string) => {
+  const name = t.split('=')[0] ?? ''
+  return name.length > 3 && '--output'.startsWith(name)
+}
+const GIT_BRANCH_LIST = new Set(['-a', '-r', '-v', '-vv', '--all', '--remotes', '--verbose', '--list', '--show-current', '--no-color'])
+
+/** Per command: true if one of its arguments makes it write files or run something. */
+const UNSAFE_ARG: Record<string, (t: string) => boolean> = {
+  find: (t) => /^-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)$/.test(t),
+  rg: (t) => /^--(pre|hostname-bin)(=|$)/.test(t),
+  tree: (t) => t.startsWith('-o'),
+  file: (t) => t === '-C' || t === '--compile',
+  date: (t) => /^(-s|--set)/.test(t),
+  hostname: () => true,
+  'git branch': (t) => !GIT_BRANCH_LIST.has(t),
+  'git diff': gitOutput,
+  'git log': gitOutput,
+  'git show': gitOutput
+}
+
 /** Shell commands that only read. Anything else goes through Approve / Deny. */
 export const isReadOnlyCommand = (cmd: string): boolean => {
   const c = cmd.trim()
-  if (/[;&|><`]|\$\(/.test(c)) return false
-  if (/\s-(delete|exec|execdir|ok)\b/.test(c)) return false
-  return /^(ls|dir|pwd|cat|type|head|tail|wc|stat|file|du|df|which|where|whoami|hostname|date|echo|find|grep|rg|tree|Get-ChildItem|Get-Content|Get-Item|git (status|log|diff|show|branch))(\s|$)/i.test(
-    c
-  )
+  // One command, one line: no chaining, redirection, substitution, subshells or line breaks, and no
+  // expansion (${X:=--pre=sh}, {--pre=sh,}) that could become a flag after the check below.
+  if (/[;&|><`(){}\r\n\0]|\$[^A-Za-z_]/.test(c)) return false
+  const m = /^(ls|dir|pwd|cat|type|head|tail|wc|stat|file|du|df|which|where|whoami|hostname|date|echo|find|grep|rg|tree|Get-ChildItem|Get-Content|Get-Item|git (?:status|log|diff|show|branch))(?:[ \t]|$)/i.exec(c)
+  if (!m) return false
+  const unsafe = UNSAFE_ARG[(m[1] ?? '').toLowerCase().replace(/[ \t]+/, ' ')]
+  if (!unsafe) return true
+  // Quotes and backslashes are stripped as the shell would before the command sees the flag.
+  const args = c.slice(m[0].length).split(/[ \t]+/).map((t) => t.replace(/['"\\]/g, '')).filter(Boolean)
+  return !args.some(unsafe)
 }
 
 const BUILTIN_LABELS: Record<string, (i: Record<string, unknown>) => [string, string]> = {
@@ -59,6 +85,8 @@ export interface PolicyDeps {
   readonly ended: () => boolean
   /** Counts a tool call; false once the reply has made too many. */
   readonly count: () => boolean
+  /** Takes the computer for this reply; the refusal to give the model if another chat has it. */
+  readonly claim: () => string | null
 }
 
 const allow = (input: Record<string, unknown>): PermissionResult => ({ behavior: 'allow', updatedInput: input })
@@ -72,14 +100,21 @@ export const makePolicy =
   (d: PolicyDeps) =>
   async (name: string, input: Record<string, unknown>, signal: AbortSignal): Promise<PermissionResult | null> => {
     if (!name.startsWith(`mcp__${SERVER}__`) && !OWNED_BUILTINS.has(name)) return null
-    if (d.control.stopped() || d.ended()) return { behavior: 'deny', message: STOPPED_TEXT, interrupt: true }
+    if (d.ended()) return { behavior: 'deny', message: STOPPED_TEXT, interrupt: true }
+    // Reading and searching files don't touch the screen or the approval card; the rest needs the computer.
+    const busy = AUTO_ALLOW.has(name) && !name.startsWith('mcp__') ? null : d.claim()
+    if (busy) return { behavior: 'deny', message: busy }
+    if (d.control.stopped()) return { behavior: 'deny', message: STOPPED_TEXT, interrupt: true }
     // MCP tool calls are counted when they run; built-ins only pass through here.
     if (!name.startsWith('mcp__') && !d.count()) return { behavior: 'deny', message: STOPPED_TEXT, interrupt: true }
     const ask = (title: string, detail: string) =>
-      Effect.runPromise(d.interaction.requestApproval(d.owner, title, detail), { signal }).then(
-        (ok): PermissionResult => (ok ? allow(input) : { behavior: 'deny', message: 'The user denied this.' }),
-        (): PermissionResult => ({ behavior: 'deny', message: 'The user denied this.' })
-      )
+      Effect.runPromise(d.interaction.requestApproval(d.owner, title, detail), { signal })
+        .then(
+          (ok): PermissionResult => (ok ? allow(input) : { behavior: 'deny', message: 'The user denied this.' }),
+          (): PermissionResult => ({ behavior: 'deny', message: 'The user denied this.' })
+        )
+        // The user moved the mouse to answer; that isn't taking over.
+        .finally(() => d.control.resetTakeover())
     if (AUTO_ALLOW.has(name)) return allow(input)
     if (ACT_TOOLS.has(name)) {
       if (d.mode() === 'teach') return { behavior: 'deny', message: "The user wants to learn this (teach mode): don't act for them. Guide them with teach_step instead." }
