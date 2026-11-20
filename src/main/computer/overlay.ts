@@ -1,8 +1,9 @@
 // The computer-use overlay: a full-screen, click-through, always-on-top window. While computer use
 // drives, it draws a hairline frame around the screen; in Show-me mode, a spotlight on the exact
-// control with the instruction and a Done button beside it, which the user can drag aside. While a
-// computer reply runs and no chat-v2 window has focus, a notch at the top of the screen says what
-// it is doing, with Stop. Screen captures leave the overlay out. The global Stop shortcut is here
+// control with the instruction and Done, Can't find it and Do it for me beside it, which the user
+// can drag aside. While a computer reply runs and no chat-v2 window has focus, a notch at the top
+// of the screen says what it is doing, with Stop, and asks a waiting approval with Approve / Deny.
+// Presses that answer a wait carry its id. Screen captures leave the overlay out. The global Stop shortcut is here
 // too: the chat window is often covered while computer use acts.
 //
 // The window takes the mouse only while the pointer is on one of its controls (the callout, the
@@ -18,7 +19,7 @@ import { app, BrowserWindow, globalShortcut, ipcMain, screen, type Rectangle } f
 import { STOP_SHORTCUT } from '@shared/computer'
 import type { OverlayRect, OverlayState, OverlayTeach } from '../../preload/computer-overlay'
 import type { TeachTarget } from './interaction'
-import { type Activity, type OverlayPort, cameraHousing } from './port'
+import { type Activity, type OverlayAnswer, type OverlayPort, cameraHousing } from './port'
 
 /** The platform reports rects in input space (physical pixels on Windows); the overlay works in DIPs. */
 const toDip = (r: Rectangle): Rectangle => (process.platform === 'win32' ? screen.screenToDipRect(null, r) : r)
@@ -35,6 +36,8 @@ export interface ElectronOverlayOptions {
 
 /** How often the pointer is checked while the overlay is up. */
 const POLL_MS = 40
+/** Presses that answer a wait; they come with the wait's id. */
+const ANSWERS = new Set<string>(['done', 'cant_find', 'hand_over', 'approve', 'deny'])
 
 export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayPort & { readonly window: BrowserWindow | null } => {
   const headless = opts.headless ?? process.env.CHAT_V2_HEADLESS === '1'
@@ -44,7 +47,7 @@ export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayP
   let activity: Activity | null = null
   let state: OverlayState = { acting: false, teach: null, notch: null }
   let protecting = false
-  const doneListeners: Array<() => void> = []
+  const answerListeners: Array<(a: OverlayAnswer) => void> = []
   const stopListeners: Array<() => void> = []
   let holdingKey = false
   const pressed = () => {
@@ -151,10 +154,12 @@ export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayP
     hits = rects
     check()
   })
-  ipcMain.on('computer-overlay:press', (e, what: string) => {
+  ipcMain.on('computer-overlay:press', (e, what: string, id?: unknown) => {
     if (!fromOverlay(e.sender)) return
-    if (what === 'done') for (const f of doneListeners) f()
-    else if (what === 'stop') pressed()
+    if (ANSWERS.has(what) && typeof id === 'string') {
+      const a = { kind: what, id } as OverlayAnswer
+      for (const f of answerListeners) f(a)
+    } else if (what === 'stop') pressed()
     else if (what === 'chat') showChat()
     else if (what === 'moved') giveBack()
   })
@@ -216,7 +221,8 @@ export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayP
       if (on) app.on('browser-window-created', onCreated)
       else app.off('browser-window-created', onCreated)
     },
-    onDone: (f) => void doneListeners.push(f),
+    onAnswer: (f) => void answerListeners.push(f),
+    pointerOnControl: () => taking,
     stopKey: (on) => {
       if (on === holdingKey) return
       holdingKey = on

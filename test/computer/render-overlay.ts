@@ -52,6 +52,28 @@ const renderInElectron = async (outDir: string) => {
   await shoot('notch-working', true)
   overlay.show(false, { rect, instruction: 'Click Display to open the screen settings.', step: 2, total: 4 }, { text: 'Your turn · Step 2 of 4 · Click Display to open the screen settings.', waiting: true })
   await shoot('notch-teach', true)
+  // An approval asked in the notch: arming, then armed (the stills turn animations off, so the
+  // first is shot with arming forced), and a long one under a camera housing.
+  const approval = { id: 'ap_1', title: 'Delete 3 files from Downloads', detail: 'old-1.txt\nold-2.txt\nold-3.txt' }
+  overlay.show(false, null, { text: 'Needs your OK', waiting: true, approval })
+  await shoot('notch-approval', true)
+  overlay.window!.webContents.send('computer-overlay:state', {
+    acting: false,
+    teach: null,
+    notch: {
+      text: 'Needs your OK',
+      waiting: true,
+      approval: {
+        id: 'ap_2',
+        title: 'Run a command on your computer that removes every file in the old reports folder, including the hidden ones',
+        detail: 'Remove-Item -Recurse -Force "C:\\Users\\me\\Documents\\Reports\\2019\\old" ; Remove-Item -Recurse -Force "C:\\Users\\me\\Documents\\Reports\\2020\\old"'
+      },
+      camera: { width: 200, height: 37 }
+    }
+  })
+  await shoot('notch-approval-camera', true)
+  const armedNow = await overlay.window!.webContents.executeJavaScript(`document.querySelector('.approve')?.disabled === false`)
+  console.log(`[overlay] notch Approve armed after the beat: ${armedNow}`)
   // Around a MacBook's camera housing, as main sends it on such a screen.
   overlay.window!.webContents.send('computer-overlay:state', { acting: false, teach: null, notch: { text: 'Working · Click', waiting: false, camera: { width: 200, height: 37 } } })
   await shoot('notch-camera', true)

@@ -1,6 +1,6 @@
 import { SvelteMap, SvelteSet } from 'svelte/reactivity'
 import { parseContent, type ArtifactBlock } from '@shared/artifacts'
-import type { ComputerWait } from '@shared/computer'
+import type { ComputerDoing, ComputerMode, ComputerWait } from '@shared/computer'
 import type { UpdateState } from '@shared/types'
 import type {
   Attachment,
@@ -103,6 +103,10 @@ class AppState {
   computerSupported = $state(false)
   /** What computer use waits on the user for, in whichever chat. */
   computerWait = $state<ComputerWait>(null)
+  /** The computer tool each running reply is using now, by message id (live only; never saved). */
+  computerDoing = new SvelteMap<string, ComputerDoing>()
+  /** The mode each running computer reply works in, by message id: doing it, or showing how. */
+  computerModes = new SvelteMap<string, ComputerMode>()
   /** A Show-me step of the open chat waits: a message sent now answers it. */
   teaching = $derived(this.computerWait?.kind === 'teach' && this.computerWait.sessionId === this.view?.session.id)
 
@@ -424,6 +428,13 @@ class AppState {
     await this.attempt(() => api.computer.teachDone(id))
   }
 
+  /** Switches a running computer reply between doing it and showing how. */
+  async setComputerMode(messageId: string, mode: ComputerMode) {
+    const view = this.view
+    if (!view) return
+    await this.attempt(() => api.computer.setMode(view.session.id, messageId, mode))
+  }
+
   async switchBranch(messageId: string) {
     const view = this.view
     if (!view) return
@@ -515,6 +526,15 @@ class AppState {
       this.computerWait = e.waiting
       return
     }
+    if (e.type === 'computerDoing') {
+      if (e.doing) this.computerDoing.set(e.messageId, e.doing)
+      else this.computerDoing.delete(e.messageId)
+      return
+    }
+    if (e.type === 'computerMode') {
+      this.computerModes.set(e.messageId, e.mode)
+      return
+    }
     if (e.type === 'title') {
       const session = this.sessions.find((s) => s.id === e.sessionId)
       if (session) session.title = e.title
@@ -543,6 +563,8 @@ class AppState {
       if (e.model) m.model = e.model
       if (e.status === 'error' && e.error) this.toast(e.error)
       this.liveIds.delete(e.messageId)
+      this.computerDoing.delete(e.messageId)
+      this.computerModes.delete(e.messageId)
     })
   }
 }

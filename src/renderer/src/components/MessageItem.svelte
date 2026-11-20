@@ -36,6 +36,10 @@
   const wait = $derived(app.computerWait?.messageId === message.id ? app.computerWait : null)
   // The Stop shortcut works while another app covers the chat; say so while a computer reply runs.
   const computerRun = $derived(streaming && app.chat.computerEnabled && app.computerSupported)
+  /** The computer tool this reply runs now; while a card asks something, the card says it. */
+  const doing = $derived(streaming && !wait ? (app.computerDoing.get(message.id) ?? null) : null)
+  /** Doing it, or showing how: read from the message, and switchable while the reply runs. */
+  const mode = $derived(computerRun ? (app.computerModes.get(message.id) ?? null) : null)
   // The turn you just sent slides in; opening, switching or forking a chat renders still.
   const fresh = untrack(
     () => app.liveIds.has(node.message.id) || (!!node.message.activeChildId && app.liveIds.has(node.message.activeChildId))
@@ -205,7 +209,7 @@
       {#if block.type === 'text'}
         <Markdown source={block.content} streaming={streaming && i === blocks.length - 1} live={live && i === blocks.length - 1} />
       {:else if block.type === 'steps'}
-        <StepList steps={block.steps} {live} running={streaming && i === blocks.length - 1} done={!streaming} />
+        <StepList steps={block.steps} {live} running={streaming && i === blocks.length - 1} done={!streaming} doing={i === blocks.length - 1 ? doing : null} />
       {:else}
         {@const active = app.artifact?.identifier === block.identifier && app.artifact?.messageId === message.id}
         <button
@@ -253,14 +257,24 @@
 
     {#if wait}
       <ComputerWaitCard {wait} />
-    {:else if streaming && app.control.active && blocks.at(-1)?.type !== 'steps'}
-      <StepList steps={[]} live running />
+    {:else if streaming && (app.control.active || doing) && blocks.at(-1)?.type !== 'steps'}
+      <StepList steps={[]} live running {doing} />
     {:else if streaming && blocks.length === 0}
       <div class="thinking py-1 text-[13.5px]" aria-live="polite">Thinking</div>
     {/if}
     {#if computerRun}
-      <div class="-mt-1 text-[12px] text-muted" in:fade={{ duration: 200 }}>
-        <kbd class="font-[inherit] text-fg-2">{stopShortcutLabel(isMac)}</kbd> stops it from any app
+      <div class="-mt-1 flex items-center gap-2 text-[12px] text-muted" in:fade={{ duration: 200 }}>
+        {#if mode}
+          <!-- The mode this reply works in; a click switches it for the rest of the reply. -->
+          <button
+            class="rounded-full px-2 py-px text-fg-2 shadow-[0_0_0_1px_var(--line)] transition-colors hover:bg-hover hover:text-fg"
+            data-computer-mode={mode}
+            use:tip={mode === 'do' ? 'Show me how instead' : 'Do it for me instead'}
+            onclick={() => app.setComputerMode(message.id, mode === 'do' ? 'teach' : 'do')}>{mode === 'do' ? 'Doing it' : 'Showing you'}</button
+          >
+          <span aria-hidden="true">·</span>
+        {/if}
+        <span><kbd class="font-[inherit] text-fg-2">{stopShortcutLabel(isMac)}</kbd> stops it from any app</span>
       </div>
     {/if}
 

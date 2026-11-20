@@ -90,6 +90,8 @@ public static class ChatV2Host
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool GetMonitorInfo(IntPtr m, ref MONITORINFO mi);
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int idx);
     [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint n, INPUT[] inputs, int size);
     [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int idx);
     [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
@@ -139,7 +141,7 @@ public static class ChatV2Host
     }
 
     static readonly HashSet<string> Immediate = new HashSet<string>(new string[] {
-        "ping", "cursor", "remember", "foreground", "windows", "sql"
+        "ping", "cursor", "pressed", "remember", "foreground", "windows", "sql"
     });
 
     static JavaScriptSerializer NewJson() { return new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 64 }; }
@@ -254,6 +256,9 @@ public static class ChatV2Host
             case "focusWindow": return FocusWindow(Str(p, "title"));
             case "screenshot": return Screenshot(Int(p, "maxWidth", 1280));
             case "cursor": { POINT pt; GetCursorPos(out pt); return Pt(pt.X, pt.Y); }
+            // The primary button (the right one when swapped) is down, or went down since the
+            // last read: a quick click between two polls still counts. No hook, a state read.
+            case "pressed": { int vk = GetSystemMetrics(23) != 0 ? 0x02 : 0x01; return (GetAsyncKeyState(vk) & 0x8001) != 0; }
             case "move": SetCursorPos(Int(p, "x"), Int(p, "y")); return true;
             case "click": return Click(Int(p, "x"), Int(p, "y"), Str(p, "button", "left"), Int(p, "count", 1));
             case "drag": return Drag(Int(p, "x1"), Int(p, "y1"), Int(p, "x2"), Int(p, "y2"));

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte'
+  import { APPROVE_ARM_MS } from '@shared/computer'
   import type { ComputerOverlayBridge, OverlayState } from '../../../preload/computer-overlay'
 
   /**
@@ -82,6 +83,18 @@
   }
 
   const n = $derived(st.notch)
+  const ask = $derived(n?.approval ?? null)
+
+  // Approve in the notch arms after the same beat as the chat's, so a click meant for the app
+  // under it can't say yes.
+  let armed = $state(false)
+  $effect(() => {
+    if (!ask) return
+    void ask.id
+    armed = false
+    const timer = setTimeout(() => (armed = true), APPROVE_ARM_MS)
+    return () => clearTimeout(timer)
+  })
 
   const t = $derived(st.teach)
   const hole = $derived(t ? holeOf(t.rect) : null)
@@ -148,8 +161,9 @@
     </div>
     <p>{t.instruction}</p>
     <div class="row">
-      <span class="hint">Do it, then</span>
-      <button onclick={() => bridge.press('done')}>Done</button>
+      <button class="quiet" onclick={() => t.id && bridge.press('cant_find', t.id)}>Can’t find it</button>
+      <button class="quiet" onclick={() => t.id && bridge.press('hand_over', t.id)}>Do it for me</button>
+      <button class="primary" onclick={() => t.id && bridge.press('done', t.id)}>Done</button>
     </div>
   </div>
 {/if}
@@ -157,20 +171,49 @@
 {#if n}
   <!-- The chat is out of sight: what computer use is doing, at the top of the screen. On a MacBook
        with a camera notch it wraps around the housing, with the status left of it and Stop right. -->
-  <div
-    class="notch"
-    class:camera={!!n.camera}
-    style={n.camera ? `--cam-w:${n.camera.width}px;--cam-h:${n.camera.height}px` : ''}
-    role="status"
-    data-hit
-  >
-    <button class="status" onclick={() => bridge.press('chat')} title="Show the chat">
-      <span class="dot" class:waiting={n.waiting}></span>
-      <span class="text">{n.text}</span>
-    </button>
-    {#if n.camera}<span class="housing" aria-hidden="true"></span>{/if}
-    <button class="stop" onclick={() => bridge.press('stop')}>Stop</button>
-  </div>
+  {#if ask}
+    <!-- An approval waits: asked right here, answered through the same call as the chat's card.
+         Under a MacBook's camera housing the panel starts below it. -->
+    <div
+      class="notch asking"
+      style={n.camera ? `padding-top:${n.camera.height + 6}px` : ''}
+      role="alertdialog"
+      aria-labelledby="ask-title"
+      data-hit
+    >
+      <div class="ask-head">
+        <button class="status" onclick={() => bridge.press('chat')} title="Show the chat">
+          <span class="dot waiting"></span>
+          <span class="text">{n.text}</span>
+        </button>
+        <button class="stop" onclick={() => bridge.press('stop')}>Stop</button>
+      </div>
+      <p class="ask-title" id="ask-title">{ask.title}</p>
+      {#if ask.detail}<div class="ask-detail"><span>{ask.detail}</span></div>{/if}
+      <div class="ask-row">
+        <button class="deny" onclick={() => bridge.press('deny', ask.id)}>Deny</button>
+        <button class="approve" class:armed disabled={!armed} onclick={() => bridge.press('approve', ask.id)}>
+          {#if !armed}<span class="arming" style="--arm:{APPROVE_ARM_MS}ms" aria-hidden="true"></span>{/if}
+          <span class="label">Approve</span>
+        </button>
+      </div>
+    </div>
+  {:else}
+    <div
+      class="notch"
+      class:camera={!!n.camera}
+      style={n.camera ? `--cam-w:${n.camera.width}px;--cam-h:${n.camera.height}px` : ''}
+      role="status"
+      data-hit
+    >
+      <button class="status" onclick={() => bridge.press('chat')} title="Show the chat">
+        <span class="dot" class:waiting={n.waiting}></span>
+        <span class="text">{n.text}</span>
+      </button>
+      {#if n.camera}<span class="housing" aria-hidden="true"></span>{/if}
+      <button class="stop" onclick={() => bridge.press('stop')}>Stop</button>
+    </div>
+  {/if}
 {/if}
 
 <style>
@@ -335,26 +378,36 @@
   .row {
     display: flex;
     align-items: center;
-    justify-content: flex-end;
-    gap: 10px;
-  }
-  .hint {
-    font-size: 11.5px;
-    color: rgba(255, 255, 255, 0.5);
+    gap: 2px;
+    margin: 0 -6px 0 -8px;
   }
   .row button {
     font: inherit;
     border: 0;
     cursor: default;
     height: 28px;
-    padding: 0 14px;
+    padding: 0 8px;
     border-radius: 999px;
-    background: #fff;
-    color: #0b0b0b;
     font-size: 12.5px;
     font-weight: 560;
   }
-  .row button:hover {
+  /* The ways out of a step: plain text until hovered. */
+  .row .quiet {
+    background: none;
+    color: rgba(255, 255, 255, 0.6);
+    font-weight: 500;
+  }
+  .row .quiet:hover {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.1);
+  }
+  .row .primary {
+    margin-left: auto;
+    padding: 0 14px;
+    background: #fff;
+    color: #0b0b0b;
+  }
+  .row .primary:hover {
     background: #e9e9e7;
   }
 
@@ -444,6 +497,111 @@
   }
   .stop:hover {
     background: rgba(255, 255, 255, 0.24);
+  }
+  /* An approval: the notch grows into a small panel with the request and Approve / Deny. */
+  .notch.asking {
+    display: block;
+    width: 380px;
+    max-width: calc(100vw - 32px);
+    height: auto;
+    padding: 6px 12px 12px;
+    border-radius: 0 0 16px 16px;
+  }
+  .ask-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    height: 24px;
+    margin-right: -7px;
+  }
+  .ask-head .text {
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 12px;
+  }
+  .ask-title {
+    margin: 6px 0 0;
+    font-size: 14px;
+    font-weight: 540;
+    line-height: 1.35;
+    letter-spacing: -0.01em;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .ask-detail {
+    margin: 6px 0 0;
+    padding: 5px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.07);
+    color: rgba(255, 255, 255, 0.72);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.45;
+  }
+  /* At most two lines of the exact target; the chat's card has it all. */
+  .ask-detail span {
+    white-space: pre-wrap;
+    word-break: break-all;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .ask-row {
+    display: flex;
+    justify-content: flex-end;
+    gap: 4px;
+    margin-top: 10px;
+  }
+  .ask-row button {
+    position: relative;
+    overflow: hidden;
+    height: 26px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 999px;
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 560;
+    cursor: default;
+  }
+  .deny {
+    background: none;
+    color: rgba(255, 255, 255, 0.72);
+  }
+  .deny:hover {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.1);
+  }
+  /* Arming, as in the chat: the button fills from the left, then takes clicks. */
+  .approve {
+    background: rgba(255, 255, 255, 0.45);
+    color: #0b0b0b;
+  }
+  .approve.armed {
+    background: #fff;
+  }
+  .approve.armed:hover {
+    background: #e9e9e7;
+  }
+  .arming {
+    position: absolute;
+    inset: 0;
+    background: #fff;
+    transform-origin: left;
+    animation: arm var(--arm) linear both;
+  }
+  .approve .label {
+    position: relative;
+  }
+  @keyframes arm {
+    from {
+      transform: scaleX(0);
+    }
   }
   @keyframes drop {
     from {

@@ -6,7 +6,7 @@ import type { Step } from '@shared/steps'
 import type { RunContext, ToolModule } from '../../src/main/agent/module'
 import { ComputerUse, type Mode } from '../../src/main/computer'
 import type { TeachTarget } from '../../src/main/computer/interaction'
-import type { Activity, OverlayPort } from '../../src/main/computer/port'
+import type { Activity, OverlayAnswer, OverlayPort } from '../../src/main/computer/port'
 import type { Platform } from '../../src/main/computer/platform/types'
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -76,12 +76,15 @@ export const fakeOverlay = () => {
   const protect: boolean[] = []
   /** Whether the Stop shortcut is held, after each change. */
   const stopKey: boolean[] = []
-  let done: (() => void) | null = null
+  let answer: ((a: OverlayAnswer) => void) | null = null
   let stop: (() => void) | null = null
+  /** Whether the pointer is on the overlay's own controls. */
+  let onControl = false
   const port: OverlayPort = {
     show: (acting, teach, activity) => void shown.push({ acting, teach, activity }),
     protect: (on) => void protect.push(on),
-    onDone: (f) => void (done = f),
+    onAnswer: (f) => void (answer = f),
+    pointerOnControl: () => onControl,
     stopKey: (on) => void stopKey.push(on),
     onStopKey: (f) => void (stop = f),
     dispose: () => {}
@@ -92,7 +95,12 @@ export const fakeOverlay = () => {
     protect,
     stopKey,
     last: () => shown.at(-1) ?? { acting: false, teach: null, activity: null },
-    pressDone: () => done?.(),
+    /** A press on the callout, for the step it shows now (or an explicit id). */
+    press: (kind: 'done' | 'cant_find' | 'hand_over', id = shown.at(-1)?.teach?.id ?? '') => answer?.({ kind, id }),
+    pressDone: () => answer?.({ kind: 'done', id: shown.at(-1)?.teach?.id ?? '' }),
+    /** Approve or Deny in the notch, for the approval it shows now (or an explicit id). */
+    answerApproval: (ok: boolean, id = shown.at(-1)?.activity?.approval?.id ?? '') => answer?.({ kind: ok ? 'approve' : 'deny', id }),
+    setOnControl: (on: boolean) => void (onControl = on),
     pressStopKey: () => stop?.()
   }
 }
@@ -125,7 +133,7 @@ export const harness = async (over: Partial<Platform> = {}) => {
       attach: async () => {},
       signal: abort.signal
     }
-    const mod: ToolModule = cu.module(ctx, { mode: () => mode })
+    const mod: ToolModule = cu.module(ctx, { mode: () => mode, setMode: (m) => void (mode = m) })
     const [a, b] = InMemoryTransport.createLinkedPair()
     await mod.server.instance.connect(a)
     const client = new Client({ name: 'test', version: '0' })
@@ -149,6 +157,7 @@ export const harness = async (over: Partial<Platform> = {}) => {
     moveMouse,
     reply,
     setMode: (m: Mode) => void (mode = m),
+    mode: () => mode,
     run: <A>(e: Effect.Effect<A>) => rt.runPromise(e)
   }
 }

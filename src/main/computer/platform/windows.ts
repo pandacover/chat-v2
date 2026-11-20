@@ -213,6 +213,7 @@ export const makeWindowsPlatform = (opts: { ownerPid: number; hostDir?: string; 
       return { ...s, window: toWindow(s.window) }
     },
     cursor: () => call('cursor'),
+    pressed: () => call<boolean>('pressed'),
     click: async (x, y, button, count) => void (await call('click', { x, y, button, count })),
     drag: async (x1, y1, x2, y2) => void (await call('drag', { x1, y1, x2, y2 })),
     scroll: async (x, y, dy, dx) => void (await call('scroll', { x, y, dy, dx })),

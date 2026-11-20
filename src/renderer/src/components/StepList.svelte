@@ -1,21 +1,34 @@
 <script lang="ts">
+  import type { ComputerDoing } from '@shared/computer'
   import { type Step, isDesktopRun } from '@shared/steps'
   import { fly, slide } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
   import Icon from './Icon.svelte'
 
-  let { steps, live = false, running = false, done = false }: { steps: Step[]; live?: boolean; running?: boolean; done?: boolean } = $props()
+  /** `doing`: the computer tool running now in this reply, shown live until its step lands. */
+  let {
+    steps,
+    live = false,
+    running = false,
+    done = false,
+    doing = null
+  }: { steps: Step[]; live?: boolean; running?: boolean; done?: boolean; doing?: ComputerDoing | null } = $props()
 
   // Folded to one line by default; the header opens the full list.
   let toggled = $state<boolean | null>(null)
   const open = $derived(toggled ?? false)
   const failed = $derived(steps.filter((s) => !s.ok).length)
-  const desktop = $derived(isDesktopRun(steps))
-  const working = $derived(running && app.control.active)
-  // What the folded line shows while the reply is still going: the action under way, else the last one.
-  const current = $derived<{ label: string; ok: boolean; detail?: string } | null>(
-    working ? { label: app.control.label || 'Working', ok: true } : (steps.at(-1) ?? null)
+  const desktop = $derived(isDesktopRun(steps) || !!doing)
+  const now = $derived<{ label: string; detail?: string; quiet: boolean } | null>(
+    !running ? null : doing ? doing : app.control.active ? { label: app.control.label || 'Working', quiet: false } : null
   )
+  const working = $derived(now !== null)
+  // What the folded line shows while the reply is still going: the action under way, else the last one.
+  // A quiet look (a screenshot, reading the controls) is shown, but plainly.
+  const current = $derived<{ label: string; ok: boolean; detail?: string; quiet?: boolean } | null>(
+    now ? { ...now, ok: true } : (steps.at(-1) ?? null)
+  )
+  const dot = (quiet: boolean | undefined) => (quiet ? 'bg-muted' : 'bg-accent [animation:rec-pulse_1.2s_ease-in-out_infinite]')
 
   // Long runs collapse to the latest few; the rest is one click away.
   const COLLAPSED = 4
@@ -33,7 +46,7 @@
         <span>· {steps.length} {steps.length === 1 ? 'step' : 'steps'}{#if failed}, <span class="text-danger">{failed} failed</span>{/if}</span>
       {:else if !open && current}
         <!-- Slot: each new action rolls in from below as the previous one rolls out above. -->
-        <span class="ml-1 grid h-[1lh] min-w-0 flex-1 overflow-hidden text-[13px] leading-snug" aria-live="polite">
+        <span class="ml-1 grid h-[1lh] min-w-0 flex-1 overflow-hidden text-[13px] leading-snug" aria-live="polite" data-step-line={working ? 'now' : 'last'}>
           {#key `${current.label}
 ${current.detail ?? ''}`}
             <span
@@ -41,9 +54,9 @@ ${current.detail ?? ''}`}
               in:fly={{ y: 14, duration: 260 }}
               out:fly={{ y: -14, duration: 260 }}
             >
-              <span class="size-1.5 shrink-0 rounded-full {working ? 'bg-accent [animation:rec-pulse_1.2s_ease-in-out_infinite]' : current.ok ? 'bg-muted' : 'bg-danger'}"></span>
+              <span class="size-1.5 shrink-0 rounded-full {working ? dot(current.quiet) : current.ok ? 'bg-muted' : 'bg-danger'}"></span>
               <!-- What it did and to what; the target is cut first when the line is short of room. -->
-              <span class="truncate {working ? 'thinking' : ''}">{current.label}{#if current.detail}<span class="text-muted"> · {current.detail}</span>{/if}</span>
+              <span class="truncate {working ? (current.quiet ? 'text-muted' : 'thinking') : ''}">{current.label}{#if current.detail}<span class="text-muted"> · {current.detail}</span>{/if}</span>
             </span>
           {/key}
         </span>
@@ -71,10 +84,13 @@ ${current.detail ?? ''}`}
           </span>
         </div>
       {/each}
-      {#if working}
-        <div class="flex items-start gap-2 py-0.5 text-[13px] leading-snug" in:fly={{ y: 4, duration: 200 }}>
-          <span class="grid h-[1lh] w-3 shrink-0 place-items-center"><span class="size-1.5 rounded-full bg-accent [animation:rec-pulse_1.2s_ease-in-out_infinite]"></span></span>
-          <span class="thinking">{app.control.label || 'Working'}</span>
+      {#if now}
+        <div class="flex items-start gap-2 py-0.5 text-[13px] leading-snug" in:fly={{ y: 4, duration: 200 }} data-step-now>
+          <span class="grid h-[1lh] w-3 shrink-0 place-items-center"><span class="size-1.5 rounded-full {dot(now.quiet)}"></span></span>
+          <span class="min-w-0 {now.quiet ? 'text-muted' : 'thinking'}">
+            {now.label}
+            {#if now.detail}<span class="block text-[12px] text-muted">{now.detail}</span>{/if}
+          </span>
         </div>
       {/if}
     </div>
