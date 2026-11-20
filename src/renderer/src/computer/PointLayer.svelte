@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { cubicOut } from 'svelte/easing'
   import type { ComputerOverlayBridge, OverlayPoint, OverlayPointHit, OverlayRect } from '../../../preload/computer-overlay'
 
   /**
@@ -103,12 +104,20 @@
     }
   }
 
-  const tagAbove = (r: OverlayRect) => (r.y >= 30 ? r.y - 26 : r.y + r.height + 6)
+  const tagAbove = (r: OverlayRect) => (r.y >= 32 ? r.y - 28 : r.y + r.height + 6)
+
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)')
+  const fade = (_: Element, { duration = 160, y = 0 }: { duration?: number; y?: number } = {}) => ({
+    duration: reduce.matches ? 0 : duration,
+    easing: cubicOut,
+    css: (t: number) => `opacity:${t};${y ? `transform:translateY(${(1 - t) * y}px)` : ''}`
+  })
 </script>
 
 <svelte:window {onkeydown} />
 
 {#if point}
+  <!-- It leaves at once (no fade): the click that ends it is followed by a capture of the screen. -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="point"
@@ -122,49 +131,33 @@
       e.preventDefault()
       cancel()
     }}
+    in:fade
   >
     {#if box}
       <div class="box" style="left:{box.x}px;top:{box.y}px;width:{box.width}px;height:{box.height}px"></div>
-      <span class="tag mono" style="left:{box.x}px;top:{tagAbove(box)}px">{Math.round(box.width)} × {Math.round(box.height)}</span>
+      <span class="tag cu-ink mono" style="left:{box.x}px;top:{tagAbove(box)}px">{Math.round(box.width)} × {Math.round(box.height)}</span>
     {:else if hover}
       <div class="control" style="left:{hover.rect.x}px;top:{hover.rect.y}px;width:{hover.rect.width}px;height:{hover.rect.height}px"></div>
-      <span class="tag" style="left:{hover.rect.x}px;top:{tagAbove(hover.rect)}px">{hover.label}</span>
+      <span class="tag cu-ink" style="left:{hover.rect.x}px;top:{tagAbove(hover.rect)}px">{hover.label}</span>
     {/if}
   </div>
-  <div class="hint" class:below-notch={notch} role="status">
+  <div class="hint cu-ink" class:below-notch={notch} role="status" in:fade={{ duration: 200, y: -6 }}>
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"
+      ><circle cx="12" cy="12" r="8" /><path d="M12 2v4M12 18v4M2 12h4M18 12h4" /></svg
+    >
     <span>Click a spot or a control, or drag a box</span>
-    <span class="sep" aria-hidden="true"></span>
-    <button onclick={cancel}>Cancel <kbd>Esc</kbd></button>
+    <button class="cu-btn small" onclick={cancel}>Cancel <kbd class="cu-kbd">Esc</kbd></button>
   </div>
 {/if}
 
 <style>
-  /* The app's tokens (src/renderer/src/app.css); this page doesn't load the app's stylesheet. The
-     hint and tags keep the light theme's ink in both themes, like the notch and the callout. */
-  .point,
-  .hint {
-    --fg: #1d1b18;
-    --bg: #f7f5f0;
-    --accent: #b9502a;
-    --accent-wash: #b9502a14;
-    --scrim: #1d1b1824;
-    --shadow: 0 1px 2px #1d1b180d, 0 8px 24px -8px #1d1b1826;
-  }
-  @media (prefers-color-scheme: dark) {
-    .point,
-    .hint {
-      --accent: #e5703f;
-      --accent-wash: #e5703f1a;
-      --scrim: #00000033;
-      --shadow: 0 1px 2px #0000004d, 0 12px 32px -12px #00000099;
-    }
-  }
-
+  /* Computer use's shared look (computer.css): the hint and tags are ink, like the notch and the
+     callout. The mark is the app's ember, as it is drawn into the image that goes with the message. */
   .point {
     position: fixed;
     inset: 0;
     cursor: crosshair;
-    background: var(--scrim);
+    background: rgb(12 11 10 / 0.2);
     touch-action: none;
   }
   /* While a box is drawn the dim moves to the box's shadow, so the box itself shows clear. */
@@ -175,15 +168,17 @@
     position: absolute;
     border-radius: 4px;
     box-shadow:
-      0 0 0 200vmax var(--scrim),
-      inset 0 0 0 2px var(--accent);
+      0 0 0 200vmax rgb(12 11 10 / 0.2),
+      inset 0 0 0 2px var(--cu-accent);
     pointer-events: none;
   }
   .control {
     position: absolute;
-    border-radius: 4px;
-    background: var(--accent-wash);
-    box-shadow: inset 0 0 0 1.5px var(--accent);
+    border-radius: 6px;
+    background: rgb(229 112 63 / 0.1);
+    box-shadow:
+      inset 0 0 0 1.5px var(--cu-accent),
+      0 0 0 1px rgb(20 19 17 / 0.25);
     pointer-events: none;
     transition:
       left 80ms ease-out,
@@ -194,70 +189,51 @@
   .tag {
     position: absolute;
     max-width: 360px;
-    height: 20px;
-    padding: 0 7px;
-    border-radius: 6px;
-    background: var(--fg);
-    color: var(--bg);
+    height: 22px;
+    padding: 0 9px;
+    border-radius: var(--cu-r-pill);
     font-size: 11.5px;
-    line-height: 20px;
+    font-weight: 500;
+    line-height: 22px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     pointer-events: none;
   }
   .mono {
-    font-family: var(--font-mono);
+    font-family: var(--cu-mono);
     font-size: 11px;
+    font-variant-numeric: tabular-nums;
   }
 
   .hint {
     position: fixed;
     top: 16px;
-    left: 50%;
-    transform: translateX(-50%);
+    left: 0;
+    right: 0;
+    width: max-content;
+    margin: 0 auto;
     display: flex;
     align-items: center;
     gap: 10px;
-    height: 32px;
-    padding: 0 5px 0 12px;
-    border-radius: 10px;
-    background: var(--fg);
-    color: var(--bg);
+    height: 36px;
+    padding: 0 5px 0 14px;
+    border-radius: var(--cu-r-pill);
+    color: var(--cu-fg-2);
     font-size: 12.5px;
     white-space: nowrap;
-    box-shadow: var(--shadow);
     cursor: default;
+  }
+  .hint > span {
+    color: var(--cu-fg);
   }
   .hint.below-notch {
     top: 48px;
   }
-  .sep {
-    width: 1px;
-    height: 14px;
-    background: currentColor;
-    opacity: 0.2;
+  .hint .cu-btn {
+    margin-left: 2px;
   }
-  .hint button {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    height: 22px;
-    padding: 0 8px;
-    border: 0;
-    border-radius: 6px;
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    font-size: 12px;
-    cursor: default;
-  }
-  .hint button:hover {
-    background: color-mix(in srgb, var(--bg) 14%, transparent);
-  }
-  kbd {
-    font-family: var(--font-mono);
-    font-size: 10.5px;
-    opacity: 0.6;
+  .hint .cu-kbd {
+    color: var(--cu-fg-3);
   }
 </style>

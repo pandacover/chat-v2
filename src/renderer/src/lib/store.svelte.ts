@@ -553,8 +553,9 @@ class AppState {
         this.pointPairs.set(first.id, second.id)
         this.pointPairs.set(second.id, first.id)
       }
+      // A mark's own chips and the composer taking focus say it was added; a toast would sit over
+      // the composer's controls meanwhile.
       if (e.error) this.toast(e.error)
-      else if (e.attachments.length) this.toast('Added to your message', 'info')
       if (e.attachments.length) this.pointAdded++
       return
     }

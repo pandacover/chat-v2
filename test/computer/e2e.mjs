@@ -98,7 +98,8 @@ try {
 
   // 1. An approval, clicked.
   await send('Delete the old files in Downloads')
-  const card = page.locator('[data-computer-wait="approval"]')
+  // A card that is over folds away for a moment, inert meanwhile: only a live one counts.
+  const card = page.locator('[data-computer-wait="approval"]:not([inert])')
   await card.waitFor()
   ok((await card.innerText()).includes('Delete 3 files from Downloads'), 'the approval shows in the chat with its title')
   ok(await shortcutHeld(), 'the Stop shortcut is held while a computer reply runs')
@@ -132,7 +133,7 @@ try {
 
   // Show me, from the message alone.
   await send('Show me how to turn on night light')
-  const step = page.locator('[data-computer-wait="teach"]')
+  const step = page.locator('[data-computer-wait="teach"]:not([inert])')
   await step.waitFor()
   ok((await step.innerText()).includes('Step 1 of 3'), 'the Show-me step shows in the chat')
   await sleep(1200)

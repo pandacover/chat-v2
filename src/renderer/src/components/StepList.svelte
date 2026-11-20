@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
   import type { ComputerDoing } from '@shared/computer'
   import { type Step, isDesktopRun } from '@shared/steps'
   import { fly, slide } from '@/lib/motion'
@@ -19,77 +20,132 @@
   const open = $derived(toggled ?? false)
   const failed = $derived(steps.filter((s) => !s.ok).length)
   const desktop = $derived(isDesktopRun(steps) || !!doing)
+
+  /**
+   * The live tool's step lands a moment before main says the tool is over. From then on the
+   * finished step stands for it, so the same line never shows twice (live and done) for a frame.
+   * `since` is how many steps there were when this tool started: its step lands at that index.
+   */
+  let since = $state<{ doing: ComputerDoing | null; count: number }>({ doing: null, count: 0 })
+  $effect.pre(() => {
+    const d = doing
+    untrack(() => {
+      if (d !== since.doing) since = { doing: d, count: steps.length }
+    })
+  })
+  const landed = $derived(!!doing && since.doing === doing && !doing.quiet && steps.length > since.count)
+  const liveDoing = $derived(landed ? null : doing)
+
   const now = $derived<{ label: string; detail?: string; quiet: boolean } | null>(
-    !running ? null : doing ? doing : app.control.active ? { label: app.control.label || 'Working', quiet: false } : null
+    !running ? null : liveDoing ? liveDoing : app.control.active ? { label: app.control.label || 'Working', quiet: false } : null
   )
-  const working = $derived(now !== null)
-  // What the folded line shows while the reply is still going: the action under way, else the last one.
-  // A quiet look (a screenshot, reading the controls) is shown, but plainly.
-  const current = $derived<{ label: string; ok: boolean; detail?: string; quiet?: boolean } | null>(
-    now ? { ...now, ok: true } : (steps.at(-1) ?? null)
-  )
-  const dot = (quiet: boolean | undefined) => (quiet ? 'bg-muted' : 'bg-accent [animation:rec-pulse_1.2s_ease-in-out_infinite]')
+
+  type Line = { key: string; label: string; detail?: string; tone: 'live' | 'quiet' | 'done' | 'failed' | 'summary'; summary?: string }
+  // The folded line: the action under way, else the last one; once the reply is over, the count.
+  const line = $derived.by<Line | null>(() => {
+    if (done) return { key: 'summary', label: '', tone: 'summary' }
+    if (now) return { key: `${now.label}\n${now.detail ?? ''}`, label: now.label, detail: now.detail, tone: now.quiet ? 'quiet' : 'live' }
+    const last = steps.at(-1)
+    if (!last) return null
+    return { key: `${last.label}\n${last.detail ?? ''}`, label: last.label, detail: last.detail, tone: last.ok ? 'done' : 'failed' }
+  })
+
+  /**
+   * Each new line rolls in, so a line that changes faster than DWELL ms (quick looks between
+   * actions) would stack up half-rolled lines: changes that come sooner wait out the dwell, and
+   * only the latest is shown. A change to the same line (live → done) applies at once.
+   */
+  const DWELL = 180
+  let shown = $state<Line | null>(untrack(() => line))
+  let shownAt = 0
+  let pending: ReturnType<typeof setTimeout> | undefined
+  $effect.pre(() => {
+    const next = line
+    untrack(() => {
+      clearTimeout(pending)
+      const wait = shownAt + DWELL - performance.now()
+      if (!shown || !next || next.key === shown.key || wait <= 0) {
+        if (next?.key !== shown?.key) shownAt = performance.now()
+        shown = next
+      } else
+        pending = setTimeout(() => {
+          shown = line
+          shownAt = performance.now()
+        }, wait)
+    })
+  })
+  $effect(() => () => clearTimeout(pending))
 
   // Long runs collapse to the latest few; the rest is one click away.
   const COLLAPSED = 4
   let expanded = $state(false)
   const hidden = $derived(expanded ? 0 : Math.max(0, steps.length - COLLAPSED))
-  const shown = $derived(steps.slice(hidden))
+  const shownSteps = $derived(steps.slice(hidden))
 </script>
 
-<div class="flex flex-col gap-0.5 rounded-lg bg-surface px-3 py-2 shadow-[0_0_0_1px_var(--line)]">
-  <div class="flex items-center gap-1.5 text-[12px] text-muted {open ? 'mb-0.5' : ''}">
-    <button class="-mx-1 flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 text-left hover:text-fg" aria-expanded={open} onclick={() => (toggled = !open)}>
-      <Icon name={desktop ? 'monitor' : 'globe'} size={12} />
-      <span>{desktop ? 'Computer' : 'Browser'}</span>
-      {#if done}
-        <span>· {steps.length} {steps.length === 1 ? 'step' : 'steps'}{#if failed}, <span class="text-danger">{failed} failed</span>{/if}</span>
-      {:else if !open && current}
-        <!-- Slot: each new action rolls in from below as the previous one rolls out above. -->
-        <span class="ml-1 grid h-[1lh] min-w-0 flex-1 overflow-hidden text-[13px] leading-snug" aria-live="polite" data-step-line={working ? 'now' : 'last'}>
-          {#key `${current.label}
-${current.detail ?? ''}`}
-            <span
-              class="flex min-w-0 items-center gap-2 [grid-area:1/1] {current.ok ? 'text-fg-2' : 'text-danger'}"
-              in:fly={{ y: 14, duration: 260 }}
-              out:fly={{ y: -14, duration: 260 }}
-            >
-              <span class="size-1.5 shrink-0 rounded-full {working ? dot(current.quiet) : current.ok ? 'bg-muted' : 'bg-danger'}"></span>
-              <!-- What it did and to what; the target is cut first when the line is short of room. -->
-              <span class="truncate {working ? (current.quiet ? 'text-muted' : 'thinking') : ''}">{current.label}{#if current.detail}<span class="text-muted"> · {current.detail}</span>{/if}</span>
+{#snippet dot(tone: Line['tone'] | 'denied')}
+  {#if tone === 'live'}
+    <span class="cu-dot small"></span>
+  {:else}
+    <span
+      class="size-1.5 shrink-0 rounded-full {tone === 'failed' ? 'bg-danger' : tone === 'denied' ? 'shadow-[inset_0_0_0_1.25px_var(--muted)]' : 'bg-muted/70'}"
+    ></span>
+  {/if}
+{/snippet}
+
+<div class="flex flex-col rounded-lg bg-surface px-3 py-1.5 shadow-[0_0_0_1px_var(--line)]">
+  <div class="flex h-7 items-center gap-1.5 text-[12px] text-muted">
+    <button class="-mx-1 flex h-6 min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 text-left transition-colors hover:text-fg" aria-expanded={open} onclick={() => (toggled = !open)}>
+      <Icon name={desktop ? 'monitor' : 'globe'} size={12} class="shrink-0" />
+      <span class="shrink-0">{desktop ? 'Computer' : 'Browser'}</span>
+      <!-- Slot: each new line rolls in from below as the previous one rolls out above. The summary
+           (once the reply is over) rolls in the same way. -->
+      <span class="ml-1.5 grid h-[1lh] min-w-0 flex-1 overflow-hidden text-[13px] leading-snug" aria-live="polite" data-step-line={shown?.tone === 'live' || shown?.tone === 'quiet' ? 'now' : shown?.tone === 'summary' ? 'summary' : 'last'}>
+        {#if shown && (!open || shown.tone === 'summary')}
+          {#key shown.key}
+            <span class="flex min-w-0 items-center gap-2 [grid-area:1/1]" in:fly={{ y: 14, duration: 260 }} out:fly={{ y: -14, duration: 260 }}>
+              {#if shown.tone === 'summary'}
+                <span class="text-[12px] text-muted tabular-nums"
+                  >{steps.length} {steps.length === 1 ? 'step' : 'steps'}{#if failed}<span class="text-danger">, {failed} failed</span>{/if}</span
+                >
+              {:else}
+                {@render dot(shown.tone)}
+                <!-- What it did and to what; the target is cut first when the line is short of room. -->
+                <span class="truncate transition-colors duration-200 {shown.tone === 'failed' ? 'text-danger' : shown.tone === 'quiet' ? 'text-muted' : shown.tone === 'live' ? 'text-fg' : 'text-fg-2'}"
+                  >{shown.label}{#if shown.detail}<span class="text-muted"><span class="px-1.5" aria-hidden="true">·</span>{shown.detail}</span>{/if}</span
+                >
+              {/if}
             </span>
           {/key}
-        </span>
-      {/if}
-      {#if steps.length > 0 || done}
-        <Icon name="chevronDown" size={12} class="shrink-0 transition-transform duration-150 {open ? 'rotate-180' : ''}" />
-      {/if}
+        {/if}
+      </span>
+      <!-- Always there (hidden until there is a list), so the line never narrows when the first step lands. -->
+      <Icon name="chevronDown" size={12} class="shrink-0 transition-[transform,opacity] duration-150 {open ? 'rotate-180' : ''} {steps.length > 0 || done ? '' : 'opacity-0'}" />
     </button>
     {#if open && hidden > 0}
-      <button class="ml-auto shrink-0 rounded px-1 hover:text-fg" onclick={() => (expanded = true)}>Show {hidden} earlier</button>
+      <button class="ml-auto h-6 shrink-0 rounded-md px-1.5 transition-colors hover:text-fg" onclick={() => (expanded = true)}>Show {hidden} earlier</button>
     {:else if open && expanded && steps.length > COLLAPSED}
-      <button class="ml-auto shrink-0 rounded px-1 hover:text-fg" onclick={() => (expanded = false)}>Show fewer</button>
+      <button class="ml-auto h-6 shrink-0 rounded-md px-1.5 transition-colors hover:text-fg" onclick={() => (expanded = false)}>Show fewer</button>
     {/if}
   </div>
   {#if open}
-    <div class="flex flex-col gap-0.5" transition:slide>
-      {#each shown as step, i (hidden + i)}
-        <div class="flex items-start gap-2 py-0.5 text-[13px] leading-snug" in:fly={{ y: 4, duration: live ? 200 : 0 }}>
-          <span class="grid h-[1lh] w-3 shrink-0 place-items-center">
-            <span class="size-1.5 rounded-full {step.ok ? 'bg-muted' : 'bg-danger'}"></span>
-          </span>
-          <span class="min-w-0 {step.ok ? 'text-fg-2' : 'text-danger'}">
+    <div class="flex flex-col pb-1" transition:slide>
+      {#each shownSteps as step, i (hidden + i)}
+        <!-- A step that just stood live in the row below takes its place without moving. -->
+        <div class="flex items-start gap-2 py-[3px] text-[13px] leading-snug" in:fly={{ y: 4, duration: live && hidden + i !== since.count ? 200 : 0 }}>
+          <span class="grid h-[1lh] w-3 shrink-0 place-items-center">{@render dot(step.denied ? 'denied' : step.ok ? 'done' : 'failed')}</span>
+          <span class="min-w-0 {step.ok ? (step.denied ? 'text-muted' : 'text-fg-2') : 'text-danger'}">
             {step.label}
-            {#if step.detail}<span class="block text-[12px] text-muted">{step.detail}</span>{/if}
+            {#if step.detail}<span class="block text-[12px] break-words text-muted">{step.detail}</span>{/if}
           </span>
         </div>
       {/each}
       {#if now}
-        <div class="flex items-start gap-2 py-0.5 text-[13px] leading-snug" in:fly={{ y: 4, duration: 200 }} data-step-now>
-          <span class="grid h-[1lh] w-3 shrink-0 place-items-center"><span class="size-1.5 rounded-full {dot(now.quiet)}"></span></span>
-          <span class="min-w-0 {now.quiet ? 'text-muted' : 'thinking'}">
+        <div class="flex items-start gap-2 py-[3px] text-[13px] leading-snug" in:fly={{ y: 4, duration: 200 }} data-step-now>
+          <span class="grid h-[1lh] w-3 shrink-0 place-items-center">{@render dot(now.quiet ? 'quiet' : 'live')}</span>
+          <span class="min-w-0 {now.quiet ? 'text-muted' : 'text-fg'}">
             {now.label}
-            {#if now.detail}<span class="block text-[12px] text-muted">{now.detail}</span>{/if}
+            {#if now.detail}<span class="block text-[12px] break-words text-muted">{now.detail}</span>{/if}
           </span>
         </div>
       {/if}

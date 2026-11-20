@@ -3,6 +3,7 @@
   // marked image and a note with its coordinates (main's computer/point.ts). Shown while computer
   // use is on in the chat. Ctrl+P (Cmd+P on a Mac) starts it, or cancels the one under way.
   import { modKey, shortcut } from '@/lib/keys'
+  import { pop } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
   import { tip } from '@/lib/tooltip'
   import Icon from './Icon.svelte'
@@ -28,13 +29,15 @@
 
 <svelte:window {onkeydown} />
 
+<!-- A round companion to the Computer switch beside it; solid while Point is on, like the switches. -->
 <button
-  class="icon-btn {app.pointing ? '!bg-hover !text-fg' : ''}"
+  class="icon-btn !rounded-full {app.pointing ? '!bg-fg !text-bg' : ''}"
   aria-label="Point"
   aria-pressed={app.pointing}
   data-tip-no-label
   use:tip={{ text: app.pointing ? 'Cancel pointing' : 'Point at something on your screen', kbd: shortcut('P') }}
   onclick={toggle}
+  in:pop={{ duration: 160 }}
 >
   <Icon name="crosshair" size={16} />
 </button>

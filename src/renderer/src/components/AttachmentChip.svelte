@@ -42,6 +42,9 @@
         <Icon name="mic" size={14} class="text-muted {analyzing ? 'animate-pulse' : ''}" />
       {/if}
     </div>
+  {:else if /^point-\d+\.md$/.test(attachment.name)}
+    <!-- Point's note (its image is the chip beside it). -->
+    <div class="grid size-8 place-items-center rounded-sm bg-surface text-fg-2" aria-hidden="true"><Icon name="crosshair" size={15} /></div>
   {:else}
     <div class="grid size-8 place-items-center rounded-sm bg-surface font-mono text-[9.5px] font-medium tracking-wide text-muted">{ext}</div>
   {/if}

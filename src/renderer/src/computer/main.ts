@@ -1,6 +1,8 @@
 // The computer-use overlay page: the acting frame and the Show-me spotlight (Overlay.svelte), and Point.
-import '@fontsource-variable/inter'
-import '@fontsource-variable/geist-mono'
+// The app's own faces (Instrument Sans, JetBrains Mono) and computer use's shared look.
+import '@fontsource-variable/instrument-sans/index.css'
+import '@fontsource-variable/jetbrains-mono/index.css'
+import './computer.css'
 import { mount } from 'svelte'
 import Overlay from './Overlay.svelte'
 import PointLayer from './PointLayer.svelte'
