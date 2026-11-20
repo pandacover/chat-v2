@@ -1,8 +1,9 @@
 // The computer-use overlay: a full-screen, click-through, always-on-top window. While computer use
 // drives, it draws a hairline frame around the screen; in Show-me mode, a spotlight on the exact
-// control with the instruction and a Done button beside it, which the user can drag aside. While a
-// computer reply runs and no chat-v2 window has focus, a notch at the top of the screen says what
-// it is doing, with Stop. Screen captures leave the overlay out. The global Stop shortcut is here
+// control with the instruction and Done, Can't find it and Do it for me beside it, which the user
+// can drag aside. While a computer reply runs and no chat-v2 window has focus, a notch at the top
+// of the screen says what it is doing, with Stop, and asks a waiting approval with Approve / Deny.
+// Presses that answer a wait carry its id. Screen captures leave the overlay out. The global Stop shortcut is here
 // too: the chat window is often covered while computer use acts.
 //
 // The window takes the mouse only while the pointer is on one of its controls (the callout, the
@@ -14,11 +15,11 @@
 // (MA_NOACTIVATEANDEAT), so Done never got a real click. Once the user is done with a control,
 // focus goes back to the app they were in (`refocus`).
 import { join } from 'node:path'
-import { app, BrowserWindow, globalShortcut, ipcMain, screen, type Rectangle } from 'electron'
+import { app, BrowserWindow, globalShortcut, ipcMain, screen, type Display, type Rectangle } from 'electron'
 import { STOP_SHORTCUT } from '@shared/computer'
 import type { OverlayRect, OverlayState, OverlayTeach } from '../../preload/computer-overlay'
 import type { TeachTarget } from './interaction'
-import { type Activity, type OverlayPort, cameraHousing } from './port'
+import { type Activity, type OverlayAnswer, type OverlayPort, cameraHousing } from './port'
 
 /** The platform reports rects in input space (physical pixels on Windows); the overlay works in DIPs. */
 const toDip = (r: Rectangle): Rectangle => (process.platform === 'win32' ? screen.screenToDipRect(null, r) : r)
@@ -35,8 +36,23 @@ export interface ElectronOverlayOptions {
 
 /** How often the pointer is checked while the overlay is up. */
 const POLL_MS = 40
+/** Presses that answer a wait; they come with the wait's id. */
+const ANSWERS = new Set<string>(['done', 'cant_find', 'hand_over', 'approve', 'deny'])
 
-export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayPort & { readonly window: BrowserWindow | null } => {
+export interface ElectronOverlay extends OverlayPort {
+  readonly window: BrowserWindow | null
+  /**
+   * Point mode on a display, or off (null): the window covers that display and takes every
+   * click (point.ts runs it). Leaving it doesn't move focus; the caller decides where it goes.
+   */
+  readonly point: (display: Display | null) => void
+  /** Called when the user presses Point in the notch. */
+  readonly onPointPress: (listener: () => void) => void
+  /** The chat window, back in front (restored if minimised). */
+  readonly showChat: () => void
+}
+
+export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): ElectronOverlay => {
   const headless = opts.headless ?? process.env.CHAT_V2_HEADLESS === '1'
   let win: BrowserWindow | null = null
   let acting = false
@@ -44,9 +60,12 @@ export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayP
   let activity: Activity | null = null
   let state: OverlayState = { acting: false, teach: null, notch: null }
   let protecting = false
-  const doneListeners: Array<() => void> = []
+  const answerListeners: Array<(a: OverlayAnswer) => void> = []
   const stopListeners: Array<() => void> = []
   let holdingKey = false
+  /** The display the user is pointing on (Point mode), else null. */
+  let pointOn: Display | null = null
+  const pointListeners: Array<() => void> = []
   const pressed = () => {
     for (const f of stopListeners) f()
   }
@@ -59,14 +78,16 @@ export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayP
   const giveBack = () => {
     if (live() && win!.isFocused()) opts.refocus?.()
   }
-  const take = (on: boolean) => {
+  const take = (on: boolean, giveFocusBack = true) => {
     if (on === taking || !live()) return
     taking = on
     const hadFocus = win!.isFocused()
     win!.setIgnoreMouseEvents(!on)
-    if (!on && hadFocus) opts.refocus?.()
+    if (!on && hadFocus && giveFocusBack) opts.refocus?.()
   }
   const check = () => {
+    // Pointing, the whole window takes the mouse.
+    if (pointOn) return take(true)
     if (!live() || hits.length === 0) return take(false)
     const p = screen.getCursorScreenPoint()
     const b = win!.getBounds()
@@ -151,17 +172,20 @@ export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayP
     hits = rects
     check()
   })
-  ipcMain.on('computer-overlay:press', (e, what: string) => {
+  ipcMain.on('computer-overlay:press', (e, what: string, id?: unknown) => {
     if (!fromOverlay(e.sender)) return
-    if (what === 'done') for (const f of doneListeners) f()
-    else if (what === 'stop') pressed()
+    if (ANSWERS.has(what) && typeof id === 'string') {
+      const a = { kind: what, id } as OverlayAnswer
+      for (const f of answerListeners) f(a)
+    } else if (what === 'stop') pressed()
     else if (what === 'chat') showChat()
     else if (what === 'moved') giveBack()
+    else if (what === 'point') for (const f of pointListeners) f()
   })
 
   const sync = () => {
     const notch = activity !== null && !chatFocused()
-    const show = acting || teach !== null || notch
+    const show = acting || teach !== null || notch || pointOn !== null
     if (!show && !win) return
     win ??= create()
     if (!show) {
@@ -173,11 +197,11 @@ export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayP
       if (win.isVisible()) win.hide()
       return
     }
-    let display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+    let display = pointOn ?? screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
     let local: OverlayTeach | null = null
     if (teach) {
       const dip = toDip(teach.rect)
-      display = screen.getDisplayMatching(dip)
+      if (!pointOn) display = screen.getDisplayMatching(dip)
       local = { ...teach, rect: { ...dip, x: dip.x - display.bounds.x, y: dip.y - display.bounds.y } }
     }
     win.setBounds(display.bounds)
@@ -216,7 +240,19 @@ export const makeElectronOverlay = (opts: ElectronOverlayOptions = {}): OverlayP
       if (on) app.on('browser-window-created', onCreated)
       else app.off('browser-window-created', onCreated)
     },
-    onDone: (f) => void doneListeners.push(f),
+    onAnswer: (f) => void answerListeners.push(f),
+    pointerOnControl: () => taking,
+    point: (display) => {
+      pointOn = display
+      sync()
+      if (display) take(true)
+      else {
+        take(false, false)
+        check()
+      }
+    },
+    onPointPress: (f) => void pointListeners.push(f),
+    showChat,
     stopKey: (on) => {
       if (on === holdingKey) return
       holdingKey = on

@@ -21,6 +21,7 @@ import { Agent, type AgentDeps, type QueryFn } from './agent/driver'
 import type { RunContext } from './agent/module'
 import { ComputerUse, type Platform, makePlatform, supported } from './computer'
 import { makeElectronOverlay } from './computer/overlay'
+import { type Bitmap, type Pointer, makePointer } from './computer/point'
 import { isSensitive } from './memory'
 import { Db } from './services/Db'
 import { ElevenLabs } from './services/ElevenLabs'
@@ -168,6 +169,9 @@ const agentDeps = (root: string): AgentDeps => {
 
 /** The computer-use overlay window and Stop shortcut; made once the app is ready. */
 let overlay: ReturnType<typeof makeElectronOverlay> | null = null
+/** What Point (the user marking part of the screen for the agent) needs from the computer layer. */
+let pointDeps: { platform: Platform | null; refocus: () => void; capture?: (d: Electron.Display) => Promise<Bitmap>; unavailable?: string } | null = null
+let pointer: Pointer | null = null
 
 /**
  * Computer use. `remember` keeps a fact the model was told to save in memory, as one learned in
@@ -185,7 +189,10 @@ const computerLayer = Layer.unwrap(
     }
     // CHAT_V2_FAKE_COMPUTER (tests only): a module whose `platform` stands in for the real one,
     // or whose `wrap` changes it (a live test refuses everything that would act).
-    const fake = process.env.CHAT_V2_FAKE_COMPUTER ? (load(process.env.CHAT_V2_FAKE_COMPUTER) as { platform?: Platform; wrap?: (p: Platform) => Platform }) : null
+    // A fake may also export `capture` (Point's screen capture).
+    const fake = process.env.CHAT_V2_FAKE_COMPUTER
+      ? (load(process.env.CHAT_V2_FAKE_COMPUTER) as { platform?: Platform; wrap?: (p: Platform) => Platform; capture?: (d: Electron.Display) => Promise<Bitmap> })
+      : null
     const real = supported && !fake?.platform ? makePlatform({ track: trackChild }) : null
     const platform = fake?.platform ?? (real && fake?.wrap ? fake.wrap(real) : real)
     // After a press on the overlay, focus goes back to the app the user was in (the one under it).
@@ -195,6 +202,12 @@ const computerLayer = Layer.unwrap(
     // screenshot), and it can't be hidden from capture there anyway. The Stop shortcut still works.
     const linuxNoOverlay = process.platform === 'linux' && process.env.CHAT_V2_LINUX_OVERLAY !== '1'
     overlay = makeElectronOverlay({ refocus, ...(linuxNoOverlay ? { headless: true } : {}) })
+    pointDeps = {
+      platform,
+      refocus,
+      ...(fake?.capture ? { capture: fake.capture } : {}),
+      ...(linuxNoOverlay ? { unavailable: 'Point needs the computer-use overlay, which is off on Linux unless CHAT_V2_LINUX_OVERLAY=1 (it needs a compositing window manager).' } : {})
+    }
     return ComputerUse.layer({ platform, overlay, remember })
   })
 )
@@ -335,6 +348,20 @@ app.whenReady().then(async () => {
   computer.subscribe((waiting) => {
     if (waiting?.kind === 'approval') raiseForApproval()
   })
+  // Point: the user marks part of the screen; the mark goes into the next message as attachments.
+  if (overlay && pointDeps) {
+    const attachments = await rt.runPromise(Attachments.use(Effect.succeed))
+    pointer = makePointer({
+      overlay,
+      ...pointDeps,
+      attach: (file) => Effect.runPromise(attachments.add(file)),
+      tell: (e) => {
+        // While the user points, a computer reply's input would land on Point's layer: it pauses.
+        computer.pointing(e.active)
+        broadcaster.send({ type: 'point', ...e })
+      }
+    })
+  }
 
   registerIpc(rt, isQuitting)
   handleProtocols(rt, isQuitting)
@@ -359,6 +386,8 @@ app.on('window-all-closed', () => {
 let disposed = false
 app.on('before-quit', (event) => {
   beginQuit('before-quit')
+  pointer?.dispose()
+  pointer = null
   if (disposed || !runtime) return
   event.preventDefault()
   disposed = true

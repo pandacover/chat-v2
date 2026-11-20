@@ -128,7 +128,10 @@
     close()
   }}
   onkeydown={(e) => {
-    if (e.key === 'Escape' && picked && !writing) close()
+    if (e.key === 'Escape' && picked && !writing) {
+      e.preventDefault()
+      close()
+    }
   }}
   onresize={schedule}
 />

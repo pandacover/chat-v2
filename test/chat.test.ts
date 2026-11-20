@@ -957,6 +957,44 @@ describe('computer use', () => {
     await t.runtime.dispose()
   })
 
+  test('the reply shows its mode and the tool under way; switching to do mid-step hands the step over, as "Do it for me" does', async () => {
+    const results: string[] = []
+    let click = ''
+    const t = withComputer(async function* (t) {
+      yield* t.tool('mcp__computer__look_at_screen')
+      results.push(resultText(yield* t.tool('mcp__computer__teach_step', { instruction: 'Click Display', step: 1, total: 2, x: 100, y: 100 })))
+      results.push(resultText(yield* t.tool('mcp__computer__teach_step', { instruction: 'Click Scale', step: 2, total: 2, x: 100, y: 200 })))
+      const p = (yield* t.tool('mcp__computer__click', { x: 1, y: 1 })).permission
+      click = p.behavior === 'deny' ? p.message : p.behavior
+      yield* t.text('Done.')
+      yield t.result()
+    })
+    const s = await t.run(computerChat)
+    const view = await t.run(sendTo(s, s.rootId, 'Show me how to change the scale'))
+    const id = view.path[1]!.message.id
+    const modes = () => t.events.flatMap((e) => (e.type === 'computerMode' ? [e.mode] : []))
+    const doings = () => t.events.flatMap((e) => (e.type === 'computerDoing' && e.messageId === id ? [e.doing?.label ?? null] : []))
+    await settle(() => t.lastWait()?.kind === 'teach')
+    expect(modes()).toEqual(['teach'])
+    // The overlay's "Can't find it" answers the step it shows.
+    t.overlay.press('cant_find')
+    await settle(() => { const w = t.lastWait(); return w?.kind === 'teach' && w.step === 2 })
+    // The chip: switched to do while step 2 waits.
+    await t.run(Chat.use((c) => c.setComputerMode({ sessionId: s.id, messageId: id, mode: 'do' })))
+    await t.waitForDone(1)
+    expect(modes()).toEqual(['teach', 'do'])
+    expect(results[0]).toContain("The user pressed \"Can't find it\"")
+    expect(results[1]).toContain('the mode is do from now on')
+    expect(click).toBe('allow')
+    expect((await t.run(Chat.use((c) => c.view(s.id)))).session.computerMode).toBe('do')
+    // Live: the look (quiet), each step, the click; each cleared once over.
+    expect(doings()).toEqual(['Looking at the screen', null, 'Step 1 of 2', null, 'Step 2 of 2', null, 'Click', null])
+    const content = (await messageOf(t, s.id)).content
+    expect(content).toContain(stepLine({ tool: 'computer_teach_step', label: 'Step 1 of 2', ok: true, detail: "Click Display · Couldn't find it" }))
+    expect(content).toContain(stepLine({ tool: 'computer_teach_step', label: 'Step 2 of 2', ok: true, detail: 'Click Scale · Handed over' }))
+    await t.runtime.dispose()
+  })
+
   test('Stop cuts off typing in progress, and the next reply may act again', async () => {
     const t = withComputer(async function* (t) {
       if (t.call.prompt.some((b) => b.text?.includes('again'))) {

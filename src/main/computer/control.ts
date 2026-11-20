@@ -1,5 +1,5 @@
 import { Data, Effect } from 'effect'
-import type { FileHit, Platform, ScreenRect, Screenshot, SearchQuery, UiElement, WindowInfo } from './platform/types'
+import type { FileHit, FocusedControl, Modifier, Platform, ScreenRect, Screenshot, SearchQuery, UiElement, WindowInfo } from './platform/types'
 
 export class ControlError extends Data.TaggedError('ControlError')<{ readonly message: string }> {}
 
@@ -15,8 +15,15 @@ type Act<A> = Effect.Effect<A, ControlError | UserTookOver | Stopped>
 const TAKEOVER_PX = 28
 /** Screenshots are scaled to this width: ~35% fewer image tokens than 1280, and clicks go by element id. */
 export const SHOT_WIDTH = 1024
+/** A zoomed region fits in this box, at most at the screen's own pixel density (never enlarged). */
+export const ZOOM_WIDTH = 1024
+export const ZOOM_HEIGHT = 768
+/** A zoom region smaller than this (screenshot pixels) is refused: there would be nothing to read. */
+const ZOOM_MIN = 8
 /** Typed text goes to the host in chunks this long (~4 ms a character), so Stop lands within ~100 ms. */
 export const TYPE_CHUNK = 16
+/** Element names kept for step labels, across the last few control lists. */
+const MAX_NAMES = 2000
 
 /** Split text for typing without breaking a surrogate pair. */
 export const typeChunks = (text: string, size = TYPE_CHUNK): string[] => {
@@ -32,8 +39,10 @@ export const typeChunks = (text: string, size = TYPE_CHUNK): string[] => {
  * when the user grabs the mouse, and the Stop gate.
  */
 export const makeControl = (p: Platform) => {
-  let shot: Pick<Screenshot, 'imageWidth' | 'imageHeight' | 'screen'> | null = null
+  let shot: Pick<Screenshot, 'imageWidth' | 'imageHeight' | 'screen' | 'window'> | null = null
   let leftAt: { x: number; y: number } | null = null
+  /** The user is pointing at the screen (Point): the overlay takes every click, so no input meanwhile. */
+  let held = false
   const names = new Map<number, string>()
   let gate = new AbortController()
 
@@ -64,6 +73,11 @@ export const makeControl = (p: Platform) => {
       return yield* new ControlError({
         message: `"${fg.title || fg.process}" is running as administrator, so Windows blocks chat-v2's input to it. Tell the user; they can run chat-v2 as administrator to allow it.`
       })
+    }
+    // Input now would land on Point's layer: the user has the screen, as after a takeover.
+    if (held) {
+      leftAt = null
+      return yield* new UserTookOver()
     }
     if (leftAt) {
       const now = yield* lift(() => p.cursor())
@@ -96,15 +110,48 @@ export const makeControl = (p: Platform) => {
 
   return {
     platform: p.name,
+    /** Whether the platform can read controls (ui_elements). */
+    controls: p.controls !== false,
     remember: (): Ctl<WindowInfo> => lift(() => p.remember()),
+    /** Whether ui_elements can read a window other than the active one. */
+    otherWindows: p.otherWindows === true,
+    /** A full screenshot; it becomes the frame pixel coordinates are read in. */
     screenshot: (): Ctl<Screenshot> =>
       lift(() => p.screenshot(SHOT_WIDTH)).pipe(
         Effect.tap((s) =>
           Effect.sync(() => {
-            shot = { imageWidth: s.imageWidth, imageHeight: s.imageHeight, screen: s.screen }
+            shot = { imageWidth: s.imageWidth, imageHeight: s.imageHeight, screen: s.screen, window: s.window }
           })
         )
       ),
+    /** The active window as of the last full screenshot, if there is one. */
+    lastWindow: (): WindowInfo | null => shot?.window ?? null,
+    /**
+     * A closer look at `area` of the last screenshot (its pixels), captured at up to the screen's
+     * own resolution. It does not become the frame: coordinates stay in the full screenshot. `area`
+     * is clipped to that screenshot; `scale` is zoom pixels per screenshot pixel.
+     */
+    zoom: (area: ScreenRect): Ctl<{ shot: Screenshot; area: ScreenRect; scale: number }> =>
+      needShot.pipe(
+        Effect.flatMap((s) => {
+          const x = Math.max(0, Math.min(s.imageWidth, Math.round(area.x)))
+          const y = Math.max(0, Math.min(s.imageHeight, Math.round(area.y)))
+          const x2 = Math.max(x, Math.min(s.imageWidth, Math.round(area.x + area.width)))
+          const y2 = Math.max(y, Math.min(s.imageHeight, Math.round(area.y + area.height)))
+          const a = { x, y, width: x2 - x, height: y2 - y }
+          if (a.width < ZOOM_MIN || a.height < ZOOM_MIN)
+            return Effect.fail(new ControlError({ message: `The region must be at least ${ZOOM_MIN}x${ZOOM_MIN} pixels inside the ${s.imageWidth}x${s.imageHeight} screenshot.` }))
+          const kx = s.screen.width / s.imageWidth
+          const ky = s.screen.height / s.imageHeight
+          const region = { x: s.screen.x + a.x * kx, y: s.screen.y + a.y * ky, width: a.width * kx, height: a.height * ky }
+          return lift(() => p.screenshot(ZOOM_WIDTH, { region, maxHeight: ZOOM_HEIGHT })).pipe(
+            Effect.map((z) => ({ shot: z, area: a, scale: z.imageWidth / a.width }))
+          )
+        })
+      ),
+    /** The control with keyboard focus, or null where that can't be read (never fails). */
+    focused: (): Effect.Effect<FocusedControl | null> =>
+      p.focused ? lift(() => p.focused!()).pipe(Effect.orElseSucceed(() => null)) : Effect.succeed(null),
     /** Map a point in the last screenshot's pixel space to screen space. */
     toScreen: (x: number, y: number): Ctl<{ x: number; y: number }> => needShot.pipe(Effect.map((s) => toScreenPoint(s, x, y))),
     rectToScreen: (r: ScreenRect): Ctl<ScreenRect> =>
@@ -131,8 +178,9 @@ export const makeControl = (p: Platform) => {
         height: Math.round(r.height * ky)
       }
     },
-    click: (x: number, y: number, button: 'left' | 'right' | 'middle', count: number): Act<void> =>
-      act(() => p.click(x, y, button, count), { x, y }),
+    click: (x: number, y: number, button: 'left' | 'right' | 'middle', count: number, modifiers: ReadonlyArray<Modifier> = []): Act<void> =>
+      act(() => (modifiers.length ? p.click(x, y, button, count, modifiers) : p.click(x, y, button, count)), { x, y }),
+    move: (x: number, y: number): Act<void> => act(() => p.move(x, y), { x, y }),
     drag: (x1: number, y1: number, x2: number, y2: number): Act<void> => act(() => p.drag(x1, y1, x2, y2), { x: x2, y: y2 }),
     scroll: (x: number, y: number, dy: number, dx: number): Act<void> => act(() => p.scroll(x, y, dy, dx), { x, y }),
     type: (text: string): Act<void> =>
@@ -140,16 +188,19 @@ export const makeControl = (p: Platform) => {
         yield* preflight
         for (const part of typeChunks(text)) {
           yield* checkpoint
+          // Point started mid-run: the rest would type into its layer.
+          if (held) return yield* new UserTookOver()
           yield* lift(() => p.type(part))
         }
       }),
     keys: (combo: string): Act<void> => act(() => p.keys(combo)),
-    uiTree: (max: number): Ctl<{ window: WindowInfo; elements: ReadonlyArray<UiElement> }> =>
-      lift(() => p.uiTree(max)).pipe(
+    uiTree: (max: number, window?: string): Ctl<{ window: WindowInfo; elements: ReadonlyArray<UiElement>; truncated?: boolean }> =>
+      lift(() => (window ? p.uiTree(max, { window }) : p.uiTree(max))).pipe(
         Effect.tap((t) =>
           Effect.sync(() => {
-            names.clear()
+            // Ids aren't reused across lists, so older names stay right; keep the latest few lists'.
             for (const e of t.elements) if (e.name) names.set(e.id, e.name)
+            while (names.size > MAX_NAMES) names.delete(names.keys().next().value!)
           })
         )
       ),
@@ -177,6 +228,8 @@ export const makeControl = (p: Platform) => {
           )
         )
       ),
+    /** The control at a point in screen space, if any (read again while a Show-me step waits). */
+    elementAt: (x: number, y: number): Ctl<ScreenRect | null> => lift(() => p.elementAt(x, y)),
     windows: (): Ctl<ReadonlyArray<WindowInfo & { minimized?: boolean }>> => lift(() => p.windows()),
     focusWindow: (title: string): Ctl<WindowInfo> => lift(() => p.focusWindow(title)),
     foreground: (): Ctl<WindowInfo> => lift(() => p.foreground()),
@@ -188,6 +241,14 @@ export const makeControl = (p: Platform) => {
     /** Forget where we left the cursor (a new user turn, or the user just acted). */
     resetTakeover: () => {
       leftAt = null
+    },
+    /** While the user points at the screen (Point), every action stops as a takeover. */
+    hold: (on: boolean) => {
+      held = on
+    },
+    /** Forget the last screenshot (a new user turn): the screen may have changed since, so coordinates need a fresh look. */
+    forgetShot: () => {
+      shot = null
     },
     /**
      * Stop: every input action checks this between its steps (focus, each typed chunk, the

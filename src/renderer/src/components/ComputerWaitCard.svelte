@@ -1,26 +1,30 @@
 <script lang="ts">
-  import type { ComputerWait } from '@shared/computer'
+  import { APPROVE_ARM_MS, type ComputerWait } from '@shared/computer'
   import { modKey, shortcut } from '@/lib/keys'
-  import { fly } from '@/lib/motion'
+  import { fly, slide } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
 
   /** What computer use waits on in this reply: an approval, or a Show-me step for the user to do. */
-  let { wait }: { wait: NonNullable<ComputerWait> } = $props()
+  let { wait, held = false }: { wait: NonNullable<ComputerWait>; held?: boolean } = $props()
 
-  // Approve arms after a short beat, so a key pressed for something else can't say yes.
-  const ARM_MS = 700
+  // Approve arms after a short beat, so a key pressed for something else can't say yes (the notch's too).
+  // Main sends the wait again on other changes (a new object each time): only a new id re-arms.
+  const ARM_MS = APPROVE_ARM_MS
+  const waitId = $derived(wait.id)
   let armed = $state(false)
   $effect(() => {
-    void wait.id
+    void waitId
     armed = false
     const t = setTimeout(() => (armed = true), ARM_MS)
     return () => clearTimeout(t)
   })
 
-  const onkeydown = (e: KeyboardEvent) => {
+  /** Keys pressed with focus in the card: Enter approves, Escape denies. */
+  const oncardkey = (e: KeyboardEvent) => {
     if (wait.kind !== 'approval') return
     if (e.key === 'Enter' && modKey(e)) {
       e.preventDefault()
+      e.stopPropagation()
       if (armed) void app.approve(wait.id, true)
     } else if (e.key === 'Escape') {
       e.preventDefault()
@@ -28,54 +32,82 @@
       void app.approve(wait.id, false)
     }
   }
+
+  /**
+   * Keys pressed elsewhere. Escape denies only if nothing else used it (cancelling a recording,
+   * closing a dialog, a panel or an edit), so it waits until every handler has seen the key.
+   */
+  const onwindowkey = (e: KeyboardEvent) => {
+    if (wait.kind !== 'approval') return
+    if (e.key === 'Enter' && modKey(e)) {
+      e.preventDefault()
+      if (armed) void app.approve(wait.id, true)
+    } else if (e.key === 'Escape' && !e.isComposing && !e.defaultPrevented) {
+      const id = wait.id
+      setTimeout(() => {
+        if (e.defaultPrevented || document.querySelector('[aria-modal="true"]')) return
+        if (wait.kind === 'approval' && wait.id === id) void app.approve(id, false)
+      })
+    }
+  }
+  /** A shortcut as key chips: "Ctrl ↵" → Ctrl, ↵. */
+  const keys = (s: string) => s.split(' ').filter(Boolean)
+  /** Past this many steps the dashes would crowd the line; the count alone says it (as on the overlay's callout). */
+  const MAX_DASHES = 8
 </script>
 
-<svelte:window {onkeydown} />
+<svelte:window onkeydown={onwindowkey} />
 
+<!-- It folds away when the wait is over (an outro; Svelte makes it inert meanwhile). -->
 <div
-  class="flex flex-wrap items-end gap-x-5 gap-y-3 rounded-lg bg-surface px-4 py-3.5 shadow-[0_0_0_1px_var(--muted)]"
+  class="rounded-lg bg-surface px-4 pt-3 pb-3 shadow-[0_0_0_1px_var(--line),var(--shadow)]"
   role={wait.kind === 'approval' ? 'alertdialog' : 'status'}
   aria-labelledby="wait-title"
   data-computer-wait={wait.kind}
+  tabindex="-1"
+  onkeydown={oncardkey}
+  inert={held}
   in:fly={{ y: 4, duration: 220 }}
+  out:slide={{ duration: 200 }}
 >
-  <div class="min-w-0 flex-1 basis-60">
-    <span class="text-[12px] text-muted">{wait.kind === 'approval' ? 'Needs your OK' : `Step ${wait.step} of ${wait.total}`}</span>
-    <p id="wait-title" class="mt-0.5 text-[15px] leading-snug font-medium text-fg">{wait.kind === 'approval' ? wait.title : wait.instruction}</p>
-    {#if wait.kind === 'approval' && wait.detail}
-      <pre class="mt-2 max-h-24 overflow-auto rounded-md bg-bg px-2.5 py-2 font-mono text-[11.5px] leading-normal break-all whitespace-pre-wrap text-fg-2">{wait.detail}</pre>
-    {:else if wait.kind === 'teach'}
-      <p class="mt-0.5 text-[12px] text-muted">Do it on screen, then press Done. Or type what happened, or “just do it”.</p>
+  <div class="flex h-5 items-center gap-2 text-[12px] text-muted">
+    <span class="cu-dot small waiting text-fg-2"></span>
+    {#if wait.kind === 'approval'}
+      <span>Needs your OK</span>
+    {:else}
+      <span class="tabular-nums">Step <span class="text-fg-2">{wait.step}</span> of {wait.total}</span>
+      {#if wait.total <= MAX_DASHES}
+        <span class="cu-dashes ml-auto" aria-hidden="true">{#each Array(wait.total) as _, i (i)}<i class:on={i < wait.step}></i>{/each}</span>
+      {/if}
     {/if}
   </div>
-  <div class="flex shrink-0 items-center gap-1 text-[13px]">
+  <p id="wait-title" class="mt-1.5 text-[16px] leading-snug font-[450] tracking-[-0.01em] text-pretty text-fg">{wait.kind === 'approval' ? wait.title : wait.instruction}</p>
+  {#if wait.kind === 'approval' && wait.detail}
+    <pre
+      class="mt-2.5 max-h-24 overflow-auto rounded-[10px] bg-bg px-3 py-2 font-mono text-[11.5px] leading-normal break-all whitespace-pre-wrap text-fg-2 shadow-[inset_0_0_0_1px_var(--line)]">{wait.detail}</pre>
+  {:else if wait.kind === 'teach'}
+    <p class="mt-1 text-[12.5px] text-muted">Do it on screen, then press Done. Or type what happened, or “just do it”.</p>
+  {/if}
+  <div class="mt-3 flex items-center justify-end gap-1.5">
     {#if wait.kind === 'approval'}
-      <button class="rounded-md px-3 py-1.5 text-fg-2 hover:bg-hover hover:text-fg" onclick={() => app.approve(wait.id, false)}>
-        Deny <kbd class="ml-1 text-[11px] opacity-60">Esc</kbd>
+      <button class="cu-btn line" onclick={() => app.approve(wait.id, false)}>
+        Deny <kbd class="cu-kbd text-muted">Esc</kbd>
       </button>
-      <button
-        class="relative overflow-hidden rounded-md px-3.5 py-1.5 font-medium text-bg transition-colors {armed ? 'bg-fg' : 'bg-fg/55'}"
-        disabled={!armed}
-        onclick={() => app.approve(wait.id, true)}
-      >
-        <!-- Arming: the button fills from the left, then takes clicks. -->
-        {#if !armed}<span class="absolute inset-0 origin-left bg-fg [animation:arm_var(--arm)_linear_both]" style="--arm:{ARM_MS}ms" aria-hidden="true"></span>{/if}
-        <span class="relative">Approve <kbd class="ml-1 text-[11px] opacity-70">{shortcut('↵')}</kbd></span>
-      </button>
+      {#key wait.id}
+        <button class="cu-btn primary" class:arming={!armed} disabled={!armed} onclick={() => app.approve(wait.id, true)}>
+          <!-- Arming: the pill fills from the left, then takes clicks. -->
+          {#if !armed}<span class="cu-fill" style="--arm:{ARM_MS}ms" aria-hidden="true"></span>{/if}
+          <span class="cu-label">Approve <span class="cu-keys" aria-label={shortcut('↵')}>{#each keys(shortcut('↵')) as k (k)}<kbd class="cu-kbd" aria-hidden="true"
+              >{#if k === '↵'}<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
+                  ><path d="M13 3.5v4.5a2 2 0 0 1-2 2H3.5" /><path d="M6 7.5 3.5 10 6 12.5" /></svg
+                >{:else}{k}{/if}</kbd
+            >{/each}</span
+          ></span>
+        </button>
+      {/key}
     {:else}
-      <button class="rounded-md px-3 py-1.5 text-fg-2 hover:bg-hover hover:text-fg" onclick={() => app.stop()}>Stop lesson</button>
-      <button class="rounded-md bg-fg px-3.5 py-1.5 font-medium text-bg" onclick={() => app.teachDone(wait.id)}>Done</button>
+      <button class="cu-btn" onclick={() => app.stop()}>Stop lesson</button>
+      <button class="cu-btn primary" onclick={() => app.teachDone(wait.id)}>Done</button>
     {/if}
   </div>
 </div>
-
-<style>
-  @keyframes -global-arm {
-    from {
-      transform: scaleX(0);
-    }
-    to {
-      transform: scaleX(1);
-    }
-  }
-</style>

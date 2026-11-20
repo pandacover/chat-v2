@@ -9,7 +9,7 @@
   import ComputerWaitCard from './ComputerWaitCard.svelte'
   import StepList from './StepList.svelte'
   import type { Attachment, PathNode } from '@shared/types'
-  import { fade, fly } from '@/lib/motion'
+  import { collapse, fade, fly } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
   import AttachmentChip from './AttachmentChip.svelte'
   import BranchSwitcher from './BranchSwitcher.svelte'
@@ -36,6 +36,51 @@
   const wait = $derived(app.computerWait?.messageId === message.id ? app.computerWait : null)
   // The Stop shortcut works while another app covers the chat; say so while a computer reply runs.
   const computerRun = $derived(streaming && app.chat.computerEnabled && app.computerSupported)
+  /** The computer tool this reply runs now; while a card asks something, the card says it. */
+  const doing = $derived(streaming && !wait ? (app.computerDoing.get(message.id) ?? null) : null)
+  /**
+   * The wait the card shows. A Show-me step that ends is held WAIT_HOLD ms (inert), so a next step
+   * that follows at once updates the same card instead of folding it away and back in.
+   */
+  const WAIT_HOLD = 200
+  let shownWait = $state(untrack(() => wait))
+  let waitHeld = $state(false)
+  let waitRelease: ReturnType<typeof setTimeout> | undefined
+  $effect.pre(() => {
+    const w = wait
+    untrack(() => {
+      clearTimeout(waitRelease)
+      if (w || shownWait?.kind !== 'teach' || !streaming) {
+        shownWait = w
+        waitHeld = false
+        return
+      }
+      waitHeld = true
+      waitRelease = setTimeout(() => {
+        shownWait = null
+        waitHeld = false
+      }, WAIT_HOLD)
+    })
+  })
+  $effect(() => () => clearTimeout(waitRelease))
+  /**
+   * The Computer line before the reply's first step lands. Once up it stays (as "Working") until
+   * that step is in, so a moment between tools, with nothing running, doesn't swap it for
+   * "Thinking" and back.
+   */
+  const hasSteps = $derived(blocks.some((b) => b.type === 'steps'))
+  let computerLatched = $state(false)
+  $effect.pre(() => {
+    const on = streaming && (app.control.active || !!doing) && !hasSteps
+    const still = streaming
+    untrack(() => {
+      if (!still) computerLatched = false
+      else if (on) computerLatched = true
+    })
+  })
+  const placeholder = $derived(streaming && blocks.at(-1)?.type !== 'steps' && (app.control.active || !!doing || (computerLatched && !hasSteps)))
+  /** Doing it, or showing how: read from the message, and switchable while the reply runs. */
+  const mode = $derived(computerRun ? (app.computerModes.get(message.id) ?? null) : null)
   // The turn you just sent slides in; opening, switching or forking a chat renders still.
   const fresh = untrack(
     () => app.liveIds.has(node.message.id) || (!!node.message.activeChildId && app.liveIds.has(node.message.activeChildId))
@@ -205,7 +250,7 @@
       {#if block.type === 'text'}
         <Markdown source={block.content} streaming={streaming && i === blocks.length - 1} live={live && i === blocks.length - 1} />
       {:else if block.type === 'steps'}
-        <StepList steps={block.steps} {live} running={streaming && i === blocks.length - 1} done={!streaming} />
+        <StepList steps={block.steps} {live} running={streaming && i === blocks.length - 1} done={!streaming} doing={i === blocks.length - 1 ? doing : null} />
       {:else}
         {@const active = app.artifact?.identifier === block.identifier && app.artifact?.messageId === message.id}
         <button
@@ -251,16 +296,30 @@
       </div>
     {/if}
 
-    {#if wait}
-      <ComputerWaitCard {wait} />
-    {:else if streaming && app.control.active && blocks.at(-1)?.type !== 'steps'}
-      <StepList steps={[]} live running />
+    {#if shownWait}
+      <ComputerWaitCard wait={shownWait} held={waitHeld} />
+    {:else if placeholder}
+      <StepList steps={[]} live running {doing} />
     {:else if streaming && blocks.length === 0}
       <div class="thinking py-1 text-[13.5px]" aria-live="polite">Thinking</div>
     {/if}
     {#if computerRun}
-      <div class="-mt-1 text-[12px] text-muted" in:fade={{ duration: 200 }}>
-        <kbd class="font-[inherit] text-fg-2">{stopShortcutLabel(isMac)}</kbd> stops it from any app
+      <!-- While a computer reply runs: the Stop shortcut (it works from any app), and the mode this
+           reply works in, which a click switches for the rest of the reply. The chip sits at the far
+           end, so it can arrive a moment later without moving the line. It folds away with its gap
+           when the reply ends, so the reply's text glides up rather than jumping. -->
+      <div class="-mt-1 flex h-6 items-center gap-2 text-[12px] text-muted" in:fade={{ duration: 200 }} out:collapse>
+        <span class="cu-keys text-fg-2" aria-label={stopShortcutLabel(isMac)}>{#each stopShortcutLabel(isMac).split(' ') as k (k)}<kbd class="cu-kbd">{k}</kbd>{/each}</span>
+        <span>stops it from any app</span>
+        {#if mode}
+          <button
+            class="cu-btn small line ml-auto"
+            data-computer-mode={mode}
+            use:tip={mode === 'do' ? 'Show me how instead' : 'Do it for me instead'}
+            in:fade={{ duration: 160 }}
+            onclick={() => app.setComputerMode(message.id, mode === 'do' ? 'teach' : 'do')}>{mode === 'do' ? 'Doing it' : 'Showing you'}</button
+          >
+        {/if}
       </div>
     {/if}
 

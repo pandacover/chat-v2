@@ -90,6 +90,8 @@ public static class ChatV2Host
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool GetMonitorInfo(IntPtr m, ref MONITORINFO mi);
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int idx);
     [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint n, INPUT[] inputs, int size);
     [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int idx);
     [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
@@ -100,6 +102,10 @@ public static class ChatV2Host
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int v, int size);
+    [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")] static extern int DwmGetWindowRect(IntPtr h, int attr, out RECT v, int size);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr h, ref POINT p);
+    [DllImport("user32.dll")] static extern IntPtr ChildWindowFromPointEx(IntPtr h, POINT p, uint flags);
 
     const uint INPUT_MOUSE = 0, INPUT_KEYBOARD = 1;
     const uint KEYEVENTF_EXTENDEDKEY = 0x1, KEYEVENTF_KEYUP = 0x2, KEYEVENTF_UNICODE = 0x4;
@@ -108,7 +114,12 @@ public static class ChatV2Host
 
     static IntPtr remembered = IntPtr.Zero; // written by "remember" (immediate lane), read everywhere
     static uint ownerPid = 0; // the Electron main process; its windows are chat-v2's
+    // ui_elements ids: never reused, so an id from an older list still means
+    // the same control or is reported stale. The most recent MaxKept are kept.
     static Dictionary<int, AutomationElement> elements = new Dictionary<int, AutomationElement>();
+    static readonly Queue<int> elementOrder = new Queue<int>();
+    static int nextElementId = 1;
+    const int MaxKept = 2000;
 
     public static void Init(int electronPid)
     {
@@ -139,7 +150,7 @@ public static class ChatV2Host
     }
 
     static readonly HashSet<string> Immediate = new HashSet<string>(new string[] {
-        "ping", "cursor", "remember", "foreground", "windows", "sql"
+        "ping", "cursor", "pressed", "remember", "foreground", "windows", "sql"
     });
 
     static JavaScriptSerializer NewJson() { return new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 64 }; }
@@ -252,19 +263,25 @@ public static class ChatV2Host
             case "foreground": return Describe(TargetWindow());
             case "windows": return ListWindows();
             case "focusWindow": return FocusWindow(Str(p, "title"));
-            case "screenshot": return Screenshot(Int(p, "maxWidth", 1280));
+            case "screenshot": return Screenshot(Int(p, "maxWidth", 1280), Int(p, "maxHeight", 0), Int(p, "rx"), Int(p, "ry"), Int(p, "rw"), Int(p, "rh"));
             case "cursor": { POINT pt; GetCursorPos(out pt); return Pt(pt.X, pt.Y); }
-            case "move": SetCursorPos(Int(p, "x"), Int(p, "y")); return true;
-            case "click": return Click(Int(p, "x"), Int(p, "y"), Str(p, "button", "left"), Int(p, "count", 1));
+            // The primary button (the right one when swapped) is down, or went down since the
+            // last read: a quick click between two polls still counts. No hook, a state read.
+            case "pressed": { int vk = GetSystemMetrics(23) != 0 ? 0x02 : 0x01; return (GetAsyncKeyState(vk) & 0x8001) != 0; }
+            case "move": return Move(Int(p, "x"), Int(p, "y"));
+            case "click": return Click(Int(p, "x"), Int(p, "y"), Str(p, "button", "left"), Int(p, "count", 1), Str(p, "mods"));
+            case "focused": return Focused();
             case "drag": return Drag(Int(p, "x1"), Int(p, "y1"), Int(p, "x2"), Int(p, "y2"));
             case "scroll": return Scroll(Int(p, "x"), Int(p, "y"), Int(p, "dy", 0), Int(p, "dx", 0));
             case "type": TypeText(Str(p, "text")); return true;
             case "keys": return Keys(Str(p, "combo"));
-            case "uiTree": return UiTree(Int(p, "max", 250), Int(p, "budgetMs", 2500), Long(p, "hwnd"));
+            case "parseKeys": return ParseCombo(Str(p, "combo")); // diagnostics and tests: the virtual keys, nothing pressed
+            case "uiTree": return UiTree(Int(p, "max", 250), Int(p, "budgetMs", 2500), Long(p, "hwnd"), Int(p, "firstId", 1), Str(p, "title"));
             case "invoke": return Invoke(Int(p, "id"));
             case "setValue": return SetValue(Int(p, "id"), Str(p, "text"));
             case "elementRect": return ElementRect(Int(p, "id"));
             case "elementAt": return ElementAt(Int(p, "x"), Int(p, "y"));
+            case "pointAt": return PointAt(Int(p, "x"), Int(p, "y"), Int(p, "budgetMs", 1500));
             case "sql": return Sql(Str(p, "query"));
             case "open":
                 {
@@ -434,7 +451,8 @@ public static class ChatV2Host
         return Describe(GetForegroundWindow());
     }
 
-    static object FocusWindow(string title)
+    /** The topmost visible window (not chat-v2's) whose title contains "title", or whose app is named so. */
+    static IntPtr FindWindowByTitle(string title)
     {
         IntPtr found = IntPtr.Zero;
         string needle = title.ToLowerInvariant();
@@ -449,22 +467,34 @@ public static class ChatV2Host
             return true;
         }, IntPtr.Zero);
         if (found == IntPtr.Zero) throw new Exception("No open window matches \"" + title + "\"");
+        return found;
+    }
+
+    static object FocusWindow(string title)
+    {
+        var found = FindWindowByTitle(title);
         Activate(found);
         remembered = found;
         return Describe(found);
     }
 
     // ---------------------------------------------------------------- capture
-    static object Screenshot(int maxWidth)
+    /**
+     * The target window's monitor, or the region rx,ry,rw,rh (physical pixels) when rw and rh are
+     * set, shrunk to fit maxWidth (and maxHeight, if set), never enlarged. The pointer is drawn in.
+     */
+    static object Screenshot(int maxWidth, int maxHeight, int rx, int ry, int rw, int rh)
     {
         var target = TargetWindow();
-        var m = MonitorRect(target);
+        var m = rw > 0 && rh > 0 ? Rect(rx, ry, rw, rh) : MonitorRect(target);
         int x = (int)m["x"], y = (int)m["y"], w = (int)m["width"], h = (int)m["height"];
         using (var full = new Bitmap(w, h, PixelFormat.Format24bppRgb))
         {
             using (var g = Graphics.FromImage(full)) g.CopyFromScreen(x, y, 0, 0, new Size(w, h), CopyPixelOperation.SourceCopy);
             double scale = w > maxWidth ? (double)maxWidth / w : 1.0;
-            int ow = (int)Math.Round(w * scale), oh = (int)Math.Round(h * scale);
+            if (maxHeight > 0 && h * scale > maxHeight) scale = (double)maxHeight / h;
+            int ow = Math.Max(1, (int)Math.Round(w * scale)), oh = Math.Max(1, (int)Math.Round(h * scale));
+            POINT cur; GetCursorPos(out cur);
             using (var outBmp = new Bitmap(ow, oh, PixelFormat.Format24bppRgb))
             {
                 using (var g2 = Graphics.FromImage(outBmp))
@@ -472,8 +502,8 @@ public static class ChatV2Host
                     g2.InterpolationMode = InterpolationMode.HighQualityBicubic;
                     g2.PixelOffsetMode = PixelOffsetMode.HighQuality;
                     g2.DrawImage(full, 0, 0, ow, oh);
+                    if (cur.X >= x && cur.Y >= y && cur.X < x + w && cur.Y < y + h) DrawPointer(g2, (cur.X - x) * scale, (cur.Y - y) * scale, Math.Max(scale, 0.75));
                 }
-                POINT cur; GetCursorPos(out cur);
                 var jpeg = GetEncoder(ImageFormat.Jpeg);
                 var ps = new EncoderParameters(1);
                 ps.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 78L);
@@ -486,10 +516,24 @@ public static class ChatV2Host
                     d["imageWidth"] = ow; d["imageHeight"] = oh;
                     d["screen"] = m;
                     d["window"] = Describe(target);
+                    d["cursor"] = Pt(cur.X, cur.Y);
                     return d;
                 }
             }
         }
+    }
+
+    /** An arrow pointer (white, black outline) with its tip at x,y; screen capture leaves the real one out. */
+    static void DrawPointer(Graphics g, double x, double y, double k)
+    {
+        var pts = new PointF[] {
+            new PointF(0, 0), new PointF(0, 17), new PointF(4.5f, 13), new PointF(7.5f, 19.5f),
+            new PointF(10, 18.5f), new PointF(7, 12), new PointF(12, 12)
+        };
+        for (int i = 0; i < pts.Length; i++) pts[i] = new PointF((float)(x + pts[i].X * k), (float)(y + pts[i].Y * k));
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.FillPolygon(Brushes.White, pts);
+        using (var pen = new Pen(Color.Black, (float)Math.Max(1.0, k))) g.DrawPolygon(pen, pts);
     }
 
     static ImageCodecInfo GetEncoder(ImageFormat f)
@@ -513,18 +557,44 @@ public static class ChatV2Host
 
     static void KeyTap(ushort vk) { Send(Key(vk, 0, 0), Key(vk, 0, KEYEVENTF_KEYUP)); }
 
-    static object Click(int x, int y, string button, int count)
+    /** Move the pointer, plus a zero-length move event so hover handlers see it arrive. */
+    static object Move(int x, int y)
     {
+        SetCursorPos(x, y);
+        Send(Mouse(0x1 /* MOUSEEVENTF_MOVE */, 0));
+        return Pt(x, y);
+    }
+
+    /** "mods": comma-separated modifier names (ctrl, shift, alt, cmd = ctrl), held for the clicks. */
+    static object Click(int x, int y, string button, int count, string mods)
+    {
+        var held = new List<ushort>();
+        foreach (var m in (mods ?? "").ToLowerInvariant().Split(','))
+        {
+            if (m.Length == 0) continue;
+            ushort vk;
+            if (!Vk.TryGetValue(m, out vk) || (vk != 0x10 && vk != 0x11 && vk != 0x12 && vk != 0x5B)) throw new Exception("Unknown modifier \"" + m + "\"");
+            if (!held.Contains(vk)) held.Add(vk);
+        }
         SetCursorPos(x, y);
         System.Threading.Thread.Sleep(30);
         uint down = MOUSEEVENTF_LEFTDOWN, up = MOUSEEVENTF_LEFTUP;
         if (button == "right") { down = MOUSEEVENTF_RIGHTDOWN; up = MOUSEEVENTF_RIGHTUP; }
         else if (button == "middle") { down = MOUSEEVENTF_MIDDLEDOWN; up = MOUSEEVENTF_MIDDLEUP; }
-        for (int i = 0; i < Math.Max(1, count); i++)
+        foreach (var vk in held) Send(Key(vk, 0, vk == 0x5B ? KEYEVENTF_EXTENDEDKEY : 0));
+        try
         {
-            CheckCancel();
-            Send(Mouse(down, 0), Mouse(up, 0));
-            System.Threading.Thread.Sleep(45);
+            for (int i = 0; i < Math.Min(3, Math.Max(1, count)); i++)
+            {
+                CheckCancel();
+                Send(Mouse(down, 0), Mouse(up, 0));
+                System.Threading.Thread.Sleep(45);
+            }
+        }
+        finally
+        {
+            // Never leave a modifier held.
+            for (int i = held.Count - 1; i >= 0; i--) Send(Key(held[i], 0, KEYEVENTF_KEYUP | (held[i] == 0x5B ? KEYEVENTF_EXTENDEDKEY : 0)));
         }
         return Pt(x, y);
     }
@@ -580,17 +650,35 @@ public static class ChatV2Host
         m["backspace"] = 0x08; m["delete"] = 0x2E; m["del"] = 0x2E; m["insert"] = 0x2D;
         m["up"] = 0x26; m["down"] = 0x28; m["left"] = 0x25; m["right"] = 0x27;
         m["home"] = 0x24; m["end"] = 0x23; m["pageup"] = 0x21; m["pagedown"] = 0x22;
-        m["printscreen"] = 0x2C; m["capslock"] = 0x14; m["menu"] = 0x5D;
-        m["plus"] = 0xBB; m["minus"] = 0xBD; m["comma"] = 0xBC; m["period"] = 0xBE; m["slash"] = 0xBF;
+        m["arrowup"] = 0x26; m["arrowdown"] = 0x28; m["arrowleft"] = 0x25; m["arrowright"] = 0x27;
+        m["pgup"] = 0x21; m["pgdn"] = 0x22; m["ins"] = 0x2D; m["pause"] = 0x13; m["numlock"] = 0x90; m["scrolllock"] = 0x91;
+        m["printscreen"] = 0x2C; m["capslock"] = 0x14; m["menu"] = 0x5D; m["apps"] = 0x5D;
+        // Punctuation, by name or as the character (US layout keys).
+        m["plus"] = 0xBB; m["equal"] = 0xBB; m["equals"] = 0xBB; m["="] = 0xBB;
+        m["minus"] = 0xBD; m["-"] = 0xBD; m["comma"] = 0xBC; m[","] = 0xBC; m["period"] = 0xBE; m["dot"] = 0xBE; m["."] = 0xBE;
+        m["slash"] = 0xBF; m["/"] = 0xBF; m["semicolon"] = 0xBA; m[";"] = 0xBA; m["backslash"] = 0xDC; m["\\"] = 0xDC;
+        m["bracketleft"] = 0xDB; m["["] = 0xDB; m["bracketright"] = 0xDD; m["]"] = 0xDD;
+        m["quote"] = 0xDE; m["apostrophe"] = 0xDE; m["'"] = 0xDE;
+        m["backquote"] = 0xC0; m["backtick"] = 0xC0; m["grave"] = 0xC0; m[((char)0x60).ToString()] = 0xC0;
         for (int i = 1; i <= 24; i++) m["f" + i] = (ushort)(0x6F + i);
         for (char c = 'a'; c <= 'z'; c++) m[c.ToString()] = (ushort)char.ToUpperInvariant(c);
         for (char c = '0'; c <= '9'; c++) m[c.ToString()] = (ushort)c;
         return m;
     }
 
+    /** "ctrl+shift+t", "ctrl+/", "ctrl++" (the plus key) and "+" as virtual keys, in press order. */
     static List<ushort> ParseCombo(string combo)
     {
-        var parts = combo.ToLowerInvariant().Replace(" ", "").Split('+');
+        var s = combo.ToLowerInvariant().Replace(" ", "");
+        var parts = new List<string>();
+        if (s == "+") parts.Add("plus");
+        else
+        {
+            bool plusLast = s.EndsWith("++");
+            if (plusLast) s = s.Substring(0, s.Length - 2);
+            parts.AddRange(s.Split('+'));
+            if (plusLast) parts.Add("plus");
+        }
         var vks = new List<ushort>();
         foreach (var part in parts)
         {
@@ -599,6 +687,7 @@ public static class ChatV2Host
             if (!Vk.TryGetValue(part, out vk)) throw new Exception("Unknown key \"" + part + "\" in " + combo);
             vks.Add(vk);
         }
+        if (vks.Count == 0) throw new Exception("No key in " + combo);
         return vks;
     }
 
@@ -670,12 +759,13 @@ public static class ChatV2Host
     /**
      * Interactive controls (then short text labels) of the target window, up to
      * "max", within about "budgetMs" (see FindInBranches); the result says
-     * "truncated" when either limit cut the search short.
+     * "truncated" when either limit cut the search short. Ids continue from
+     * the last list (or "firstId", which the caller keeps across host restarts).
      */
-    static object UiTree(int max, int budgetMs, long hwnd)
+    static object UiTree(int max, int budgetMs, long hwnd, int firstId, string title)
     {
-        elements.Clear();
-        var target = hwnd != 0 ? new IntPtr(hwnd) : TargetWindow();
+        if (firstId > nextElementId) nextElementId = firstId;
+        var target = hwnd != 0 ? new IntPtr(hwnd) : title.Length > 0 ? FindWindowByTitle(title) : TargetWindow();
         if (target == IntPtr.Zero) throw new Exception("No foreground window");
         if (treeCondition == null) treeCondition = TypeCondition(true, false);
         var clock = Stopwatch.StartNew();
@@ -685,10 +775,16 @@ public static class ChatV2Host
         cr.Add(AutomationElement.ControlTypeProperty);
         cr.Add(AutomationElement.BoundingRectangleProperty);
         cr.Add(AutomationElement.IsEnabledProperty);
+        // Control state, fetched in the same cross-process call; unsupported patterns read as NotSupported.
+        cr.Add(AutomationElement.IsPasswordProperty);
+        cr.Add(ValuePattern.ValueProperty);
+        cr.Add(RangeValuePattern.ValueProperty);
+        cr.Add(TogglePattern.ToggleStateProperty);
+        cr.Add(SelectionItemPattern.IsSelectedProperty);
+        cr.Add(ExpandCollapsePattern.ExpandCollapseStateProperty);
         cr.TreeScope = TreeScope.Element;
         var outList = new List<object>();
         var texts = new List<object>();
-        int nextId = 1;
         bool truncated = false;
         using (cr.Activate())
         {
@@ -704,8 +800,10 @@ public static class ChatV2Host
                 bool label = ct == ControlType.Text && name.Length > 0 && name.Length < 80;
                 if (!interactive && !label) return true;
                 if (!interactive && texts.Count > max / 3) return true;
-                int id = nextId++;
+                int id = nextElementId++;
                 elements[id] = el;
+                elementOrder.Enqueue(id);
+                while (elementOrder.Count > MaxKept) elements.Remove(elementOrder.Dequeue());
                 var d = new Dictionary<string, object>();
                 d["id"] = id;
                 d["type"] = ct.ProgrammaticName.Replace("ControlType.", "");
@@ -713,6 +811,7 @@ public static class ChatV2Host
                 d["x"] = (int)r.X; d["y"] = (int)r.Y; d["width"] = (int)r.Width; d["height"] = (int)r.Height;
                 bool enabled = true; try { enabled = el.Cached.IsEnabled; } catch { }
                 if (!enabled) d["disabled"] = true;
+                if (interactive) AddState(el, ct, d);
                 if (interactive) outList.Add(d); else texts.Add(d);
                 return outList.Count + texts.Count < max;
             });
@@ -726,10 +825,73 @@ public static class ChatV2Host
         return res;
     }
 
+    /** A cached property, or null where the element doesn't support it. */
+    static object CachedProp(AutomationElement el, AutomationProperty prop)
+    {
+        try
+        {
+            var v = el.GetCachedPropertyValue(prop, true);
+            return v == AutomationElement.NotSupported ? null : v;
+        }
+        catch { return null; }
+    }
+
+    /** One line of text, at most "max" characters. */
+    static string Clip(string s, int max)
+    {
+        s = s.Replace("\r\n", " ").Replace('\n', ' ').Replace('\r', ' ').Replace('\t', ' ');
+        return s.Length > max ? s.Substring(0, max) + "…" : s;
+    }
+
+    /** Controls whose value is worth showing (a link's value is its URL, a button's rarely anything). */
+    static readonly HashSet<ControlType> Valued = new HashSet<ControlType>(new ControlType[] {
+        ControlType.Edit, ControlType.ComboBox, ControlType.Spinner, ControlType.Slider, ControlType.Document
+    });
+
+    /** value, checked, selected, expanded from the cached pattern properties. */
+    static void AddState(AutomationElement el, ControlType ct, Dictionary<string, object> d)
+    {
+        var pw = CachedProp(el, AutomationElement.IsPasswordProperty);
+        bool password = pw is bool && (bool)pw;
+        var v = Valued.Contains(ct) ? CachedProp(el, ValuePattern.ValueProperty) as string : null;
+        if (!password && !string.IsNullOrEmpty(v)) d["value"] = Clip(v, 80);
+        else if (Valued.Contains(ct))
+        {
+            var rv = CachedProp(el, RangeValuePattern.ValueProperty);
+            if (rv is double) d["value"] = Math.Round((double)rv, 2).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        var ts = CachedProp(el, TogglePattern.ToggleStateProperty);
+        if (ts is ToggleState) d["checked"] = (ToggleState)ts == ToggleState.On ? (object)true : (ToggleState)ts == ToggleState.Off ? (object)false : "mixed";
+        var sel = CachedProp(el, SelectionItemPattern.IsSelectedProperty);
+        if (sel is bool && (bool)sel) d["selected"] = true;
+        var ec = CachedProp(el, ExpandCollapsePattern.ExpandCollapseStateProperty);
+        if (ec is ExpandCollapseState && (ExpandCollapseState)ec != ExpandCollapseState.LeafNode) d["expanded"] = (ExpandCollapseState)ec != ExpandCollapseState.Collapsed;
+    }
+
+    /** The control with keyboard focus, unless it is chat-v2's own. Its value is left out for password fields. */
+    static object Focused()
+    {
+        AutomationElement el = null;
+        try { el = AutomationElement.FocusedElement; } catch { }
+        if (el == null) return null;
+        int pid = 0; try { pid = el.Current.ProcessId; } catch { }
+        if (ownerPid != 0 && pid == (int)ownerPid) return null;
+        var d = new Dictionary<string, object>();
+        try { d["type"] = el.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); } catch { d["type"] = ""; }
+        try { d["name"] = Clip(el.Current.Name ?? "", 80); } catch { d["name"] = ""; }
+        bool password = false; try { password = el.Current.IsPassword; } catch { }
+        object pat;
+        if (!password && el.TryGetCurrentPattern(ValuePattern.Pattern, out pat))
+        {
+            try { var v = ((ValuePattern)pat).Current.Value; if (!string.IsNullOrEmpty(v)) d["value"] = Clip(v, 80); } catch { }
+        }
+        return d;
+    }
+
     static AutomationElement Element(int id)
     {
         AutomationElement el;
-        if (!elements.TryGetValue(id, out el)) throw new Exception("Element " + id + " is stale; call ui_tree again");
+        if (!elements.TryGetValue(id, out el)) throw new Exception("Element " + id + " is stale or unknown (not in a recent control list); call ui_elements again");
         return el;
     }
 
@@ -767,6 +929,22 @@ public static class ChatV2Host
         if (hwnd == IntPtr.Zero) return null;
         uint pid; GetWindowThreadProcessId(hwnd, out pid);
         if (pid == ownerPid) return null;
+        AutomationElement found;
+        System.Windows.Rect r;
+        if (!SnapIn(hwnd, x, y, 1500, out found, out r)) return null;
+        return Rect((int)r.X, (int)r.Y, (int)r.Width, (int)r.Height);
+    }
+
+    /**
+     * The smallest interactive control of window "hwnd" containing the point (see ElementAt),
+     * with its name and type in the element's cache. A fallback search of the window stops
+     * after about "budgetMs".
+     */
+    static bool SnapIn(IntPtr hwnd, int x, int y, int budgetMs, out AutomationElement found, out System.Windows.Rect rect)
+    {
+        found = null;
+        rect = System.Windows.Rect.Empty;
+        uint pid; GetWindowThreadProcessId(hwnd, out pid);
         var mon = MonitorRect(hwnd);
         double limit = Convert.ToDouble(mon["width"]) * Convert.ToDouble(mon["height"]) * 0.2;
         if (snapCondition == null) snapCondition = TypeCondition(false, true);
@@ -774,6 +952,7 @@ public static class ChatV2Host
         cr.Add(AutomationElement.ControlTypeProperty);
         cr.Add(AutomationElement.BoundingRectangleProperty);
         cr.Add(AutomationElement.ProcessIdProperty);
+        cr.Add(AutomationElement.NameProperty);
         cr.TreeScope = TreeScope.Element;
         System.Windows.Rect r;
         using (cr.Activate())
@@ -788,13 +967,22 @@ public static class ChatV2Host
                 int hitPid = 0; try { hitPid = hit.Cached.ProcessId; } catch { }
                 if (hitPid != (int)pid) hit = null;
             }
+            // Something else covers the point (the Point overlay takes the mouse): start from the
+            // deepest child window there, which in Win32 apps is often the control itself.
+            AutomationElement under = null;
+            if (hit == null)
+            {
+                var child = DeepestChild(hwnd, x, y);
+                if (child != hwnd) try { under = AutomationElement.FromHandle(child).GetUpdatedCache(cr); } catch { }
+                hit = under;
+            }
             if (hit != null)
             {
                 var walker = TreeWalker.ControlViewWalker;
                 var el = hit;
                 for (int depth = 0; el != null && depth < 30; depth++)
                 {
-                    if (Snappable(el, x, y, limit, out r)) return Rect((int)r.X, (int)r.Y, (int)r.Width, (int)r.Height);
+                    if (Snappable(el, x, y, limit, out r)) { found = el; rect = r; return true; }
                     ControlType ct = null; System.Windows.Rect er = System.Windows.Rect.Empty;
                     try { ct = el.Cached.ControlType; er = el.Cached.BoundingRectangle; } catch { }
                     // Ancestors only get bigger: past the window or the size limit nothing can qualify.
@@ -804,18 +992,79 @@ public static class ChatV2Host
             }
             // FromPoint stopped at something that isn't a control (Chromium can answer
             // with a big layout group that doesn't even hold the control on top):
-            // search the whole window as before, with the filter inside UIA.
+            // search the window (or the child window under the point) with the filter inside UIA.
             System.Windows.Rect best = System.Windows.Rect.Empty;
+            AutomationElement bestEl = null;
             double bestArea = double.MaxValue;
-            FindInBranches(AutomationElement.FromHandle(hwnd), snapCondition, cr, 1500, delegate (AutomationElement el)
+            AutomationElement root = under;
+            if (root == null) root = AutomationElement.FromHandle(hwnd);
+            FindInBranches(root, snapCondition, cr, budgetMs, delegate (AutomationElement el)
             {
                 System.Windows.Rect er;
-                if (Snappable(el, x, y, limit, out er) && er.Width * er.Height < bestArea) { best = er; bestArea = er.Width * er.Height; }
+                if (Snappable(el, x, y, limit, out er) && er.Width * er.Height < bestArea) { best = er; bestEl = el; bestArea = er.Width * er.Height; }
                 return true;
             });
-            if (best.IsEmpty) return null;
-            return Rect((int)best.X, (int)best.Y, (int)best.Width, (int)best.Height);
+            if (best.IsEmpty) return false;
+            found = bestEl;
+            rect = best;
+            return true;
         }
+    }
+
+    /** The deepest visible child window of "hwnd" under a screen point. */
+    static IntPtr DeepestChild(IntPtr hwnd, int x, int y)
+    {
+        var h = hwnd;
+        for (int i = 0; i < 32; i++)
+        {
+            var pt = new POINT { X = x, Y = y };
+            if (!ScreenToClient(h, ref pt)) return h;
+            var c = ChildWindowFromPointEx(h, pt, 1 | 4 /* CWP_SKIPINVISIBLE | CWP_SKIPTRANSPARENT */);
+            if (c == IntPtr.Zero || c == h) return h;
+            h = c;
+        }
+        return h;
+    }
+
+    /**
+     * For the user's Point: the app window under a screen point, and the control there if
+     * there is a sensible one. Unlike ElementAt it looks past chat-v2's own windows, since the
+     * Point overlay covers the screen and takes the mouse while the user points. Null when no
+     * window is there.
+     */
+    static object PointAt(int x, int y, int budgetMs)
+    {
+        IntPtr hwnd = IntPtr.Zero;
+        EnumWindows(delegate (IntPtr h, IntPtr l)
+        {
+            if (!IsWindowVisible(h) || IsIconic(h) || IsOwn(h)) return true;
+            if ((GetWindowLong(h, -20) & 0x20) != 0) return true; // WS_EX_TRANSPARENT: other apps' click-through overlays
+            int cloaked; // suspended UWP apps and windows on other virtual desktops
+            if (DwmGetWindowAttribute(h, 14 /* DWMWA_CLOAKED */, out cloaked, 4) == 0 && cloaked != 0) return true;
+            RECT wr;
+            // The visible frame, without the invisible resize borders GetWindowRect counts.
+            if (DwmGetWindowRect(h, 9 /* DWMWA_EXTENDED_FRAME_BOUNDS */, out wr, Marshal.SizeOf(typeof(RECT))) != 0 && !GetWindowRect(h, out wr)) return true;
+            if (x < wr.Left || x >= wr.Right || y < wr.Top || y >= wr.Bottom) return true;
+            hwnd = h;
+            return false;
+        }, IntPtr.Zero);
+        if (hwnd == IntPtr.Zero) return null;
+        var res = new Dictionary<string, object>();
+        res["window"] = Describe(hwnd);
+        AutomationElement el;
+        System.Windows.Rect r;
+        if (SnapIn(hwnd, x, y, budgetMs, out el, out r))
+        {
+            var c = Rect((int)r.X, (int)r.Y, (int)r.Width, (int)r.Height);
+            string type = "", name = "";
+            try { type = el.Cached.ControlType.ProgrammaticName.Replace("ControlType.", ""); } catch { }
+            try { name = el.Cached.Name ?? ""; } catch { }
+            c["type"] = type;
+            c["name"] = name.Length > 120 ? name.Substring(0, 120) : name;
+            res["control"] = c;
+        }
+        else res["control"] = null;
+        return res;
     }
 
     static object Invoke(int id)
@@ -832,18 +1081,27 @@ public static class ChatV2Host
             return "expanded/collapsed";
         }
         var r = el.Current.BoundingRectangle;
-        Click((int)(r.X + r.Width / 2), (int)(r.Y + r.Height / 2), "left", 1);
+        Click((int)(r.X + r.Width / 2), (int)(r.Y + r.Height / 2), "left", 1, "");
         return "clicked";
     }
 
+    /**
+     * Put text in a control: a field's text is replaced (through ValuePattern,
+     * else by selecting all and typing over it); other controls get it typed at
+     * the caret. "set": focus didn't move.
+     */
     static object SetValue(int id, string text)
     {
         var el = Element(id);
         object pat;
         if (el.TryGetCurrentPattern(ValuePattern.Pattern, out pat)) { ((ValuePattern)pat).SetValue(text); return "set"; }
         el.SetFocus();
+        ControlType ct = null;
+        try { ct = el.Current.ControlType; } catch { }
+        bool field = ct == ControlType.Edit || ct == ControlType.ComboBox;
+        if (field) Keys("ctrl+a");
         TypeText(text);
-        return "typed";
+        return field ? "replaced" : "typed";
     }
 
     // ---------------------------------------------------------------- Windows Search

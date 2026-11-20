@@ -62,6 +62,7 @@
   onkeydown={(e) => {
     // Yield to dialogs and to any handler that already used the key.
     if (e.key !== 'Escape' || e.defaultPrevented || app.page !== 'chat' || app.activeTab !== 'artifact' || document.querySelector('[aria-modal="true"]')) return
+    e.preventDefault()
     app.artifact = null
   }}
 />

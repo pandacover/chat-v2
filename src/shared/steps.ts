@@ -7,6 +7,8 @@ export interface Step {
   label: string
   ok: boolean
   detail?: string
+  /** The user said no (an approval they denied): neither done nor failed. */
+  denied?: boolean
 }
 
 const PREFIX = '::step '
@@ -17,10 +19,18 @@ export const parseStep = (line: string): Step | null => {
   if (!line.startsWith(PREFIX)) return null
   try {
     const s = JSON.parse(line.slice(PREFIX.length)) as Partial<Step>
-    return typeof s.label === 'string' ? { tool: String(s.tool ?? ''), label: s.label, ok: s.ok !== false, ...(s.detail ? { detail: String(s.detail) } : {}) } : null
+    return typeof s.label === 'string'
+      ? { tool: String(s.tool ?? ''), label: s.label, ok: s.ok !== false, ...(s.detail ? { detail: String(s.detail) } : {}), ...(s.denied ? { denied: true } : {}) }
+      : null
   } catch {
     return null
   }
+}
+
+/** One line for a step: what it did and to what ("Click · “Save”"), cut to `max` characters. */
+export const stepText = (s: { label: string; detail?: string | undefined }, max = 80): string => {
+  const full = s.detail ? `${s.label} · ${s.detail}` : s.label
+  return full.length > max ? `${full.slice(0, max - 1).trimEnd()}…` : full
 }
 
 export type Segment = { type: 'text'; content: string } | { type: 'steps'; steps: Step[] }

@@ -1,5 +1,5 @@
 // Types shared by the main process, preload bridge and renderer.
-import type { ComputerMode, ComputerWait } from './computer'
+import type { ComputerDoing, ComputerMode, ComputerWait } from './computer'
 
 export type Role = 'root' | 'system' | 'user' | 'assistant'
 
@@ -206,6 +206,12 @@ export type StreamEvent =
   | { type: 'attachment'; messageId: string; attachment: Attachment }
   /** What computer use waits on the user for (an approval, a Show-me step); null once nothing. */
   | { type: 'computer'; waiting: ComputerWait }
+  /** The computer tool a reply is running now, live (null once it ends); never saved. */
+  | { type: 'computerDoing'; messageId: string; doing: ComputerDoing | null }
+  /** The mode a running computer reply works in: decided from the message, or switched by the user. */
+  | { type: 'computerMode'; messageId: string; mode: ComputerMode }
+  /** Point: the user is marking part of the screen (active), or finished; a finished mark brings its image and note for the next message. */
+  | { type: 'point'; active: boolean; attachments: Attachment[]; error?: string }
 
 export interface AppError {
   tag: string
@@ -301,6 +307,10 @@ export interface Api {
     approve(id: string, approved: boolean): Promise<void>
     /** Ends the Show-me step `id` as done. */
     teachDone(id: string): Promise<void>
+    /** Switches a running computer reply between doing it and showing how, for the rest of it. */
+    setMode(sessionId: string, messageId: string, mode: ComputerMode): Promise<void>
+    /** Starts Point (the user marks a spot or box on screen for the next message), or cancels the one under way. True once it is on. */
+    point(): Promise<boolean>
   }
   updates: {
     get(): Promise<UpdateState>

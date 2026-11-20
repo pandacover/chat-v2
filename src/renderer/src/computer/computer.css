@@ -1,0 +1,272 @@
+/*
+ * Computer use's shared look: loaded by the chat (app.css) and the overlay page (computer/main.ts).
+ * The design spec is in src/main/computer/README.md ("Design").
+ *
+ * Two contexts use the same components:
+ *  - In the chat, the app's own tokens (--fg, --bg, --line, --hover...) follow the theme.
+ *  - On the overlay, floating parts sit on `.cu-ink`, a near-black surface in both themes, so they
+ *    read on any wallpaper. It maps the same component tokens onto ink and paper.
+ */
+
+:root {
+  --cu-font: 'Instrument Sans Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --cu-mono: 'JetBrains Mono Variable', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  /* The app's ember (dark scheme value: the overlay's surfaces are always dark). */
+  --cu-accent: #e5703f;
+  --cu-ink: #141311;
+  --cu-ink-raised: #201e1b;
+  --cu-paper: #f7f5f0;
+  --cu-r-pill: 999px;
+  /* The chat's --radius-lg: cards in the chat and on the overlay share one corner. */
+  --cu-r-card: 14px;
+  --cu-r-inner: 10px;
+  --cu-r-kbd: 5px;
+  --cu-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --cu-fast: 120ms;
+  --cu-enter: 220ms;
+  --cu-exit: 160ms;
+  --cu-morph: 280ms;
+  --cu-glide: 420ms;
+  /* Floating things only: a low, wide shadow and a hairline, never a glow. */
+  --cu-float: 0 1px 2px rgb(0 0 0 / 0.18), 0 18px 40px -18px rgb(0 0 0 / 0.55);
+
+  /* Component tokens, chat context (the app's theme tokens). */
+  --cu-fg: var(--fg);
+  --cu-fg-2: var(--fg-2);
+  --cu-fg-3: var(--muted);
+  --cu-hair: var(--line);
+  --cu-hair-strong: color-mix(in oklab, var(--fg) 18%, transparent);
+  --cu-wash: var(--hover);
+  --cu-primary-bg: var(--fg);
+  --cu-primary-fg: var(--bg);
+  --cu-primary-hover: color-mix(in oklab, var(--fg) 86%, var(--bg));
+}
+
+/* An ink surface (the overlay's notch, callout and hints). */
+.cu-ink {
+  --cu-fg: var(--cu-paper);
+  --cu-fg-2: rgb(247 245 240 / 0.7);
+  --cu-fg-3: rgb(247 245 240 / 0.46);
+  --cu-hair: rgb(255 255 255 / 0.1);
+  --cu-hair-strong: rgb(255 255 255 / 0.2);
+  --cu-wash: rgb(255 255 255 / 0.09);
+  --cu-primary-bg: var(--cu-paper);
+  --cu-primary-fg: var(--cu-ink);
+  --cu-primary-hover: #e6e2da;
+  background: var(--cu-ink);
+  color: var(--cu-fg);
+  /* The inner hairline keeps the edge on a dark wallpaper; the shadow lifts it off a light one. */
+  box-shadow:
+    inset 0 0 0 1px var(--cu-hair),
+    var(--cu-float);
+}
+
+/* ------------------------------------------------------------------ buttons: pills */
+/* On the overlay buttons keep the arrow, as the desktop's own controls do. */
+.cu-ink .cu-btn,
+.cu-ink button {
+  cursor: default;
+}
+.cu-btn {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--cu-r-pill);
+  background: transparent;
+  color: var(--cu-fg-2);
+  font: inherit;
+  font-family: var(--cu-font);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  transition:
+    background-color var(--cu-fast) var(--cu-ease),
+    color var(--cu-fast) var(--cu-ease),
+    box-shadow var(--cu-fast) var(--cu-ease);
+}
+.cu-btn:hover:not(:disabled) {
+  background: var(--cu-wash);
+  color: var(--cu-fg);
+}
+.cu-btn:focus-visible {
+  outline: 1.5px solid var(--accent, var(--cu-accent));
+  outline-offset: 2px;
+  border-radius: var(--cu-r-pill);
+}
+/* Secondary: a hairline pill. */
+.cu-btn.line {
+  color: var(--cu-fg);
+  box-shadow: inset 0 0 0 1px var(--cu-hair-strong);
+}
+/*
+ * Primary: solid ink (or paper, on ink). Its background eases only into hover: when arming ends
+ * the track must turn solid in the same frame the fill goes, or it flashes pale for a frame.
+ */
+.cu-btn.primary {
+  padding: 0 14px;
+  background: var(--cu-primary-bg);
+  color: var(--cu-primary-fg);
+  font-weight: 560;
+  transition-property: color, box-shadow;
+}
+.cu-btn.primary:hover:not(:disabled) {
+  background: var(--cu-primary-hover);
+  color: var(--cu-primary-fg);
+  transition-property: background-color, color, box-shadow;
+}
+.cu-btn.small {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+.cu-btn.icon {
+  width: 28px;
+  padding: 0;
+}
+.cu-btn.small.icon {
+  width: 24px;
+}
+
+/*
+ * Arming (Approve): the pill fills from the left over a beat, then takes clicks. The track is the
+ * primary colour at low strength, so the label stays readable on it.
+ */
+.cu-btn.primary.arming {
+  background: color-mix(in oklab, var(--cu-primary-bg) 42%, transparent);
+  overflow: hidden;
+}
+.cu-btn .cu-fill {
+  position: absolute;
+  inset: 0;
+  /* Square: the pill's overflow rounds its ends, and the leading edge stays a straight line. */
+  background: var(--cu-primary-bg);
+  transform-origin: left;
+  animation: cu-arm var(--arm, 700ms) linear both;
+}
+.cu-btn .cu-label {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+@keyframes cu-arm {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* ------------------------------------------------------------------ keys */
+.cu-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.cu-kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--cu-r-kbd);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, currentColor 24%, transparent);
+  font-family: var(--cu-mono);
+  font-size: 10.5px;
+  font-weight: 450;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+/* The return key as a drawn glyph: the font's ↵ is a hairline at this size. */
+.cu-kbd svg {
+  display: block;
+  width: 11px;
+  height: 11px;
+}
+/* Keys inside a solid pill: drawn in the pill's own text colour. */
+.cu-btn.primary .cu-kbd {
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, currentColor 30%, transparent);
+  opacity: 0.8;
+}
+
+/* ------------------------------------------------------------------ status dot */
+/*
+ * The one "alive" indicator: the agent is working (a solid ember dot that breathes slowly), or it
+ * waits on the user (a steady ring). The two cross-fade.
+ */
+.cu-dot {
+  position: relative;
+  flex: none;
+  width: 8px;
+  height: 8px;
+}
+.cu-dot.small {
+  width: 6px;
+  height: 6px;
+}
+.cu-dot::before,
+.cu-dot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  transition: opacity 240ms var(--cu-ease);
+}
+.cu-dot::before {
+  /* The chat's own accent where there is one (it follows the theme), else the overlay's. */
+  background: var(--accent, var(--cu-accent));
+  animation: cu-breathe 2.4s ease-in-out infinite;
+}
+.cu-dot::after {
+  box-shadow: inset 0 0 0 1.5px currentColor;
+  opacity: 0;
+}
+.cu-dot.waiting::before {
+  opacity: 0;
+  animation: none;
+}
+.cu-dot.waiting::after {
+  opacity: 1;
+}
+@keyframes cu-breathe {
+  50% {
+    transform: scale(0.7);
+    opacity: 0.55;
+  }
+}
+
+/* Progress dashes (a Show-me lesson's steps). */
+.cu-dashes {
+  display: inline-flex;
+  gap: 3px;
+}
+.cu-dashes i {
+  width: 12px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--cu-hair-strong);
+  transition: background-color var(--cu-enter) var(--cu-ease);
+}
+.cu-dashes i.on {
+  background: var(--cu-fg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cu-dot::before {
+    animation: none;
+  }
+  /* Without the fill's sweep a finished fill would read as armed while it can't be clicked yet:
+     the pale track alone says "not yet", and the pill turns solid when it arms. */
+  .cu-btn .cu-fill {
+    display: none;
+  }
+}

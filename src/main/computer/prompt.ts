@@ -1,4 +1,5 @@
 import { homedir } from 'node:os'
+import { handsOver } from './intent'
 
 /** The system prompt section for computer use: the modes, operating the computer, safety and memory. */
 export const instructions = (platform: 'windows' | 'macos' | 'linux', home = homedir()) => {
@@ -12,14 +13,15 @@ export const instructions = (platform: 'windows' | 'macos' | 'linux', home = hom
   // Linux can't read controls yet, so the model works from screenshots and pixels.
   const controls =
     platform === 'linux'
-      ? `- Controls can't be read on this computer (ui_elements isn't available), so work from screenshots: click by pixel coordinates, and use keyboard shortcuts where they're more reliable than small targets.
+      ? `- Controls can't be read on this computer (there is no ui_elements tool and no element ids), so work from screenshots: click by pixel coordinates, and use keyboard shortcuts where they're more reliable than small targets.
 - In teach mode the on-screen highlight may not show, so say where the control is in the step ("Click Save, at the top right.").`
-      : `- Prefer ui_elements: clicking or teaching by element id is far more precise than pixels. Use pixels only when the target isn't in the element list.`
+      : `- Prefer ui_elements: clicking or teaching by element id is far more precise than pixels. Use pixels only when the target isn't in the element list. Its lines also give state (value="…", checked, selected, expanded, disabled): read that to check a setting or a field instead of judging pixels. Its window option reads another open window without switching to it.`
   const retry = platform === 'linux' ? 'a keyboard shortcut, a menu, a slightly different point' : 'an element id instead of pixels, a keyboard shortcut, a menu'
   const findControl =
     platform === 'linux' ? '' : `\n- To find a specific control, call ui_elements with name ("save", "display") rather than reading the whole list.`
+  const select = platform === 'linux' ? 'look_at_screen,mcp__computer__click' : 'look_at_screen,mcp__computer__ui_elements,mcp__computer__click'
   return `# Computer use
-You can operate the user's ${os} computer with the computer tools (mcp__computer__*): look at the screen, read and use the controls of their apps, open apps, files and settings, find files, and teach them how to do things themselves. Load the tools you need with tool search, e.g. "select:mcp__computer__look_at_screen,mcp__computer__ui_elements,mcp__computer__click".
+You can operate the user's ${os} computer with the computer tools (mcp__computer__*): look at the screen, ${platform === 'linux' ? 'use their apps' : 'read and use the controls of their apps'}, open apps, files and settings, find files, and teach them how to do things themselves. Load the tools you need with tool search, e.g. "select:mcp__computer__${select}".
 
 ## Modes
 The app reads each message for what the user wants and tells you as [mode: do] or [mode: teach].
@@ -28,9 +30,11 @@ The app reads each message for what the user wants and tells you as [mode: do] o
 If the user answers a step by asking you to do it ("just do it"), the mode is do from then on: carry on and do the rest yourself.
 
 ## Operating the computer
-- When a task involves the screen, start by calling look_at_screen (finding files or answering a question doesn't need it). Coordinates you pass to click, scroll, drag and teach_step are pixels in the most recent screenshot. ${ownWindows}, and before each action the app the user was in comes back to the front.
+- When a task involves the screen, start by calling look_at_screen (finding files or answering a question doesn't need it). Coordinates you pass to click, scroll, drag, move_mouse and teach_step are pixels in the most recent full screenshot. ${ownWindows}, and before each action the app the user was in comes back to the front.
+- To read small text or icons, call look_at_screen with a region of the screenshot: you get it at up to the screen's full resolution. A zoom is only for looking; coordinates stay in the full screenshot.
 ${controls}
-- After actions that change the screen, look again before the next decision, and before you say something worked, check that it did (a click can report success and change nothing). Use wait for things that load.
+- Each action (click, type_text, press_keys, scroll, drag, move_mouse) answers with a fresh screenshot taken just after it, which is the new frame for coordinates: check it before the next decision instead of calling look_at_screen again, and before you say something worked, check that it did (a click can report success and change nothing). Pass screenshot: false only to chain quick actions you'll check at the end. Use wait for things that load.
+- Clicks can be double or triple (selects a line) and hold modifiers (${mod}+click, shift+click); move_mouse hovers without clicking (tooltips, hover menus).
 - If an action fails or doesn't have the effect you expected, try one different way (${retry}), then tell the user what's in the way instead of repeating the same attempt.${findControl}
 - Use open to launch apps, URLs, files, and settings pages${platform === 'windows' ? ' (ms-settings: URIs like "ms-settings:display" jump straight to Settings pages)' : platform === 'linux' ? ' (an app by its name or command name, e.g. "firefox", with nothing after it)' : ''}. Keyboard shortcuts are ${os} style (${mod}+c, ${mod}+v).
 - If a tool reports the user took over the mouse, stop acting immediately, say you've paused, and wait for them.
@@ -52,6 +56,14 @@ When the user tells you a lasting preference ("call me Sam", "my projects live i
 /** The mode tag the driver puts in front of each user message while computer use is on. */
 export const modeTag = (mode: 'do' | 'teach', text: string) => `[mode: ${mode}] ${text}`
 
-/** A message the user typed while a Show-me step waits: "done" and the like finish the step; anything else is passed on. */
-export const teachAnswer = (text: string): { kind: 'done' } | { kind: 'said'; text: string } =>
-  /^(done|next|ok(ay)?|got it|did it|finished|yes)\b/i.test(text.trim()) ? { kind: 'done' } : { kind: 'said', text: text.trim() }
+/** A whole message that only acknowledges the step ("ok", "Done!"); "ok, but I can't find it" isn't one. */
+const ACK = /^(ok(ay)?|k|done|next|yes|yep|yeah|got it|did it|i did it|finished)[.!]*$/i
+
+/**
+ * A message the user typed while a Show-me step waits: a bare acknowledgement finishes the step;
+ * anything else, including handing the task over ("ok, just do it"), reaches the model as said.
+ */
+export const teachAnswer = (text: string): { kind: 'done' } | { kind: 'said'; text: string } => {
+  const t = text.trim()
+  return !handsOver(t) && ACK.test(t) ? { kind: 'done' } : { kind: 'said', text: t }
+}
