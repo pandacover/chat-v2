@@ -28,7 +28,7 @@ ComputerUse.layer({
 - If the mouse moves more than 28 px from where computer use left it, the reply pauses.
 - Windows only: a window running as administrator drops chat-v2's input, so the tools say so instead of trying.
 - Linux (`platform/linux.ts`) needs an X11 display (not Wayland or XWayland) and the command-line tools `xdotool`, `xprop`, `wmctrl`, ImageMagick's `import`, `find`, `grep` and `xdg-open` (Debian: `xdotool x11-utils wmctrl imagemagick xdg-utils`); a missing tool is reported as such. The tools always run with a UTF-8 locale.
-  - It can't read controls yet, so ui_elements fails and the Linux prompt tells the model to work from screenshots and pixels.
+  - It can't read controls yet (`controls: false`), so ui_elements isn't offered and the Linux prompt tells the model to work from screenshots and pixels.
   - Linux can't hide windows from capture, so when chat-v2 is in front a screenshot first brings the remembered app back. The overlay isn't shown on Linux (without a compositor X11 draws it solid black over the screen); set `CHAT_V2_LINUX_OVERLAY=1` to show it on a desktop with a compositor.
   - Focus: restoreFocus falls back to the next app window if the remembered one closed, skips panels, docks and desktop windows, and fails if the app won't come to the front, so input never lands in chat-v2.
   - Typing: ASCII goes in short `xdotool type` chunks so Stop never cuts a key press in half. Non-ASCII characters are sent as Unicode key presses, capitals with Shift, because `xdotool type` lowercases capital non-ASCII letters.

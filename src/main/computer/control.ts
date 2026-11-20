@@ -17,6 +17,8 @@ const TAKEOVER_PX = 28
 export const SHOT_WIDTH = 1024
 /** Typed text goes to the host in chunks this long (~4 ms a character), so Stop lands within ~100 ms. */
 export const TYPE_CHUNK = 16
+/** Element names kept for step labels, across the last few control lists. */
+const MAX_NAMES = 2000
 
 /** Split text for typing without breaking a surrogate pair. */
 export const typeChunks = (text: string, size = TYPE_CHUNK): string[] => {
@@ -96,6 +98,8 @@ export const makeControl = (p: Platform) => {
 
   return {
     platform: p.name,
+    /** Whether the platform can read controls (ui_elements). */
+    controls: p.controls !== false,
     remember: (): Ctl<WindowInfo> => lift(() => p.remember()),
     screenshot: (): Ctl<Screenshot> =>
       lift(() => p.screenshot(SHOT_WIDTH)).pipe(
@@ -144,12 +148,13 @@ export const makeControl = (p: Platform) => {
         }
       }),
     keys: (combo: string): Act<void> => act(() => p.keys(combo)),
-    uiTree: (max: number): Ctl<{ window: WindowInfo; elements: ReadonlyArray<UiElement> }> =>
+    uiTree: (max: number): Ctl<{ window: WindowInfo; elements: ReadonlyArray<UiElement>; truncated?: boolean }> =>
       lift(() => p.uiTree(max)).pipe(
         Effect.tap((t) =>
           Effect.sync(() => {
-            names.clear()
+            // Ids aren't reused across lists, so older names stay right; keep the latest few lists'.
             for (const e of t.elements) if (e.name) names.set(e.id, e.name)
+            while (names.size > MAX_NAMES) names.delete(names.keys().next().value!)
           })
         )
       ),
@@ -188,6 +193,10 @@ export const makeControl = (p: Platform) => {
     /** Forget where we left the cursor (a new user turn, or the user just acted). */
     resetTakeover: () => {
       leftAt = null
+    },
+    /** Forget the last screenshot (a new user turn): the screen may have changed since, so coordinates need a fresh look. */
+    forgetShot: () => {
+      shot = null
     },
     /**
      * Stop: every input action checks this between its steps (focus, each typed chunk, the

@@ -108,7 +108,12 @@ public static class ChatV2Host
 
     static IntPtr remembered = IntPtr.Zero; // written by "remember" (immediate lane), read everywhere
     static uint ownerPid = 0; // the Electron main process; its windows are chat-v2's
+    // ui_elements ids: never reused, so an id from an older list still means
+    // the same control or is reported stale. The most recent MaxKept are kept.
     static Dictionary<int, AutomationElement> elements = new Dictionary<int, AutomationElement>();
+    static readonly Queue<int> elementOrder = new Queue<int>();
+    static int nextElementId = 1;
+    const int MaxKept = 2000;
 
     public static void Init(int electronPid)
     {
@@ -260,7 +265,7 @@ public static class ChatV2Host
             case "scroll": return Scroll(Int(p, "x"), Int(p, "y"), Int(p, "dy", 0), Int(p, "dx", 0));
             case "type": TypeText(Str(p, "text")); return true;
             case "keys": return Keys(Str(p, "combo"));
-            case "uiTree": return UiTree(Int(p, "max", 250), Int(p, "budgetMs", 2500), Long(p, "hwnd"));
+            case "uiTree": return UiTree(Int(p, "max", 250), Int(p, "budgetMs", 2500), Long(p, "hwnd"), Int(p, "firstId", 1));
             case "invoke": return Invoke(Int(p, "id"));
             case "setValue": return SetValue(Int(p, "id"), Str(p, "text"));
             case "elementRect": return ElementRect(Int(p, "id"));
@@ -670,11 +675,12 @@ public static class ChatV2Host
     /**
      * Interactive controls (then short text labels) of the target window, up to
      * "max", within about "budgetMs" (see FindInBranches); the result says
-     * "truncated" when either limit cut the search short.
+     * "truncated" when either limit cut the search short. Ids continue from
+     * the last list (or "firstId", which the caller keeps across host restarts).
      */
-    static object UiTree(int max, int budgetMs, long hwnd)
+    static object UiTree(int max, int budgetMs, long hwnd, int firstId)
     {
-        elements.Clear();
+        if (firstId > nextElementId) nextElementId = firstId;
         var target = hwnd != 0 ? new IntPtr(hwnd) : TargetWindow();
         if (target == IntPtr.Zero) throw new Exception("No foreground window");
         if (treeCondition == null) treeCondition = TypeCondition(true, false);
@@ -688,7 +694,6 @@ public static class ChatV2Host
         cr.TreeScope = TreeScope.Element;
         var outList = new List<object>();
         var texts = new List<object>();
-        int nextId = 1;
         bool truncated = false;
         using (cr.Activate())
         {
@@ -704,8 +709,10 @@ public static class ChatV2Host
                 bool label = ct == ControlType.Text && name.Length > 0 && name.Length < 80;
                 if (!interactive && !label) return true;
                 if (!interactive && texts.Count > max / 3) return true;
-                int id = nextId++;
+                int id = nextElementId++;
                 elements[id] = el;
+                elementOrder.Enqueue(id);
+                while (elementOrder.Count > MaxKept) elements.Remove(elementOrder.Dequeue());
                 var d = new Dictionary<string, object>();
                 d["id"] = id;
                 d["type"] = ct.ProgrammaticName.Replace("ControlType.", "");
@@ -729,7 +736,7 @@ public static class ChatV2Host
     static AutomationElement Element(int id)
     {
         AutomationElement el;
-        if (!elements.TryGetValue(id, out el)) throw new Exception("Element " + id + " is stale; call ui_tree again");
+        if (!elements.TryGetValue(id, out el)) throw new Exception("Element " + id + " is stale or unknown (not in a recent control list); call ui_elements again");
         return el;
     }
 
@@ -836,14 +843,23 @@ public static class ChatV2Host
         return "clicked";
     }
 
+    /**
+     * Put text in a control: a field's text is replaced (through ValuePattern,
+     * else by selecting all and typing over it); other controls get it typed at
+     * the caret. "set": focus didn't move.
+     */
     static object SetValue(int id, string text)
     {
         var el = Element(id);
         object pat;
         if (el.TryGetCurrentPattern(ValuePattern.Pattern, out pat)) { ((ValuePattern)pat).SetValue(text); return "set"; }
         el.SetFocus();
+        ControlType ct = null;
+        try { ct = el.Current.ControlType; } catch { }
+        bool field = ct == ControlType.Edit || ct == ControlType.ComboBox;
+        if (field) Keys("ctrl+a");
         TypeText(text);
-        return "typed";
+        return field ? "replaced" : "typed";
     }
 
     // ---------------------------------------------------------------- Windows Search

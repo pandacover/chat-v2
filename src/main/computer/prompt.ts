@@ -12,14 +12,15 @@ export const instructions = (platform: 'windows' | 'macos' | 'linux', home = hom
   // Linux can't read controls yet, so the model works from screenshots and pixels.
   const controls =
     platform === 'linux'
-      ? `- Controls can't be read on this computer (ui_elements isn't available), so work from screenshots: click by pixel coordinates, and use keyboard shortcuts where they're more reliable than small targets.
+      ? `- Controls can't be read on this computer (there is no ui_elements tool and no element ids), so work from screenshots: click by pixel coordinates, and use keyboard shortcuts where they're more reliable than small targets.
 - In teach mode the on-screen highlight may not show, so say where the control is in the step ("Click Save, at the top right.").`
       : `- Prefer ui_elements: clicking or teaching by element id is far more precise than pixels. Use pixels only when the target isn't in the element list.`
   const retry = platform === 'linux' ? 'a keyboard shortcut, a menu, a slightly different point' : 'an element id instead of pixels, a keyboard shortcut, a menu'
   const findControl =
     platform === 'linux' ? '' : `\n- To find a specific control, call ui_elements with name ("save", "display") rather than reading the whole list.`
+  const select = platform === 'linux' ? 'look_at_screen,mcp__computer__click' : 'look_at_screen,mcp__computer__ui_elements,mcp__computer__click'
   return `# Computer use
-You can operate the user's ${os} computer with the computer tools (mcp__computer__*): look at the screen, read and use the controls of their apps, open apps, files and settings, find files, and teach them how to do things themselves. Load the tools you need with tool search, e.g. "select:mcp__computer__look_at_screen,mcp__computer__ui_elements,mcp__computer__click".
+You can operate the user's ${os} computer with the computer tools (mcp__computer__*): look at the screen, ${platform === 'linux' ? 'use their apps' : 'read and use the controls of their apps'}, open apps, files and settings, find files, and teach them how to do things themselves. Load the tools you need with tool search, e.g. "select:mcp__computer__${select}".
 
 ## Modes
 The app reads each message for what the user wants and tells you as [mode: do] or [mode: teach].

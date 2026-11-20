@@ -60,6 +60,8 @@ export interface FileHit {
 
 export interface Platform {
   readonly name: 'windows' | 'macos' | 'linux'
+  /** False where controls can't be read (Linux): ui_elements isn't offered there. Absent means true. */
+  readonly controls?: boolean
   /** Remember the app the user was in before chat-v2's window came to the front. */
   remember(): Promise<WindowInfo>
   /** If chat-v2 has focus, give it back to the remembered app. */
@@ -74,9 +76,16 @@ export interface Platform {
   scroll(x: number, y: number, dy: number, dx: number): Promise<void>
   type(text: string): Promise<void>
   keys(combo: string): Promise<void>
-  /** `truncated`: the time budget or `max` cut the search short (Windows). */
+  /**
+   * `truncated`: the time budget or `max` cut the search short. Element ids are never reused
+   * while the app runs: an id from an older list is the same control, or it fails as stale.
+   */
   uiTree(max: number): Promise<{ window: WindowInfo; elements: ReadonlyArray<UiElement>; truncated?: boolean }>
   invoke(id: number): Promise<string>
+  /**
+   * Put text in an element. A text field's text is replaced: "set" (UI Automation, focus didn't
+   * move) or "replaced" (selected all and typed over). Other elements: "typed" at the caret.
+   */
   setValue(id: number, text: string): Promise<string>
   elementRect(id: number): Promise<ScreenRect>
   /** The interactive control under a point (input space), if there is a sensible one. */

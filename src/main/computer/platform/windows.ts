@@ -61,10 +61,30 @@ interface HostMsg {
 }
 
 /**
- * The JSON-line protocol to the host. The host answers cheap queries while a slow call is still
- * running, so responses arrive out of order and are matched to their request by id.
+ * How long a host call may run before it counts as hung. A UI Automation call can block for as
+ * long as the app does (an Invoke that opens a modal dialog), which would hold the serial lane
+ * for every later call. Control reads have time budgets but always finish their first branch.
  */
-export const makeHostChannel = (write: (line: string) => void) => {
+export const hostTimeout = (method: string, params: Record<string, unknown> = {}): number => {
+  if (method === 'sleep') return Number(params['ms'] ?? 100) + 10_000
+  if (method === 'uiTree' || method === 'elementAt' || method === 'sql') return 30_000
+  return 15_000
+}
+
+export class HostTimeout extends Error {
+  override readonly name = 'HostTimeout'
+}
+
+/**
+ * The JSON-line protocol to the host. The host answers cheap queries while a slow call is still
+ * running, so responses arrive out of order and are matched to their request by id. A call that
+ * outlives its timeout fails with HostTimeout and `onTimeout` runs (the caller restarts the host).
+ */
+export const makeHostChannel = (
+  write: (line: string) => void,
+  opts: { timeout?: (method: string, params: Record<string, unknown>) => number; onTimeout?: (method: string) => void } = {}
+) => {
+  const timeoutOf = opts.timeout ?? hostTimeout
   let nextId = 1
   const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
   let markReady!: () => void
@@ -108,7 +128,22 @@ export const makeHostChannel = (write: (line: string) => void) => {
     if (dead) throw dead
     const id = nextId++
     return new Promise<T>((resolve, reject) => {
-      pending.set(id, { resolve: resolve as (v: unknown) => void, reject })
+      const ms = timeoutOf(method, params)
+      const timer = setTimeout(() => {
+        if (!pending.delete(id)) return
+        reject(
+          new HostTimeout(
+            `The Windows control host didn't finish "${method}" within ${Math.round(ms / 1000)} s (the app may be showing a dialog or not responding), so it was restarted. Look at the screen before going on; element ids from earlier lists are gone.`
+          )
+        )
+        opts.onTimeout?.(method)
+      }, ms)
+      timer.unref?.()
+      const done = <A>(f: (a: A) => void) => (a: A) => {
+        clearTimeout(timer)
+        f(a)
+      }
+      pending.set(id, { resolve: done(resolve as (v: unknown) => void), reject: done(reject) })
       write(JSON.stringify({ id, method, params }) + '\n')
     })
   }
@@ -134,17 +169,36 @@ export const installHost = (base = join(process.env.LOCALAPPDATA ?? tmpdir(), 'c
   return script
 }
 
-/** Start host.ps1 and connect a channel to it. */
-export const startHost = (script: string, ownerPid: number, onExit: () => void = () => {}, track: (p: ChildProcessWithoutNullStreams) => void = () => {}) => {
+/**
+ * Start host.ps1 and connect a channel to it. A call that hangs past its timeout ends the host:
+ * the calls queued behind it fail and `onExit` runs at once, so the next call starts a new host.
+ */
+export const startHost = (
+  script: string,
+  ownerPid: number,
+  onExit: () => void = () => {},
+  track: (p: ChildProcessWithoutNullStreams) => void = () => {},
+  timeout?: (method: string, params: Record<string, unknown>) => number
+) => {
   const proc: ChildProcessWithoutNullStreams = spawn(
     'powershell.exe',
     ['-NoProfile', '-NoLogo', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, '-ElectronPid', String(ownerPid)],
     { stdio: 'pipe', windowsHide: true }
   )
   track(proc)
-  const host = makeHostChannel((line) => {
-    if (!proc.stdin.destroyed) proc.stdin.write(line)
-  })
+  const host = makeHostChannel(
+    (line) => {
+      if (!proc.stdin.destroyed) proc.stdin.write(line)
+    },
+    {
+      ...(timeout ? { timeout } : {}),
+      onTimeout: (method) => {
+        host.fail(new Error(`The Windows control host was restarted because "${method}" hung. Try again.`))
+        stop()
+        onExit()
+      }
+    }
+  )
   let buf = ''
   proc.stdout.setEncoding('utf8')
   proc.stdout.on('data', (chunk: string) => {
@@ -183,18 +237,27 @@ export const startHost = (script: string, ownerPid: number, onExit: () => void =
  * process: its windows are never targets, and when one of them is in front the host works in
  * the app the user was in before.
  */
-export const makeWindowsPlatform = (opts: { ownerPid: number; hostDir?: string; track?: (p: ChildProcessWithoutNullStreams) => void }): Platform => {
+export const makeWindowsPlatform = (opts: {
+  ownerPid: number
+  hostDir?: string
+  track?: (p: ChildProcessWithoutNullStreams) => void
+  /** Per-call timeouts (tests); `hostTimeout` by default. */
+  timeout?: (method: string, params: Record<string, unknown>) => number
+}): Platform => {
   let host: ReturnType<typeof startHost> | null = null
+  // Element ids continue across host restarts, so an id from a dead host is never reused.
+  let nextElementId = 1
   const call = <T>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
     if (!host) {
-      // A host that exited is started again on the next call.
+      // A host that exited (or hung and was ended) is started again on the next call.
       const h = startHost(
         installHost(opts.hostDir),
         opts.ownerPid,
         () => {
           if (host === h) host = null
         },
-        opts.track
+        opts.track,
+        opts.timeout
       )
       host = h
     }
@@ -219,7 +282,8 @@ export const makeWindowsPlatform = (opts: { ownerPid: number; hostDir?: string; 
     type: async (text) => void (await call('type', { text })),
     keys: async (combo) => void (await call('keys', { combo })),
     uiTree: async (max) => {
-      const r = await call<{ window: HostWindow; elements: UiElement[]; truncated?: boolean }>('uiTree', { max })
+      const r = await call<{ window: HostWindow; elements: UiElement[]; truncated?: boolean }>('uiTree', { max, firstId: nextElementId })
+      for (const e of r.elements) nextElementId = Math.max(nextElementId, e.id + 1)
       return { window: toWindow(r.window), elements: r.elements, ...(r.truncated ? { truncated: true } : {}) }
     },
     invoke: (id) => call('invoke', { id }),

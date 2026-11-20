@@ -37,7 +37,8 @@ export interface ComputerUseApi {
   readonly stop: Effect.Effect<void>
   /**
    * A new user message (a new reply, or steering one that runs): input is allowed again, the
-   * takeover check starts afresh, and the app the user was in is remembered. `module` calls it too.
+   * takeover check starts afresh, the last screenshot is forgotten (coordinates need a fresh
+   * look), and the app the user was in is remembered. `module` calls it too.
    */
   readonly userTurn: Effect.Effect<void>
   /** What computer use is waiting on the human for right now. */
@@ -95,6 +96,7 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
   const userTurn = Effect.suspend(() => {
     if (!control) return Effect.void
     control.resetTakeover()
+    control.forgetShot()
     control.resume()
     return control.remember().pipe(Effect.ignore)
   })

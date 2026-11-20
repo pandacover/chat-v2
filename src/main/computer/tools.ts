@@ -74,7 +74,11 @@ const whenAborted = (signal: AbortSignal): Effect.Effect<void> =>
       })
 
 /** The computer tools, as definitions (tests call their handlers directly). */
-export const toolDefs = (d: ToolDeps) => {
+export const toolDefs = (d: ToolDeps) =>
+  // Where controls can't be read (Linux), ui_elements would only ever fail: don't offer it.
+  allToolDefs(d).filter((t) => d.control.controls || t.name !== 'ui_elements')
+
+const allToolDefs = (d: ToolDeps) => {
   /**
    * Run one tool's effect and show it as a step in the reply. Once the user stops the reply, a
    * tool that hasn't started does nothing, and one that is running (a typing run, a slow control
@@ -198,12 +202,18 @@ export const toolDefs = (d: ToolDeps) => {
           name ?? '',
           Effect.gen(function* () {
             const limit = max ?? UI_DEFAULT
-            const t = yield* d.control.uiTree(name ? UI_SCAN : limit)
+            // Read more than is shown, so the note below can say how many there are.
+            const t = yield* d.control.uiTree(Math.max(limit, UI_SCAN))
             const { lines, total } = formatElements(t.elements, d.control.rectToImage, { filter: name, max: limit })
             const head = `Window "${t.window.title}" (${t.window.process})`
-            if (!lines.length) return text(name ? `${head}: no control named like "${name}".` : `${head}: no controls found.`)
-            const more = total > lines.length ? ` (first ${lines.length} of ${total}; pass name to narrow)` : ''
-            return text(`${head}${more}:\n${lines.join('\n')}`)
+            // The host stopped early (time budget or size): what isn't listed may still be there.
+            const cut = t.truncated ? 'The list was cut short (time or size limit), so more controls may exist: narrow by name or call again.' : ''
+            if (!lines.length) {
+              const none = name ? `${head}: no control named like "${name}"${t.truncated ? ' among those read' : ''}.` : `${head}: no controls found.`
+              return text(cut ? `${none} ${cut}` : none)
+            }
+            const more = total > lines.length ? ` (first ${lines.length} of ${total}${t.truncated ? '+' : ''}; pass name to narrow)` : ''
+            return text(`${head}${more}:\n${lines.join('\n')}${cut ? `\n${cut}` : ''}`)
           }),
           { quiet: true }
         ),
@@ -308,7 +318,7 @@ export const toolDefs = (d: ToolDeps) => {
 
     tool(
       'type_text',
-      'Type text into the focused field of the active app, or into an element by id. Set submit to press Enter afterwards.',
+      "Type text in the active app. Without element, it's typed at the cursor of the focused field (added to what's there). With an element id of a text field, the field's text is replaced; other elements get it typed at their cursor. Set submit to press Enter afterwards.",
       { text: z.string(), element: z.number().int().optional(), submit: z.boolean().optional() },
       (a) =>
         run(
@@ -316,8 +326,9 @@ export const toolDefs = (d: ToolDeps) => {
           'Type',
           (a.text.length > 48 ? `${a.text.slice(0, 48)}…` : a.text) + (a.element != null ? ` → ${describe(a.element)}` : ''),
           Effect.gen(function* () {
+            let how = 'typed'
             if (a.element != null) {
-              const how = yield* d.control.setValue(a.element, a.text)
+              how = yield* d.control.setValue(a.element, a.text)
               // A value set through UI Automation doesn't move focus: put it in the field before Enter.
               if (a.submit && how === 'set') {
                 const r = yield* d.control.elementRect(a.element)
@@ -325,7 +336,8 @@ export const toolDefs = (d: ToolDeps) => {
               }
             } else yield* d.control.type(a.text)
             if (a.submit) yield* d.control.keys('enter')
-            return text(a.submit ? 'Typed and pressed Enter.' : 'Typed.')
+            const did = how === 'set' || how === 'replaced' ? "Replaced the field's text" : 'Typed'
+            return text(a.submit ? `${did} and pressed Enter.` : `${did}.`)
           }),
           { acting: true }
         ),

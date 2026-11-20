@@ -2,10 +2,10 @@ import { describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildMdfindQuery } from '../../src/main/computer/platform/macos'
+import { buildMdfindQuery, makeElementIds } from '../../src/main/computer/platform/macos'
 import { HOST_CS, HOST_PS1 } from '../../src/main/computer/platform/hostSource'
 import type { ScreenRect, UiElement } from '../../src/main/computer/platform/types'
-import { buildSearchSql, installHost, makeHostChannel, startHost } from '../../src/main/computer/platform/windows'
+import { HostTimeout, buildSearchSql, hostTimeout, installHost, makeHostChannel, makeWindowsPlatform, startHost } from '../../src/main/computer/platform/windows'
 
 const sent = () => {
   const lines: Array<{ id: number; method: string; params: Record<string, unknown> }> = []
@@ -92,6 +92,36 @@ describe('host channel', () => {
     expect(e.name).toBe('Error')
   })
 
+  test('a call that hangs fails with a clear error and asks for a restart; quick calls do not', async () => {
+    const lines: Array<{ id: number; method: string }> = []
+    const timedOut: string[] = []
+    const ch = makeHostChannel((l) => void lines.push(JSON.parse(l)), {
+      timeout: (m) => (m === 'invoke' ? 30 : 1000),
+      onTimeout: (m) => void timedOut.push(m)
+    })
+    ch.onLine('{"ready":true}')
+    const hung = ch.call('invoke', { id: 3 }).catch((x: Error) => x)
+    const quick = ch.call('cursor')
+    await tick()
+    ch.onLine(JSON.stringify({ id: lines[1]!.id, ok: true, result: { x: 0, y: 0 } }))
+    expect(await quick).toEqual({ x: 0, y: 0 })
+    const e = (await hung) as Error
+    expect(e).toBeInstanceOf(HostTimeout)
+    expect(e.message).toContain('didn\'t finish "invoke"')
+    expect(e.message).toContain('restarted')
+    expect(timedOut).toEqual(['invoke'])
+    expect(ch.pending()).toBe(0)
+    // A late answer to the timed-out call is ignored.
+    ch.onLine(JSON.stringify({ id: lines[0]!.id, ok: true, result: 'invoked' }))
+  })
+
+  test('default timeouts: longer for control reads and search, sleep by its length', () => {
+    expect(hostTimeout('invoke')).toBe(15_000)
+    expect(hostTimeout('uiTree')).toBeGreaterThan(hostTimeout('invoke'))
+    expect(hostTimeout('sql')).toBeGreaterThan(hostTimeout('invoke'))
+    expect(hostTimeout('sleep', { ms: 4000 })).toBeGreaterThan(4000)
+  })
+
   test('a dead host fails waiting and later calls', async () => {
     const { ch } = sent()
     const p = ch.call('screenshot').catch((x: Error) => x)
@@ -99,6 +129,20 @@ describe('host channel', () => {
     ch.fail(new Error('host exited'))
     expect((await p) as Error).toHaveProperty('message', 'host exited')
     expect((await ch.call('ping').catch((x: Error) => x)) as Error).toHaveProperty('message', 'host exited')
+  })
+})
+
+describe('element ids (macOS registry)', () => {
+  test('ids continue across lists; old ones stay valid until dropped, then read as stale', () => {
+    const ids = makeElementIds<UiElement>(3)
+    const el = (name: string) => ({ type: 'Button', name, x: 0, y: 0, width: 10, height: 10 })
+    const first = ids.add([el('a'), el('b')])
+    const second = ids.add([el('c'), el('d')])
+    expect(first.map((e) => e.id)).toEqual([1, 2])
+    expect(second.map((e) => e.id)).toEqual([3, 4])
+    expect(ids.get(2).name).toBe('b') // from the older list, still the same control
+    expect(() => ids.get(1)).toThrow('Element 1 is stale or unknown (not in a recent control list); call ui_elements again')
+    expect(() => ids.get(99)).toThrow('call ui_elements again')
   })
 })
 
@@ -208,6 +252,59 @@ describe.skipIf(process.platform !== 'win32')('windows host process', () => {
         expect(await host.call('sleep', { ms: 10 })).toBe(true)
       } finally {
         host.stop()
+      }
+    },
+    120_000
+  )
+
+  test(
+    'ui tree ids continue across lists; an older id still resolves, an unknown one says stale',
+    async () => {
+      const host = startHost(installHost(base), process.pid)
+      try {
+        const a = await host.call<{ elements: UiElement[] }>('uiTree', { max: 20 })
+        const b = await host.call<{ elements: UiElement[] }>('uiTree', { max: 20 })
+        if (a.elements.length && b.elements.length) {
+          expect(b.elements[0]!.id).toBeGreaterThan(a.elements.at(-1)!.id)
+          // Read-only: the rect of a control from the first list.
+          const r = await host.call<ScreenRect>('elementRect', { id: a.elements[0]!.id }).catch((e: Error) => e)
+          if (r instanceof Error) expect(r.message).not.toContain('stale')
+        }
+        // The caller's id floor carries ids across host restarts.
+        const c = await host.call<{ elements: UiElement[] }>('uiTree', { max: 5, firstId: 50_000 })
+        for (const e of c.elements) expect(e.id).toBeGreaterThanOrEqual(50_000)
+        const e = (await host.call('elementRect', { id: 999_999 }).catch((x: Error) => x)) as Error
+        expect(e.message).toBe('Element 999999 is stale or unknown (not in a recent control list); call ui_elements again')
+        console.log(`[host] ui tree ids ${a.elements[0]?.id}..${a.elements.at(-1)?.id}, then ${b.elements[0]?.id}.., then ${c.elements[0]?.id}..`)
+      } finally {
+        host.stop()
+      }
+    },
+    120_000
+  )
+
+  test(
+    'a call that hangs past its timeout ends the host; the next call starts a new one',
+    async () => {
+      const ended: number[] = []
+      // "uiTree" gets 1 ms, so it always times out; everything else the default.
+      const p = makeWindowsPlatform({
+        ownerPid: process.pid,
+        hostDir: base,
+        timeout: (m, params) => (m === 'uiTree' ? 1 : hostTimeout(m, params)),
+        track: (proc) => void proc.on('close', () => ended.push(proc.pid ?? 0))
+      })
+      try {
+        const e = (await p.uiTree(10).catch((x: Error) => x)) as Error
+        expect(e.name).toBe('HostTimeout')
+        expect(e.message).toContain('restarted')
+        // A new host answers.
+        const again = await p.cursor()
+        expect(typeof again.x).toBe('number')
+        await new Promise((r) => setTimeout(r, 500))
+        expect(ended.length).toBe(1)
+      } finally {
+        p.dispose()
       }
     },
     120_000

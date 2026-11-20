@@ -281,8 +281,80 @@ describe('tools', () => {
     const h = await harness()
     const r = await h.reply()
     const res = await r.tool('type_text', { text: 'cats', element: 7, submit: true })
-    expect(textOf(res)).toBe('Typed and pressed Enter.')
+    expect(textOf(res)).toBe("Replaced the field's text and pressed Enter.")
     expect(h.calls.filter((c) => c !== 'remember')).toEqual(['set 7 cats', 'click 120,110', 'keys enter'])
+  })
+
+  test('type_text says whether it replaced a field or typed at the cursor', async () => {
+    const h = await harness({ setValue: async () => 'typed' })
+    const r = await h.reply()
+    expect(textOf(await r.tool('type_text', { text: 'x', element: 3 }))).toBe('Typed.')
+    expect(textOf(await r.tool('type_text', { text: 'x' }))).toBe('Typed.')
+    const { tools } = await r.client.listTools()
+    expect(tools.find((t) => t.name === 'type_text')?.description).toContain("the field's text is replaced")
+  })
+
+  test('ui_elements tells the model when the list was cut short, with a real count', async () => {
+    const els = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, type: 'Button', name: `Item ${i}`, x: 0, y: 0, width: 20, height: 10 }))
+    let asked = 0
+    const h = await harness({
+      uiTree: async (max) => {
+        asked = max
+        return { window: { title: 'Big', process: 'big' }, elements: els, truncated: true }
+      }
+    })
+    const r = await h.reply()
+    const all = textOf(await r.tool('ui_elements', {}))
+    expect(asked).toBeGreaterThan(80) // reads more than it shows, so it can count
+    expect(all).toContain('(first 80 of 100+; pass name to narrow)')
+    expect(all).toContain('The list was cut short')
+    const none = textOf(await r.tool('ui_elements', { name: 'save' }))
+    expect(none).toBe('Window "Big" (big): no control named like "save" among those read. The list was cut short (time or size limit), so more controls may exist: narrow by name or call again.')
+  })
+
+  test('ui_elements without truncation: plain count and plain miss', async () => {
+    const els = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, type: 'Button', name: `Item ${i}`, x: 0, y: 0, width: 20, height: 10 }))
+    const h = await harness({ uiTree: async () => ({ window: { title: 'W', process: 'w' }, elements: els }) })
+    const r = await h.reply()
+    const all = textOf(await r.tool('ui_elements', {}))
+    expect(all).toContain('(first 80 of 100; pass name to narrow)')
+    expect(all).not.toContain('cut short')
+    expect(textOf(await r.tool('ui_elements', { name: 'save' }))).toBe('Window "W" (w): no control named like "save".')
+  })
+
+  test('a step label names an element from an older list', async () => {
+    let n = 0
+    const h = await harness({
+      uiTree: async () => {
+        n++
+        return { window: { title: 'W', process: 'w' }, elements: [{ id: n * 10, type: 'Button', name: `Button ${n}`, x: 0, y: 0, width: 20, height: 10 }] }
+      }
+    })
+    const r = await h.reply()
+    await r.tool('ui_elements', {})
+    await r.tool('ui_elements', {})
+    await r.tool('click', { element: 10 })
+    expect(r.steps.at(-1)?.detail).toBe('“Button 1”')
+  })
+
+  test("a new reply doesn't use the last reply's screenshot for coordinates", async () => {
+    const h = await harness()
+    const r1 = await h.reply()
+    await r1.tool('look_at_screen')
+    expect(textOf(await r1.tool('click', { x: 1, y: 1 }))).toBe('Clicked.')
+    r1.abort.abort()
+    const r2 = await h.reply()
+    expect(textOf(await r2.tool('click', { x: 1, y: 1 }))).toContain('Call look_at_screen first')
+  })
+
+  test("where controls can't be read, ui_elements isn't offered or named in the prompt", async () => {
+    const h = await harness({ name: 'linux', controls: false })
+    const r = await h.reply()
+    const { tools } = await r.client.listTools()
+    expect(tools.map((t) => t.name)).not.toContain('ui_elements')
+    expect(tools.map((t) => t.name)).toContain('click')
+    expect(r.mod.instructions).not.toContain('mcp__computer__ui_elements')
+    expect(r.mod.instructions).not.toContain('call ui_elements')
   })
 
   test('a tool that throws reports an error instead of hanging', async () => {

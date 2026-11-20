@@ -163,6 +163,12 @@ describe('linux parsers', () => {
     expect(linuxSupported({ DISPLAY: ':0', WAYLAND_DISPLAY: 'wayland-0', XDG_SESSION_TYPE: 'x11' })).toBe(true)
     expect(linuxSupported({})).toBe(false)
   })
+
+  test("says it can't read controls, so ui_elements isn't offered", () => {
+    const p = makeLinuxPlatform({ ownerPid: 1 })
+    expect(p.controls).toBe(false)
+    p.dispose()
+  })
 })
 
 // The real tools against a live X display. Needs DISPLAY, a window manager, xdotool, xprop,

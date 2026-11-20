@@ -11,16 +11,32 @@ import type { FileHit, Platform, SearchQuery, UiElement, WindowInfo } from './ty
 /** Called with every process the adapter starts (set by makeMacPlatform), so quitting can end them. */
 let track: (p: ChildProcess) => void = () => {}
 
-const run = (cmd: string, args: string[], input?: string): Promise<string> =>
+/** A command that runs longer than this is killed and fails (an Accessibility call can hang on a busy app). */
+export const MAC_TIMEOUT_MS = 20_000
+
+const run = (cmd: string, args: string[], input?: string, timeoutMs = MAC_TIMEOUT_MS): Promise<string> =>
   new Promise((resolve, reject) => {
     const p = spawn(cmd, args, { stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
     track(p)
     let out = ''
     let err = ''
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      p.kill('SIGKILL')
+    }, timeoutMs)
     p.stdout!.setEncoding('utf8').on('data', (d: string) => (out += d))
     p.stderr!.setEncoding('utf8').on('data', (d: string) => (err += d))
-    p.on('error', reject)
-    p.on('close', (code) => (code === 0 ? resolve(out.trim()) : reject(new Error(err.trim() || `${cmd} failed`))))
+    p.on('error', (e) => {
+      clearTimeout(timer)
+      reject(e)
+    })
+    p.on('close', (code) => {
+      clearTimeout(timer)
+      if (timedOut)
+        return reject(new Error(`${cmd} didn't finish within ${Math.round(timeoutMs / 1000)} s (the app may be showing a dialog or not responding), so it was stopped. Look at the screen before going on.`))
+      code === 0 ? resolve(out.trim()) : reject(new Error(err.trim() || `${cmd} failed`))
+    })
     if (input) p.stdin!.end(input)
   })
 
@@ -28,6 +44,33 @@ const run = (cmd: string, args: string[], input?: string): Promise<string> =>
 const jxa = async <T>(body: string): Promise<T> => {
   const out = await run('osascript', ['-l', 'JavaScript', '-'], `function run(){ return JSON.stringify((function(){ ${body} })()) }`)
   return (out ? JSON.parse(out) : null) as T
+}
+
+/** How many ui_elements entries are kept, so ids from the last few lists still resolve. */
+const MAX_KEPT = 2000
+
+/**
+ * The ui_elements id registry: ids are never reused, so an id from an older list still means the
+ * same control or is reported stale. Keeps the most recent MAX_KEPT.
+ */
+export const makeElementIds = <E extends { id: number }>(max = MAX_KEPT) => {
+  const kept = new Map<number, E>()
+  let next = 1
+  return {
+    /** Give each element of a new list a fresh id and keep it. */
+    add: (els: ReadonlyArray<Omit<E, 'id'>>): E[] =>
+      els.map((e) => {
+        const el = { ...e, id: next++ } as E
+        kept.set(el.id, el)
+        if (kept.size > max) kept.delete(kept.keys().next().value!)
+        return el
+      }),
+    get: (id: number): E => {
+      const el = kept.get(id)
+      if (!el) throw new Error(`Element ${id} is stale or unknown (not in a recent control list); call ui_elements again`)
+      return el
+    }
+  }
 }
 
 const KEY_CODES: Record<string, number> = {
@@ -65,11 +108,14 @@ export const buildMdfindQuery = (q: SearchQuery): string => {
   return parts.length ? parts.join(' && ') : `kMDItemFSName == "*"`
 }
 
+/** Text field roles, whose text type_text replaces. */
+const MAC_FIELDS = new Set(['TextField', 'TextArea', 'ComboBox'])
+
 /** `ownerPid` is chat-v2's main process: its windows are never targets. */
 export const makeMacPlatform = (opts: { ownerPid: number; track?: (p: ChildProcess) => void }): Platform => {
   if (opts.track) track = opts.track
   let remembered = ''
-  let lastTree: UiElement[] = []
+  const ids = makeElementIds<UiElement>()
 
   const frontApp = () =>
     jxa<{ name: string; pid: number; title: string }>(`
@@ -95,11 +141,7 @@ export const makeMacPlatform = (opts: { ownerPid: number; track?: (p: ChildProce
     return { title: f.title, process: f.name }
   }
 
-  const element = (id: number) => {
-    const el = lastTree.find((e) => e.id === id)
-    if (!el) throw new Error(`Element ${id} is stale; call ui_elements again`)
-    return el
-  }
+  const element = ids.get
 
   return {
     name: 'macos',
@@ -198,26 +240,26 @@ export const makeMacPlatform = (opts: { ownerPid: number; track?: (p: ChildProce
       )
     },
     uiTree: async (max) => {
-      const elements = await jxa<UiElement[]>(`
+      const r = await jxa<{ elements: Array<Omit<UiElement, 'id'>>; truncated: boolean }>(`
         const se = Application('System Events');
         const p = se.processes.whose({ frontmost: true })[0];
-        const out = []; let id = 1;
+        const out = []; let truncated = false;
         const want = new Set(['AXButton','AXCheckBox','AXRadioButton','AXTextField','AXTextArea','AXPopUpButton','AXMenuItem','AXMenuButton','AXLink','AXTab','AXRow','AXCell','AXSlider','AXComboBox','AXStaticText']);
         let all = [];
         try { all = p.windows[0].entireContents() } catch (e) {}
         for (const el of all) {
-          if (out.length >= ${max}) break;
           try {
             const role = el.role(); if (!want.has(role)) continue;
             const name = el.name() || el.description() || el.title() || '';
             const [x, y] = el.position(); const [w, h] = el.size();
             if (w < 2 || h < 2) continue;
-            out.push({ id: id++, type: role.replace('AX',''), name: String(name).slice(0, 120), x, y, width: w, height: h });
+            if (out.length >= ${max}) { truncated = true; break; }
+            out.push({ type: role.replace('AX',''), name: String(name).slice(0, 120), x, y, width: w, height: h });
           } catch (e) {}
         }
-        return out;`)
-      lastTree = elements
-      return { window: await target(), elements }
+        return { elements: out, truncated };`)
+      const elements = ids.add(r.elements)
+      return { window: await target(), elements, ...(r.truncated ? { truncated: true } : {}) }
     },
     invoke: async (id) => {
       const el = element(id)
@@ -239,8 +281,11 @@ export const makeMacPlatform = (opts: { ownerPid: number; track?: (p: ChildProce
         [1, cx, cy, 1],
         [2, cx, cy, 1]
       ])
+      // A field's text is replaced, as UI Automation's ValuePattern does on Windows.
+      const field = MAC_FIELDS.has(el.type)
+      if (field) await jxa(`Application('System Events').keystroke('a', { using: ['command down'] }); return null`)
       await jxa(`Application('System Events').keystroke(${JSON.stringify(text)}); return null`)
-      return 'typed'
+      return field ? 'replaced' : 'typed'
     },
     elementRect: async (id) => {
       const el = element(id)

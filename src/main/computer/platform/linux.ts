@@ -3,8 +3,8 @@
 // (screenshots), find and grep (file search) and xdg-open. Coordinates are X screen pixels.
 // Wayland sessions aren't supported: X11 tools can't see or drive other apps there.
 //
-// Reading controls (ui_elements) isn't implemented yet: those calls fail with a message that
-// tells the model to use the screenshot and pixel clicks instead.
+// Reading controls isn't implemented yet (`controls: false`), so ui_elements isn't offered; the
+// element calls fail with a message that tells the model to use pixel clicks instead.
 //
 // Linux can't hide windows from screen capture, so chat-v2's windows can appear in screenshots.
 // When chat-v2 is in front, a screenshot first brings the app the user was in back to the front.
@@ -635,6 +635,7 @@ export const makeLinuxPlatform = (opts: { ownerPid: number; track?: (p: ChildPro
 
   return {
     name: 'linux',
+    controls: false,
     remember: async () => {
       const w = await active()
       if (w && !own(w)) remembered = w
