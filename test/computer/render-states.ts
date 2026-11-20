@@ -5,14 +5,18 @@
 // notch (working, waiting, approval arming and armed, a long approval, a MacBook camera housing),
 // and Point (idle hint, hovered control, box), on a light, a dark and a busy wallpaper. Sequences:
 // the notch working → approval → working, a step's callout gliding to the next, a step leaving,
-// and Point's highlight moving. Each sequence frame records the [data-hit] rects in the page and the
-// last ones the page reported to main, so a hit area that lags a transition shows up in
-// sequences.json. REDUCED=1 emulates prefers-reduced-motion.
+// Point's highlight moving, two approvals back to back, a step entering above and beside its
+// target, and a wide target's ping. It also checks that a state pushed mid-arm or after arming
+// leaves Approve's arming alone (arm-checks in sequences.json; it fails if not). Each sequence
+// frame records the [data-hit] rects in the page and the last ones the page reported to main, so a
+// hit area that lags a transition shows up in sequences.json. REDUCED=1 emulates
+// prefers-reduced-motion.
 // Under Bun it bundles itself for Electron and runs it; under Electron it renders.
 import { spawnSync } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { APPROVE_ARM_MS } from '../../src/shared/computer'
 
 const root = process.env.CV2_ROOT ?? resolve(import.meta.dirname, '../..')
 
@@ -52,10 +56,16 @@ const renderInElectron = async (outDir: string) => {
     wc().debugger.attach('1.3')
     await wc().debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] })
   }
-  if (scale !== 1) wc().setZoomFactor(scale)
-  // The page's own size (CSS pixels), which a zoom divides (innerWidth lags the zoom in a hidden window).
-  W = Math.floor(W / scale)
-  H = Math.floor(H / scale)
+  // Always set: Chromium keeps a page zoom per origin (every file:// page is one), so a zoom
+  // left from a scale-2 run would otherwise carry over.
+  wc().setZoomFactor(scale)
+  // The page's own size (CSS pixels), which a zoom divides. A hidden window takes the zoom (and its
+  // size) only as frames are forced, so it is read after a few.
+  for (let i = 0; i < 4; i++) {
+    await wc().capturePage().catch(() => null)
+    await sleep(150)
+  }
+  ;({ W, H } = await wc().executeJavaScript('({ W: innerWidth, H: innerHeight })'))
   let paper: string | null = null
   let paperKey: string | null = null
   const wallpaper = async (name: keyof typeof WALLPAPERS | null) => {
@@ -160,6 +170,10 @@ const renderInElectron = async (outDir: string) => {
       await shot(`notch-approval-armed-${tag}`, '.notch')
       send({ acting: false, teach: null, notch: { text: 'Needs your OK', waiting: true, approval: long, camera: null } })
       await shot(`notch-approval-long-${tag}`, '.notch')
+      // Past what the notch shows: it offers the chat's card, which has it all.
+      const huge = { id: 'ap_4', title: long.title + ', then empties the Recycle Bin and clears the backup of the same folder on the network drive', detail: [long.detail, long.detail, long.detail].join(' ; ') }
+      send({ acting: false, teach: null, notch: { text: 'Needs your OK', waiting: true, approval: huge, camera: null } })
+      await shot(`notch-approval-huge-${tag}`, '.notch')
       send({ acting: false, teach: null, notch: { text: 'Working · Click', waiting: false, camera: { width: 200, height: 37 } } })
       await shot(`notch-camera-${tag}`, '.notch')
       send({ acting: false, teach: null, notch: { text: 'Needs your OK', waiting: true, approval, camera: { width: 200, height: 37 } } })
@@ -208,6 +222,19 @@ const renderInElectron = async (outDir: string) => {
     await shot(`point-hint-below-notch-${theme}`, { x: Math.round(W / 2 - 320), y: 0, width: 640, height: 140 }, 0)
     wc().send('computer-overlay:point', null)
     overlay.point(null)
+    // Under a MacBook's camera notch, which is wider and taller.
+    const onEdge = await point(false, false)
+    // (After Point starts: it has main send its own state.)
+    send({ acting: true, teach: null, notch: { text: 'Working · Click · “Display”', waiting: false, camera: { width: 200, height: 37 } } })
+    await shot(`point-hint-below-camera-${theme}`, { x: Math.round(W / 2 - 360), y: 0, width: 720, height: 140 }, 0)
+    // A control at the screen's right edge with a long label: its tag stays on screen.
+    await onEdge('pointermove', W - 30, 318)
+    await sleep(150)
+    wc().send('computer-overlay:point-hit', { x: W - 30, y: 318, control: { rect: { x: W - 64, y: 300, width: 60, height: 36 }, label: 'Button · Save the quarterly report as a PDF' } })
+    await shot(`point-tag-edge-${theme}`, { x: W - 420, y: 250, width: 420, height: 120 }, 0)
+    wc().send('computer-overlay:point', null)
+    overlay.point(null)
+    send({ acting: false, teach: null, notch: null })
     overlay.show(false, null, null)
   }
 
@@ -249,7 +276,57 @@ const renderInElectron = async (outDir: string) => {
   }, 10)
   overlay.show(false, null, null)
 
+  // Two approvals back to back: the panel stays open and the second replaces the first in place.
+  const second = { id: 'ap_3', title: 'Empty the Recycle Bin', detail: '12 items, 48 MB' }
+  overlay.show(false, null, { text: 'Needs your OK', waiting: true, approval })
+  await sequence('notch-back-to-back', top, async () => {
+    overlay.show(false, null, { text: 'Working · Delete', waiting: false })
+    await sleep(60)
+    overlay.show(false, null, { text: 'Needs your OK', waiting: true, approval: second })
+  }, 14)
+  overlay.show(false, null, null)
+
+  // A Show-me step entering above its target (no room below) and beside it (no room above or
+  // below): it appears where it settles, without drifting from a guessed height.
+  overlay.show(false, null, null)
+  await sequence('teach-enter-above', { x: target.x - 60, y: H - 360, width: 760, height: 360 }, () =>
+    overlay.show(false, teach({ ...target, y: H - 90 }, 1, 2, 'Click Display to open the screen settings.', 'above_1'), null), 10)
+  overlay.show(false, null, null)
+  await sequence('teach-enter-beside', { x: target.x - 60, y: 40, width: 820, height: H - 80 }, () =>
+    overlay.show(false, teach({ x: target.x, y: 60, width: 220, height: H - 120 }, 1, 2, 'Click the sidebar.', 'beside_1'), null), 10)
+  overlay.show(false, null, null)
+  // A wide target: the ping grows by the same few pixels on every side.
+  await sequence('teach-ping-wide', { x: 40, y: 120, width: Math.min(W - 80, 1000), height: 260 }, () =>
+    overlay.show(false, teach({ x: 120, y: 180, width: Math.min(W - 240, 840), height: 40 }, 1, 2, 'Click the address bar.', 'wide_1'), null), 14, 80)
+  overlay.show(false, null, null)
+
+  /**
+   * Approve arms once per approval. Main sends a new state object on every change (focus, text, a
+   * held part let go), with the same approval in it: that must neither restart the arming nor
+   * disarm an armed Approve. Checked mid-arm and after arming.
+   */
+  const armChecks: unknown[] = []
+  for (const pushAfter of [300, APPROVE_ARM_MS + 100]) {
+    overlay.show(false, null, null)
+    await settle()
+    const ask = { ...approval, id: `ap_arm_${pushAfter}` }
+    const t0 = Date.now()
+    overlay.show(false, null, { text: 'Needs your OK', waiting: true, approval: ask })
+    await sleep(pushAfter)
+    overlay.show(false, null, { text: 'Needs your OK', waiting: true, approval: { ...ask } })
+    await sleep(Math.max(0, t0 + Math.max(pushAfter, APPROVE_ARM_MS) + 150 - Date.now()))
+    await grab()
+    const armed = (await wc().executeJavaScript(
+      `(() => { const b = document.querySelector('.notch .approve'); return !!b && !b.disabled && !b.querySelector('.cu-fill') })()`
+    )) as boolean
+    armChecks.push({ pushAfter, checkedAt: Date.now() - t0, armed })
+  }
+  sequences['arm-checks'] = armChecks
+  overlay.show(false, null, null)
+
   writeFileSync(join(outDir, 'sequences.json'), JSON.stringify(sequences, null, 1))
+  const rearmed = armChecks.filter((c) => !(c as { armed: boolean }).armed)
+  if (rearmed.length) throw new Error(`a state push re-armed Approve: ${JSON.stringify(rearmed)}`)
   console.log(`[states] ${W}x${H} @${d.scaleFactor * scale}x${process.env.REDUCED === '1' ? ' reduced motion' : ''}, wrote PNGs to ${outDir}`)
   void paper
   overlay.dispose()

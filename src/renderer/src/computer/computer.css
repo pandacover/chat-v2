@@ -17,7 +17,8 @@
   --cu-ink-raised: #201e1b;
   --cu-paper: #f7f5f0;
   --cu-r-pill: 999px;
-  --cu-r-card: 16px;
+  /* The chat's --radius-lg: cards in the chat and on the overlay share one corner. */
+  --cu-r-card: 14px;
   --cu-r-inner: 10px;
   --cu-r-kbd: 5px;
   --cu-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -144,7 +145,7 @@
 .cu-btn .cu-fill {
   position: absolute;
   inset: 0;
-  border-radius: inherit;
+  /* Square: the pill's overflow rounds its ends, and the leading edge stays a straight line. */
   background: var(--cu-primary-bg);
   transform-origin: left;
   animation: cu-arm var(--arm, 700ms) linear both;
@@ -184,6 +185,12 @@
   line-height: 1;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0;
+}
+/* The return key as a drawn glyph: the font's ↵ is a hairline at this size. */
+.cu-kbd svg {
+  display: block;
+  width: 11px;
+  height: 11px;
 }
 /* Keys inside a solid pill: drawn in the pill's own text colour. */
 .cu-btn.primary .cu-kbd {
@@ -256,5 +263,10 @@
 @media (prefers-reduced-motion: reduce) {
   .cu-dot::before {
     animation: none;
+  }
+  /* Without the fill's sweep a finished fill would read as armed while it can't be clicked yet:
+     the pale track alone says "not yet", and the pill turns solid when it arms. */
+  .cu-btn .cu-fill {
+    display: none;
   }
 }

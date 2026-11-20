@@ -15,6 +15,9 @@
     doing = null
   }: { steps: Step[]; live?: boolean; running?: boolean; done?: boolean; doing?: ComputerDoing | null } = $props()
 
+  /** A line's roll in and out (the dwell below waits it out). */
+  const ROLL = 200
+
   // Folded to one line by default; the header opens the full list.
   let toggled = $state<boolean | null>(null)
   const open = $derived(toggled ?? false)
@@ -41,21 +44,26 @@
   )
 
   type Line = { key: string; label: string; detail?: string; tone: 'live' | 'quiet' | 'done' | 'failed' | 'summary'; summary?: string }
+  const IDLE: Line = { key: 'working', label: 'Working', tone: 'quiet' }
   // The folded line: the action under way, else the last one; once the reply is over, the count.
   const line = $derived.by<Line | null>(() => {
     if (done) return { key: 'summary', label: '', tone: 'summary' }
     if (now) return { key: `${now.label}\n${now.detail ?? ''}`, label: now.label, detail: now.detail, tone: now.quiet ? 'quiet' : 'live' }
     const last = steps.at(-1)
-    if (!last) return null
+    // Between tools, before the first step is in: the last line stays (below), or if there was none
+    // yet, the line says it is at work.
+    if (!last) return running ? IDLE : null
     return { key: `${last.label}\n${last.detail ?? ''}`, label: last.label, detail: last.detail, tone: last.ok ? 'done' : 'failed' }
   })
 
   /**
    * Each new line rolls in, so a line that changes faster than DWELL ms (quick looks between
    * actions) would stack up half-rolled lines: changes that come sooner wait out the dwell, and
-   * only the latest is shown. A change to the same line (live → done) applies at once.
+   * only the latest is shown. A change to the same line (live → done) applies at once. The dwell
+   * is the roll and a few frames more, so a roll is always over before the next one starts: at
+   * most two lines are ever in the slot.
    */
-  const DWELL = 180
+  const DWELL = ROLL + 40
   let shown = $state<Line | null>(untrack(() => line))
   let shownAt = 0
   let pending: ReturnType<typeof setTimeout> | undefined
@@ -63,12 +71,15 @@
     const next = line
     untrack(() => {
       clearTimeout(pending)
+      // A moment between tools keeps the line that is up rather than rolling to "Working" and on.
+      if (next === IDLE && shown) return
       const wait = shownAt + DWELL - performance.now()
       if (!shown || !next || next.key === shown.key || wait <= 0) {
         if (next?.key !== shown?.key) shownAt = performance.now()
         shown = next
       } else
         pending = setTimeout(() => {
+          if (line === IDLE && shown) return
           shown = line
           shownAt = performance.now()
         }, wait)
@@ -103,7 +114,7 @@
       <span class="ml-1.5 grid h-[1lh] min-w-0 flex-1 overflow-hidden text-[13px] leading-snug" aria-live="polite" data-step-line={shown?.tone === 'live' || shown?.tone === 'quiet' ? 'now' : shown?.tone === 'summary' ? 'summary' : 'last'}>
         {#if shown && (!open || shown.tone === 'summary')}
           {#key shown.key}
-            <span class="flex min-w-0 items-center gap-2 [grid-area:1/1]" in:fly={{ y: 14, duration: 260 }} out:fly={{ y: -14, duration: 260 }}>
+            <span class="flex min-w-0 items-center gap-2 [grid-area:1/1]" in:fly={{ y: 14, duration: ROLL }} out:fly={{ y: -14, duration: ROLL }}>
               {#if shown.tone === 'summary'}
                 <span class="text-[12px] text-muted tabular-nums"
                   >{steps.length} {steps.length === 1 ? 'step' : 'steps'}{#if failed}<span class="text-danger">, {failed} failed</span>{/if}</span

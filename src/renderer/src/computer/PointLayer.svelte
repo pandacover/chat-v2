@@ -16,9 +16,24 @@
   const REST_MS = 70
 
   let point = $state<OverlayPoint | null>(null)
-  /** The notch is up (Overlay.svelte draws it), so the hint sits below it. */
-  let notch = $state(false)
-  $effect(() => bridge.onState((s) => (notch = s.notch !== null)))
+  /**
+   * The notch is up (Overlay.svelte draws it, in this same page): the hint lines up under it, at
+   * its width and left edge with a clear gap, and follows it as it opens or folds (an approval).
+   */
+  let notch = $state<{ left: number; width: number; bottom: number } | null>(null)
+  $effect(() => {
+    if (!point) return
+    let raf = 0
+    const measure = () => {
+      const el = [...document.querySelectorAll<HTMLElement>('.notch')].find((e) => !e.closest('[inert]'))
+      const r = el?.getBoundingClientRect()
+      const next = r ? { left: Math.round(r.left), width: Math.round(r.width), bottom: Math.round(r.bottom) } : null
+      if (JSON.stringify(next) !== JSON.stringify(notch)) notch = next
+      raf = requestAnimationFrame(measure)
+    }
+    measure()
+    return () => cancelAnimationFrame(raf)
+  })
   let hover = $state<OverlayPointHit['control']>(null)
   let box = $state<OverlayRect | null>(null)
   let down: { x: number; y: number; id: number } | null = null
@@ -105,6 +120,9 @@
   }
 
   const tagAbove = (r: OverlayRect) => (r.y >= 32 ? r.y - 28 : r.y + r.height + 6)
+  /** A tag starts at its mark's left edge, but stays 8 px inside the screen. */
+  let tagW = $state(0)
+  const tagLeft = (r: OverlayRect) => Math.max(8, Math.min(r.x, innerWidth - tagW - 8))
 
   const reduce = window.matchMedia('(prefers-reduced-motion: reduce)')
   const fade = (_: Element, { duration = 160, y = 0 }: { duration?: number; y?: number } = {}) => ({
@@ -135,13 +153,19 @@
   >
     {#if box}
       <div class="box" style="left:{box.x}px;top:{box.y}px;width:{box.width}px;height:{box.height}px"></div>
-      <span class="tag cu-ink mono" style="left:{box.x}px;top:{tagAbove(box)}px">{Math.round(box.width)} × {Math.round(box.height)}</span>
+      <span class="tag cu-ink mono" style="left:{tagLeft(box)}px;top:{tagAbove(box)}px" bind:offsetWidth={tagW}>{Math.round(box.width)} × {Math.round(box.height)}</span>
     {:else if hover}
       <div class="control" style="left:{hover.rect.x}px;top:{hover.rect.y}px;width:{hover.rect.width}px;height:{hover.rect.height}px"></div>
-      <span class="tag cu-ink" style="left:{hover.rect.x}px;top:{tagAbove(hover.rect)}px">{hover.label}</span>
+      <span class="tag cu-ink" style="left:{tagLeft(hover.rect)}px;top:{tagAbove(hover.rect)}px" bind:offsetWidth={tagW}>{hover.label}</span>
     {/if}
   </div>
-  <div class="hint cu-ink" class:below-notch={notch} role="status" in:fade={{ duration: 200, y: -6 }}>
+  <div
+    class="hint cu-ink"
+    class:below-notch={!!notch}
+    style={notch ? `left:${notch.left}px;width:${notch.width}px;top:${notch.bottom + 8}px` : ''}
+    role="status"
+    in:fade={{ duration: 200, y: -6 }}
+  >
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"
       ><circle cx="12" cy="12" r="8" /><path d="M12 2v4M12 18v4M2 12h4M18 12h4" /></svg
     >
@@ -175,9 +199,9 @@
   .control {
     position: absolute;
     border-radius: 6px;
-    background: rgb(229 112 63 / 0.1);
+    background: color-mix(in srgb, var(--cu-accent) 10%, transparent);
     box-shadow:
-      inset 0 0 0 1.5px var(--cu-accent),
+      inset 0 0 0 2px var(--cu-accent),
       0 0 0 1px rgb(20 19 17 / 0.25);
     pointer-events: none;
     transition:
@@ -227,8 +251,18 @@
   .hint > span {
     color: var(--cu-fg);
   }
+  /* Under the notch: its width and left edge (set from its box), its insets, the text to the left. */
   .hint.below-notch {
-    top: 48px;
+    right: auto;
+    margin: 0;
+    padding: 0 8px 0 14px;
+  }
+  .hint.below-notch .cu-btn {
+    margin-left: auto;
+  }
+  .hint.below-notch > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .hint .cu-btn {
     margin-left: 2px;

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte'
+  import { tick, untrack } from 'svelte'
   import { cubicOut } from 'svelte/easing'
   import { APPROVE_ARM_MS } from '@shared/computer'
   import type { ComputerOverlayBridge, OverlayState } from '../../../preload/computer-overlay'
@@ -162,15 +162,46 @@
     if (ask) shownAsk = ask
   })
 
+  /**
+   * The panel stays open HOLD ms after an approval is answered while the notch stays up, so a
+   * next approval that follows at once (back to back) replaces it in place instead of the panel
+   * folding and opening again. Its buttons are inert meanwhile.
+   */
+  let asking = $state(false)
+  let askRelease: ReturnType<typeof setTimeout> | undefined
+  $effect.pre(() => {
+    const open = !!ask
+    const up = !!n
+    untrack(() => {
+      clearTimeout(askRelease)
+      if (open) asking = true
+      else if (asking && up) askRelease = setTimeout(() => (asking = false), HOLD)
+      else asking = false
+    })
+  })
+  $effect(() => () => clearTimeout(askRelease))
+
   // Approve in the notch arms after the same beat as the chat's, so a click meant for the app
-  // under it can't say yes.
+  // under it can't say yes. Every state push is a new object: only a new approval re-arms.
+  const askId = $derived(ask?.id ?? null)
   let armed = $state(false)
   $effect(() => {
-    if (!ask) return
-    void ask.id
+    if (!askId) return
     armed = false
     const timer = setTimeout(() => (armed = true), APPROVE_ARM_MS)
     return () => clearTimeout(timer)
+  })
+
+  /** The approval's text runs past what the notch shows: it offers the chat's card, which has it all. */
+  let titleEl: HTMLElement | undefined = $state()
+  let detailEl: HTMLElement | undefined = $state()
+  let clipped = $state(false)
+  $effect(() => {
+    void shownAsk
+    void tick().then(() => {
+      const over = (el: HTMLElement | undefined) => !!el && el.scrollHeight > el.clientHeight + 1
+      clipped = over(titleEl) || over(detailEl)
+    })
   })
 
   const t = $derived(st.teach)
@@ -182,17 +213,42 @@
   const GAP = 12
   /** The callout's rendered height (a guess until it has rendered once). */
   let calloutH = $state(124)
+  /**
+   * The callout glides from step to step, but not into its first place: until it has been
+   * measured, its height is a guess, and a correction that glided would drift it on entry.
+   */
+  let placed = $state(false)
+  $effect(() => {
+    if (!calloutEl) {
+      placed = false
+      return
+    }
+    let raf = requestAnimationFrame(() => (raf = requestAnimationFrame(() => (placed = true))))
+    return () => cancelAnimationFrame(raf)
+  })
+  /** A step's ping waits for the spotlight's glide to the new target to end; the first one sooner. */
+  const GLIDE = 420
+  let pingDelay = $state(120)
+  let pingKey: string | number | null = null
+  $effect.pre(() => {
+    const k = t ? (t.id ?? t.step) : null
+    untrack(() => {
+      if (k !== pingKey) pingDelay = pingKey !== null && k !== null ? GLIDE : 120
+      pingKey = k
+    })
+  })
 
   // Below the target if there's room, else above, else beside it, else inside it; always on screen.
+  // Above, it hangs from its bottom edge (lifted by its own height), so its height never moves it.
   const callout = $derived.by(() => {
     if (!hole) return null
     const vw = window.innerWidth
     const vh = window.innerHeight
     const h = calloutH
     const left = Math.min(Math.max(16, hole.x), vw - CALLOUT_W - 16)
-    const at = (l: number, top: number, side: 'below' | 'above' | 'beside' | 'inside') => ({ left: clamp(l, vw - CALLOUT_W), top: clamp(top, vh - h), side })
+    const at = (l: number, top: number, side: 'below' | 'above' | 'beside' | 'inside') => ({ left: clamp(l, vw - CALLOUT_W), top: clamp(top, vh - h), side, lift: false })
     if (hole.y + hole.h + GAP + h + 8 <= vh) return at(left, hole.y + hole.h + GAP, 'below')
-    if (hole.y - GAP - h >= 8) return at(left, hole.y - GAP - h, 'above')
+    if (hole.y - GAP - h >= 8) return { left: clamp(left, vw - CALLOUT_W), top: Math.min(hole.y - GAP, vh - 8), side: 'above' as const, lift: true }
     // Beside: level with the middle of the part of the target that's on screen.
     const top = (Math.max(0, hole.y) + Math.min(vh, hole.y + hole.h)) / 2 - h / 2
     if (hole.x + hole.w + GAP + CALLOUT_W + 8 <= vw) return at(hole.x + hole.w + GAP, top, 'beside')
@@ -210,12 +266,13 @@
   <div class="spot" style="left:{hole.x}px;top:{hole.y}px;width:{hole.w}px;height:{hole.h}px" in:fade={{ duration: 260 }} out:fade={{ duration: 180 }}>
     <span class="ring"></span>
     <!-- Once per step, a single soft ring draws the eye to the target. -->
-    {#key t.id ?? t.step}<span class="ping"></span>{/key}
+    {#key t.id ?? t.step}<span class="ping" style="--ping-delay:{pingDelay}ms"></span>{/key}
   </div>
   <div
     class="callout cu-ink"
     class:pinned={!!pin}
-    style="left:{pin?.left ?? callout.left}px;top:{pin?.top ?? callout.top}px;width:{CALLOUT_W}px"
+    class:placed
+    style="left:{pin?.left ?? callout.left}px;top:{pin?.top ?? callout.top}px;translate:0 {callout.lift && !pin ? '-100%' : '0'};width:{CALLOUT_W}px"
     role="dialog"
     tabindex="-1"
     aria-label="Step {t.step} of {t.total}"
@@ -240,8 +297,8 @@
     </div>
     <p>{t.instruction}</p>
     <div class="row">
-      <button class="cu-btn small" onclick={() => t.id && bridge.press('cant_find', t.id)}>Can’t find it</button>
-      <button class="cu-btn small" onclick={() => t.id && bridge.press('hand_over', t.id)}>Do it for me</button>
+      <button class="cu-btn" onclick={() => t.id && bridge.press('cant_find', t.id)}>Can’t find it</button>
+      <button class="cu-btn" onclick={() => t.id && bridge.press('hand_over', t.id)}>Do it for me</button>
       <button class="cu-btn primary" onclick={() => t.id && bridge.press('done', t.id)}>Done</button>
     </div>
   </div>
@@ -254,7 +311,7 @@
   <div
     class="notch cu-ink"
     class:camera={!!n.camera}
-    class:asking={!!ask}
+    class:asking
     style={n.camera ? `--cam-w:${n.camera.width}px;--cam-h:${n.camera.height}px` : ''}
     role={ask ? 'alertdialog' : 'status'}
     aria-labelledby={ask ? 'ask-title' : undefined}
@@ -265,7 +322,8 @@
     <div class="head">
       <button class="status" onclick={() => bridge.press('chat')} title="Show the chat">
         <span class="cu-dot" class:waiting={n.waiting}></span>
-        <span class="text">{n.text}</span>
+        <!-- A new status fades in where the last one was, which goes at once: two never overlap. -->
+        <span class="text-slot">{#key n.text}<span class="text" in:fade={{ duration: 120 }}>{n.text}</span>{/key}</span>
       </button>
       {#if n.camera}<span class="housing" aria-hidden="true"></span>{/if}
       <span class="actions">
@@ -282,9 +340,10 @@
     <div class="body" inert={!ask}>
       <div class="body-in">
         {#if shownAsk}
-          <p class="ask-title" id="ask-title">{shownAsk.title}</p>
-          {#if shownAsk.detail}<div class="ask-detail"><span>{shownAsk.detail}</span></div>{/if}
+          <p class="ask-title" id="ask-title" bind:this={titleEl}>{shownAsk.title}</p>
+          {#if shownAsk.detail}<div class="ask-detail" bind:this={detailEl}>{shownAsk.detail}</div>{/if}
           <div class="ask-row">
+            {#if clipped}<button class="cu-btn small see-all" onclick={() => bridge.press('chat')}>See all in chat</button>{/if}
             <button class="cu-btn line deny" onclick={() => ask && bridge.press('deny', ask.id)}>Deny</button>
             {#key shownAsk.id}
               <button class="cu-btn primary approve" class:arming={!armed} class:armed disabled={!armed} onclick={() => ask && bridge.press('approve', ask.id)}>
@@ -338,7 +397,7 @@
     pointer-events: none;
     /* An ember hairline, with a dark one inside it so it holds on an ember-coloured wallpaper. */
     box-shadow:
-      inset 0 0 0 2px rgb(229 112 63 / 0.92),
+      inset 0 0 0 2px color-mix(in srgb, var(--cu-accent) 92%, transparent),
       inset 0 0 0 3px rgb(20 19 17 / 0.16);
   }
 
@@ -367,19 +426,21 @@
       0 0 0 2px var(--cu-paper),
       0 0 0 3px rgb(20 19 17 / 0.5);
   }
+  /* The ping grows by the same 8 px on every side, whatever the target's size. */
   .ping {
-    box-shadow: 0 0 0 2px var(--cu-paper);
+    outline: 2px solid var(--cu-paper);
+    outline-offset: 0;
     opacity: 0;
-    animation: ping 900ms var(--cu-ease) 120ms both;
+    animation: ping 900ms var(--cu-ease) var(--ping-delay, 120ms) both;
   }
   @keyframes ping {
     from {
       opacity: 0.85;
-      transform: scale(1);
+      outline-offset: 0;
     }
     to {
       opacity: 0;
-      transform: scale(1.12);
+      outline-offset: 8px;
     }
   }
 
@@ -389,12 +450,15 @@
     border-radius: var(--cu-r-card);
     cursor: grab;
     touch-action: none;
+  }
+  .callout.placed {
     transition:
       left var(--cu-glide) var(--cu-ease),
-      top var(--cu-glide) var(--cu-ease);
+      top var(--cu-glide) var(--cu-ease),
+      translate var(--cu-glide) var(--cu-ease);
   }
   /* Dragged by the user: it stays where they put it, without gliding. */
-  .callout.pinned {
+  .callout.pinned.placed {
     transition: none;
   }
   .callout:active {
@@ -418,9 +482,10 @@
     color: var(--cu-fg);
   }
   .grip {
-    width: 18px;
-    height: 6px;
-    background: radial-gradient(circle, rgb(255 255 255 / 0.32) 1px, transparent 1.5px) 0 0 / 6px 3px;
+    width: 20px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--cu-hair-strong);
   }
   .callout .cu-dashes {
     justify-self: end;
@@ -462,20 +527,20 @@
     align-items: center;
     gap: 10px;
     height: 36px;
-    padding: 0 6px 0 14px;
+    /* The notch's insets, in every variant and its panel: 14 px left, 8 px right. */
+    padding: 0 8px 0 14px;
   }
   /* Around a MacBook's camera housing: the black meets the physical notch, with the status on its
      left and the buttons on its right, and nothing under the camera itself. */
   .notch.camera {
-    width: calc(340px + var(--cam-w) + 16px);
+    width: calc(356px + var(--cam-w));
   }
   .notch.camera .head {
     display: grid;
-    /* Equal wings, so the gap sits exactly under the centred camera. */
-    grid-template-columns: 170px var(--cam-w) 170px;
+    /* Equal 178 px wings (insets included), so the gap sits exactly under the centred camera. */
+    grid-template-columns: 164px var(--cam-w) 170px;
     gap: 0;
     height: var(--cam-h);
-    padding: 0 8px;
   }
   .housing {
     height: 100%;
@@ -512,10 +577,17 @@
   .status .cu-dot {
     color: var(--cu-fg);
   }
+  .text-slot {
+    display: grid;
+    min-width: 0;
+  }
   .text {
+    grid-area: 1 / 1;
+    min-width: 0;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
+    text-align: left;
   }
   /* The approval panel: the notch opens downwards (grid rows 0fr → 1fr), and folds back. */
   .body {
@@ -536,13 +608,13 @@
   .body-in {
     min-height: 0;
     overflow: hidden;
-    padding: 0 14px;
+    padding: 0 8px 0 14px;
     opacity: 0;
     transition: opacity 160ms var(--cu-ease);
   }
   .notch.asking .body-in {
     opacity: 1;
-    transition: opacity 200ms var(--cu-ease) 80ms;
+    transition: opacity 200ms var(--cu-ease);
   }
   .ask-title {
     margin: 4px 0 0;
@@ -551,11 +623,12 @@
     line-height: 1.35;
     letter-spacing: -0.01em;
     display: -webkit-box;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
+  /* Up to four lines of the exact target; longer scrolls (the chat's card has it all too). */
   .ask-detail {
     margin: 8px 0 0;
     padding: 6px 10px;
@@ -566,22 +639,23 @@
     font-family: var(--cu-mono);
     font-size: 11px;
     line-height: 1.5;
-  }
-  /* At most two lines of the exact target; the chat's card has it all. */
-  .ask-detail span {
+    max-height: calc(4 * 1.5em + 12px);
+    overflow-y: auto;
     white-space: pre-wrap;
     word-break: break-all;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
+    scrollbar-width: thin;
+    scrollbar-color: var(--cu-hair-strong) transparent;
   }
   .ask-row {
     display: flex;
+    align-items: center;
     justify-content: flex-end;
     gap: 6px;
-    margin: 12px -6px 0 0;
-    padding-bottom: 12px;
+    margin: 12px 0 0;
+    padding-bottom: 8px;
+  }
+  .see-all {
+    margin-right: auto;
+    margin-left: -10px;
   }
 </style>

@@ -5,13 +5,15 @@
   import { app } from '@/lib/store.svelte'
 
   /** What computer use waits on in this reply: an approval, or a Show-me step for the user to do. */
-  let { wait }: { wait: NonNullable<ComputerWait> } = $props()
+  let { wait, held = false }: { wait: NonNullable<ComputerWait>; held?: boolean } = $props()
 
   // Approve arms after a short beat, so a key pressed for something else can't say yes (the notch's too).
+  // Main sends the wait again on other changes (a new object each time): only a new id re-arms.
   const ARM_MS = APPROVE_ARM_MS
+  const waitId = $derived(wait.id)
   let armed = $state(false)
   $effect(() => {
-    void wait.id
+    void waitId
     armed = false
     const t = setTimeout(() => (armed = true), ARM_MS)
     return () => clearTimeout(t)
@@ -64,8 +66,9 @@
   data-computer-wait={wait.kind}
   tabindex="-1"
   onkeydown={oncardkey}
+  inert={held}
   in:fly={{ y: 4, duration: 220 }}
-  out:slide={{ duration: 180 }}
+  out:slide={{ duration: 200 }}
 >
   <div class="flex h-5 items-center gap-2 text-[12px] text-muted">
     <span class="cu-dot small waiting text-fg-2"></span>
@@ -94,7 +97,12 @@
         <button class="cu-btn primary" class:arming={!armed} disabled={!armed} onclick={() => app.approve(wait.id, true)}>
           <!-- Arming: the pill fills from the left, then takes clicks. -->
           {#if !armed}<span class="cu-fill" style="--arm:{ARM_MS}ms" aria-hidden="true"></span>{/if}
-          <span class="cu-label">Approve <span class="cu-keys">{#each keys(shortcut('↵')) as k (k)}<kbd class="cu-kbd">{k}</kbd>{/each}</span></span>
+          <span class="cu-label">Approve <span class="cu-keys" aria-label={shortcut('↵')}>{#each keys(shortcut('↵')) as k (k)}<kbd class="cu-kbd" aria-hidden="true"
+              >{#if k === '↵'}<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
+                  ><path d="M13 3.5v4.5a2 2 0 0 1-2 2H3.5" /><path d="M6 7.5 3.5 10 6 12.5" /></svg
+                >{:else}{k}{/if}</kbd
+            >{/each}</span
+          ></span>
         </button>
       {/key}
     {:else}

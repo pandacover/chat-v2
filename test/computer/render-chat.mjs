@@ -2,8 +2,10 @@
 // Computer switch and Point button, the live step line, the Stop hint and mode chip, a finished
 // run with a failed step (folded and open), a denied approval, the approval card (arming, armed),
 // the Show-me card, and Point's chips. Also frame sequences across changes (a run's line moving
-// from step to step and landing, the approval card arming and leaving, a Show-me step moving on),
-// with the step list's box per frame in sequences.json, to catch flicker and layout shift. A
+// from step to step and landing, pauses with no tool running before the first step, the approval
+// card arming and leaving, a Show-me step moving on), with the step list's box per frame in
+// sequences.json, to catch flicker and layout shift. It fails if a wait main sends again (a new
+// object, the same approval) restarts or undoes the card's arming (arm-checks). A
 // scripted model (polish-query.ts) and a fake platform (polish-platform.ts): nothing reaches the
 // desktop.
 //
@@ -128,9 +130,10 @@ const lastReply = () => page.locator('[data-reply-scope]').last()
 const box = page.locator('div.rounded-lg.bg-surface').filter({ has: page.locator('button[aria-expanded]', { hasText: /^\s*(Computer|Browser)/ }) }).last()
 
 try {
-  if (scale !== '1') await app.evaluate(({ BrowserWindow }, k) => {
+  // The zoom is always set: Chromium keeps one per origin, so a scale-2 run's could carry over.
+  await app.evaluate(({ BrowserWindow }, k) => {
     const w = BrowserWindow.getAllWindows().find((w) => w.webContents.getURL().includes('index.html'))
-    w.setSize(1600, 1000)
+    if (k !== 1) w.setSize(1600, 1000)
     w.webContents.setZoomFactor(k)
   }, Number(scale))
   await sleep(400)
@@ -179,6 +182,20 @@ try {
   await shot('run-live-open', box, 10, { bottom: 34 })
   await until(async () => (await lastReply().innerText()).includes('report file was not there'), 'the second run ends', 20_000)
 
+  // Pauses with no tool running before the first step: the Computer line stays up throughout,
+  // never swapped for "Thinking" and back.
+  await send('Please do a pause run')
+  await until(async () => (await lastReply().locator('[data-step-line]').count()) > 0, 'the pause run starts')
+  const pauseProbe = async () =>
+    lastReply().evaluate((el) => ({
+      thinking: !!el.querySelector('.thinking'),
+      line: el.querySelector('[data-step-line]')?.innerText ?? null,
+      layers: el.querySelector('[data-step-line]')?.children.length ?? 0
+    }))
+  const pauseRect = await around(lastReply(), 8, { bottom: 50 })
+  await sequence('pause', { ...pauseRect, height: 110 }, 40, 40, pauseProbe)
+  await until(async () => (await lastReply().innerText()).includes('Clicked it.'), 'the pause run ends')
+
   // The approval: arming, armed, and leaving.
   await send('Delete the old files')
   const card = page.locator('[data-computer-wait="approval"]:not([inert])')
@@ -195,9 +212,36 @@ try {
   )
   await until(async () => (await lastReply().innerText()).includes('Deleted them.'), 'approved')
 
-  // Denied: a neutral step, not a failure.
+  // Denied: a neutral step, not a failure. First, the card's arming: main sends the wait again on
+  // other changes (a new object each time); that must neither restart arming nor disarm Approve.
+  await app.evaluate(({ BrowserWindow }) => {
+    const w = BrowserWindow.getAllWindows().find((w) => w.webContents.getURL().includes('index.html'))
+    const send = w.webContents.send.bind(w.webContents)
+    w.webContents.send = (channel, payload) => {
+      if (channel === 'chat:event' && payload?.type === 'computer') globalThis.renderChatWait = payload.waiting
+      return send(channel, payload)
+    }
+  })
+  const pushWait = () =>
+    app.evaluate(({ BrowserWindow }) => {
+      const w = BrowserWindow.getAllWindows().find((w) => w.webContents.getURL().includes('index.html'))
+      w.webContents.send('chat:event', { type: 'computer', waiting: { ...globalThis.renderChatWait } })
+    })
+  const approveArmed = () => card.evaluate((el) => {
+    const b = [...el.querySelectorAll('button')].find((b) => b.textContent.includes('Approve'))
+    return !!b && !b.disabled && !b.querySelector('.cu-fill')
+  })
   await send('Delete them again')
   await card.waitFor()
+  const t0 = Date.now()
+  await sleep(300)
+  await pushWait()
+  await sleep(Math.max(0, t0 + 700 + 150 - Date.now()))
+  const armChecks = [{ pushAfter: 300, checkedAt: Date.now() - t0, armed: await approveArmed() }]
+  await pushWait()
+  await sleep(150)
+  armChecks.push({ pushAfter: Date.now() - t0 - 150, checkedAt: Date.now() - t0, armed: await approveArmed() })
+  sequences['arm-checks'] = armChecks
   await card.getByRole('button', { name: /Deny/ }).click()
   await until(async () => (await lastReply().innerText()).includes('Left them alone.'), 'denied')
   await sleep(400)
@@ -236,4 +280,6 @@ try {
   writeFileSync(join(outDir, 'sequences.json'), JSON.stringify(sequences, null, 1))
   await app.close()
 }
+const rearmed = (sequences['arm-checks'] ?? []).filter((c) => !c.armed)
+if (rearmed.length) throw new Error(`a pushed wait re-armed the card's Approve: ${JSON.stringify(rearmed)}`)
 console.log(`Rendered the chat's computer-use parts (${theme}, @${scale}x) to ${outDir}`)

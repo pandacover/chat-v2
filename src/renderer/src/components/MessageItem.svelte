@@ -38,6 +38,47 @@
   const computerRun = $derived(streaming && app.chat.computerEnabled && app.computerSupported)
   /** The computer tool this reply runs now; while a card asks something, the card says it. */
   const doing = $derived(streaming && !wait ? (app.computerDoing.get(message.id) ?? null) : null)
+  /**
+   * The wait the card shows. A Show-me step that ends is held WAIT_HOLD ms (inert), so a next step
+   * that follows at once updates the same card instead of folding it away and back in.
+   */
+  const WAIT_HOLD = 200
+  let shownWait = $state(untrack(() => wait))
+  let waitHeld = $state(false)
+  let waitRelease: ReturnType<typeof setTimeout> | undefined
+  $effect.pre(() => {
+    const w = wait
+    untrack(() => {
+      clearTimeout(waitRelease)
+      if (w || shownWait?.kind !== 'teach' || !streaming) {
+        shownWait = w
+        waitHeld = false
+        return
+      }
+      waitHeld = true
+      waitRelease = setTimeout(() => {
+        shownWait = null
+        waitHeld = false
+      }, WAIT_HOLD)
+    })
+  })
+  $effect(() => () => clearTimeout(waitRelease))
+  /**
+   * The Computer line before the reply's first step lands. Once up it stays (as "Working") until
+   * that step is in, so a moment between tools, with nothing running, doesn't swap it for
+   * "Thinking" and back.
+   */
+  const hasSteps = $derived(blocks.some((b) => b.type === 'steps'))
+  let computerLatched = $state(false)
+  $effect.pre(() => {
+    const on = streaming && (app.control.active || !!doing) && !hasSteps
+    const still = streaming
+    untrack(() => {
+      if (!still) computerLatched = false
+      else if (on) computerLatched = true
+    })
+  })
+  const placeholder = $derived(streaming && blocks.at(-1)?.type !== 'steps' && (app.control.active || !!doing || (computerLatched && !hasSteps)))
   /** Doing it, or showing how: read from the message, and switchable while the reply runs. */
   const mode = $derived(computerRun ? (app.computerModes.get(message.id) ?? null) : null)
   // The turn you just sent slides in; opening, switching or forking a chat renders still.
@@ -255,9 +296,9 @@
       </div>
     {/if}
 
-    {#if wait}
-      <ComputerWaitCard {wait} />
-    {:else if streaming && (app.control.active || doing) && blocks.at(-1)?.type !== 'steps'}
+    {#if shownWait}
+      <ComputerWaitCard wait={shownWait} held={waitHeld} />
+    {:else if placeholder}
       <StepList steps={[]} live running {doing} />
     {:else if streaming && blocks.length === 0}
       <div class="thinking py-1 text-[13.5px]" aria-live="polite">Thinking</div>

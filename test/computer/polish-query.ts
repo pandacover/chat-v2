@@ -22,6 +22,14 @@ const script: Script = async function* (t) {
     await sleep(300)
     yield* t.tool('mcp__computer__click', { x: 300, y: 200 })
     yield* t.text('Typed the numbers in; the report file was not there.')
+  } else if (prompt.includes('pause run')) {
+    // Moments with no tool running before the first step lands: the Computer line must stay.
+    yield* t.tool('mcp__computer__look_at_screen')
+    await sleep(600)
+    yield* t.tool('mcp__computer__wait', { seconds: 0.4 })
+    await sleep(600)
+    yield* t.tool('mcp__computer__click', { x: 120, y: 80 })
+    yield* t.text('Clicked it.')
   } else if (prompt.includes('show me')) {
     // A step's x, y are pixels of the last screenshot, so it looks first.
     yield* t.tool('mcp__computer__look_at_screen')
