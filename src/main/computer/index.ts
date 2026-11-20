@@ -54,6 +54,12 @@ export interface ComputerUseApi {
   readonly approve: (id: string, approved: boolean) => Effect.Effect<void>
   /** Ends the Show-me step `id`: done (the default), or what the user typed instead. */
   readonly teachDone: (id: string, outcome?: Exclude<TeachOutcome, { kind: 'stopped' }>) => Effect.Effect<void>
+  /**
+   * Point is on (the overlay covers a display and takes every click) or over. Meanwhile a reply's
+   * input stops as a takeover, and presses don't count as a click inside a Show-me spotlight
+   * (nor one just after, from the click that finished the mark).
+   */
+  readonly pointing: (on: boolean) => void
 }
 
 export interface ComputerUseOptions {
@@ -78,6 +84,8 @@ export const CLICK_POLL_MS = 100
 export const CLICK_SETTLE_MS = 600
 /** A click this close outside the control (input pixels) still counts: the spotlight's own padding. */
 const CLICK_SLOP = 6
+/** After Point ends, presses this recent are still Point's (the poll may read the finishing click late). */
+export const POINT_GRACE_MS = 400
 
 const make = (o: ComputerUseOptions): ComputerUseApi => {
   const p = o.platform
@@ -150,6 +158,10 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
    * (not on the overlay's callout) counts as done once the app has had CLICK_SETTLE_MS to react.
    */
   let clicks: { id: string; timer: ReturnType<typeof setInterval> } | null = null
+  /** Point is on, or when it last ended. */
+  let pointing = false
+  let pointEndedAt = 0
+  const pointsNow = () => pointing || Date.now() - pointEndedAt < POINT_GRACE_MS
   const unwatchClicks = () => {
     if (clicks) clearInterval(clicks.timer)
     clicks = null
@@ -168,7 +180,7 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
       if (busy) return
       busy = true
       void (async () => {
-        if (!(await pressed()) || overlay.pointerOnControl?.()) return
+        if (!(await pressed()) || overlay.pointerOnControl?.() || pointsNow()) return
         const c = await p.cursor()
         const r = interaction.teachTarget()
         if (r?.id !== id || clicks?.id !== id) return
@@ -346,7 +358,17 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
       return () => void doingListeners.delete(f)
     },
     approve: (id, approved) => Effect.asVoid(interaction.resolveApproval(id, approved)),
-    teachDone: (id, outcome = { kind: 'done' }) => Effect.asVoid(interaction.resolveTeach(outcome, id))
+    teachDone: (id, outcome = { kind: 'done' }) => Effect.asVoid(interaction.resolveTeach(outcome, id)),
+    pointing: (on) => {
+      if (on === pointing) return
+      pointing = on
+      if (!on) pointEndedAt = Date.now()
+      control?.hold(on)
+      if (on && acting) {
+        acting = null
+        draw()
+      }
+    }
   }
 }
 

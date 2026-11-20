@@ -355,7 +355,11 @@ app.whenReady().then(async () => {
       overlay,
       ...pointDeps,
       attach: (file) => Effect.runPromise(attachments.add(file)),
-      tell: (e) => broadcaster.send({ type: 'point', ...e })
+      tell: (e) => {
+        // While the user points, a computer reply's input would land on Point's layer: it pauses.
+        computer.pointing(e.active)
+        broadcaster.send({ type: 'point', ...e })
+      }
     })
   }
 

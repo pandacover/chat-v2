@@ -41,6 +41,8 @@ export const typeChunks = (text: string, size = TYPE_CHUNK): string[] => {
 export const makeControl = (p: Platform) => {
   let shot: Pick<Screenshot, 'imageWidth' | 'imageHeight' | 'screen' | 'window'> | null = null
   let leftAt: { x: number; y: number } | null = null
+  /** The user is pointing at the screen (Point): the overlay takes every click, so no input meanwhile. */
+  let held = false
   const names = new Map<number, string>()
   let gate = new AbortController()
 
@@ -71,6 +73,11 @@ export const makeControl = (p: Platform) => {
       return yield* new ControlError({
         message: `"${fg.title || fg.process}" is running as administrator, so Windows blocks chat-v2's input to it. Tell the user; they can run chat-v2 as administrator to allow it.`
       })
+    }
+    // Input now would land on Point's layer: the user has the screen, as after a takeover.
+    if (held) {
+      leftAt = null
+      return yield* new UserTookOver()
     }
     if (leftAt) {
       const now = yield* lift(() => p.cursor())
@@ -181,6 +188,8 @@ export const makeControl = (p: Platform) => {
         yield* preflight
         for (const part of typeChunks(text)) {
           yield* checkpoint
+          // Point started mid-run: the rest would type into its layer.
+          if (held) return yield* new UserTookOver()
           yield* lift(() => p.type(part))
         }
       }),
@@ -232,6 +241,10 @@ export const makeControl = (p: Platform) => {
     /** Forget where we left the cursor (a new user turn, or the user just acted). */
     resetTakeover: () => {
       leftAt = null
+    },
+    /** While the user points at the screen (Point), every action stops as a takeover. */
+    hold: (on: boolean) => {
+      held = on
     },
     /** Forget the last screenshot (a new user turn): the screen may have changed since, so coordinates need a fresh look. */
     forgetShot: () => {

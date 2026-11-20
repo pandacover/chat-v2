@@ -301,6 +301,8 @@ try {
     globalThis.e2ePointer = { x: b.x + 300, y: b.y + 200 }
   })
   const pointButton = page.getByRole('button', { name: 'Point', exact: true })
+  // Clicks the scripted replies made before; Point must add none.
+  const clicksBeforePoint = fake('click').length
   ok((await pointButton.count()) === 1, 'the composer has a Point button while computer use is on')
   await pointButton.hover()
   await sleep(700)
@@ -384,7 +386,7 @@ try {
   const k = Math.min(1, 1024 / w)
   const expect = { x: Math.round(455 * scale * k), y: Math.round(316 * scale * k) }
   ok(Math.abs(Number(m[1]) - expect.x) <= 1 && Math.abs(Number(m[2]) - expect.y) <= 1, `in the same pixels the tools take (expected ${expect.x}, ${expect.y})`)
-  ok(fake('click').length === 3, 'Point itself never clicked anything')
+  ok(fake('click').length === clicksBeforePoint, 'Point itself never clicked anything')
 
   // A dragged box, and removing one of its chips removes both.
   await pointButton.click()

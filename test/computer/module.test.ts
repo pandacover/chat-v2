@@ -9,6 +9,7 @@ import {
   CLICK_STEP,
   MAX_TASK_READS,
   MAX_TASK_TOOLS,
+  POINT_GRACE_MS,
   STOPPED_TEXT,
   builtinStep,
   decideMode,
@@ -793,6 +794,55 @@ describe('user controls', () => {
     await typing
     expect(['Click Display', 'Select Dark', 'Turn on Night light', 'Open the File menu'].every((s) => CLICK_STEP.test(s))).toBe(true)
     expect(['Type your name', 'Drag the slider', 'Press Ctrl+S', 'Scroll down'].some((s) => CLICK_STEP.test(s))).toBe(false)
+  })
+
+  test("while the user points (Point), input stops as a takeover and presses aren't spotlight clicks", async () => {
+    let down = false
+    let typed = 0
+    const h = await harness({
+      pressed: async () => {
+        const v = down
+        down = false
+        return v
+      },
+      type: async () => {
+        typed++
+        await sleep(20)
+      }
+    })
+    const r = await h.reply()
+    await r.tool('look_at_screen')
+    expect(textOf(await r.tool('click', { x: 50, y: 50 }))).not.toContain('taken over')
+    h.cu.pointing(true)
+    expect(textOf(await r.tool('click', { x: 60, y: 60 }))).toContain('they have taken over')
+    // A typing run under way stops at its next chunk.
+    h.cu.pointing(false)
+    const typing = r.tool('type_text', { text: 'x'.repeat(2000) })
+    await until(() => typed > 0)
+    h.cu.pointing(true)
+    expect(textOf(await typing)).toContain('they have taken over')
+    expect(typed).toBeLessThan(5)
+    h.cu.pointing(false)
+    await r.mod.end!()
+    // Show-me: a press while pointing, or the finishing click read just after, doesn't end a click step.
+    h.setMode('teach')
+    const t = await h.reply()
+    await t.tool('look_at_screen')
+    const step = t.tool('teach_step', { instruction: 'Click Display', step: 1, total: 1, element: 4 })
+    await until(() => h.cu.waiting()?.kind === 'teach')
+    await sleep(150)
+    h.moveMouse(110, 105)
+    h.cu.pointing(true)
+    down = true
+    await sleep(250)
+    expect(h.cu.waiting()?.kind).toBe('teach')
+    h.cu.pointing(false)
+    down = true
+    await sleep(250)
+    expect(h.cu.waiting()?.kind).toBe('teach')
+    await sleep(POINT_GRACE_MS)
+    down = true
+    expect(textOf(await step)).toContain('The user clicked the highlighted control')
   })
 
   test('the spotlight follows its control while the step waits', async () => {
