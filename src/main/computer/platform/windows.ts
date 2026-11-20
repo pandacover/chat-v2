@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, extname, join } from 'node:path'
 import { HOST_CS, HOST_PS1 } from './hostSource'
-import type { FileHit, Platform, ScreenRect, SearchQuery, Screenshot, UiElement, WindowInfo } from './types'
+import type { FileHit, FocusedControl, Platform, ScreenRect, SearchQuery, Screenshot, UiElement, WindowInfo } from './types'
 
 interface HostWindow {
   title: string
@@ -68,6 +68,8 @@ interface HostMsg {
 export const hostTimeout = (method: string, params: Record<string, unknown> = {}): number => {
   if (method === 'sleep') return Number(params['ms'] ?? 100) + 10_000
   if (method === 'uiTree' || method === 'elementAt' || method === 'sql') return 30_000
+  // Only a note after an action: a slow app shouldn't hold the reply up for long.
+  if (method === 'focused') return 5_000
   return 15_000
 }
 
@@ -271,18 +273,27 @@ export const makeWindowsPlatform = (opts: {
     foreground: async () => toWindow(await call<HostWindow>('foreground')),
     windows: async () => (await call<HostWindow[]>('windows')).map((w) => ({ ...toWindow(w), minimized: !!w.minimized })),
     focusWindow: async (title) => toWindow(await call<HostWindow>('focusWindow', { title })),
-    screenshot: async (maxWidth) => {
-      const s = await call<Omit<Screenshot, 'window'> & { window: HostWindow }>('screenshot', { maxWidth })
+    screenshot: async (maxWidth, o = {}) => {
+      const r = o.region
+      const region = r ? { rx: Math.round(r.x), ry: Math.round(r.y), rw: Math.max(1, Math.round(r.width)), rh: Math.max(1, Math.round(r.height)) } : {}
+      const s = await call<Omit<Screenshot, 'window'> & { window: HostWindow }>('screenshot', { maxWidth, ...(o.maxHeight ? { maxHeight: o.maxHeight } : {}), ...region })
       return { ...s, window: toWindow(s.window) }
     },
     cursor: () => call('cursor'),
-    click: async (x, y, button, count) => void (await call('click', { x, y, button, count })),
+    move: async (x, y) => void (await call('move', { x: Math.round(x), y: Math.round(y) })),
+    click: async (x, y, button, count, modifiers = []) => void (await call('click', { x, y, button, count, ...(modifiers.length ? { mods: modifiers.join(',') } : {}) })),
     drag: async (x1, y1, x2, y2) => void (await call('drag', { x1, y1, x2, y2 })),
     scroll: async (x, y, dy, dx) => void (await call('scroll', { x, y, dy, dx })),
     type: async (text) => void (await call('type', { text })),
     keys: async (combo) => void (await call('keys', { combo })),
-    uiTree: async (max) => {
-      const r = await call<{ window: HostWindow; elements: UiElement[]; truncated?: boolean }>('uiTree', { max, firstId: nextElementId })
+    otherWindows: true,
+    focused: () => call<FocusedControl | null>('focused'),
+    uiTree: async (max, o = {}) => {
+      const r = await call<{ window: HostWindow; elements: UiElement[]; truncated?: boolean }>('uiTree', {
+        max,
+        firstId: nextElementId,
+        ...(o.window?.trim() ? { title: o.window.trim() } : {})
+      })
       for (const e of r.elements) nextElementId = Math.max(nextElementId, e.id + 1)
       return { window: toWindow(r.window), elements: r.elements, ...(r.truncated ? { truncated: true } : {}) }
     },

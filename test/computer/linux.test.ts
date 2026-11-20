@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   buildFindArgs,
+  clickArgs,
   completeLines,
+  importArgs,
   jpegSize,
   linuxSupported,
   makeLinuxPlatform,
@@ -90,6 +92,19 @@ describe('linux parsers', () => {
     // Unknown names pass through for xdotool to reject (the platform treats that as an error).
     expect(toXdotoolKeys('XF86AudioPlay')).toEqual(['XF86AudioPlay'])
     expect(() => toXdotoolKeys('  ')).toThrow()
+  })
+
+  test('screenshot arguments: the whole screen or a region, fitted, never enlarged', () => {
+    expect(importArgs(1024)).toEqual(['-silent', '-window', 'root', '-resize', '1024x>', '-quality', '80', 'jpg:-'])
+    expect(importArgs(1024, { region: { x: 10.4, y: 20, width: 300, height: 200.6 }, maxHeight: 768 })).toEqual([
+      '-silent', '-window', 'root', '-crop', '300x201+10+20', '+repage', '-resize', '1024x768>', '-quality', '80', 'jpg:-'
+    ])
+  })
+
+  test('click arguments: modifiers are pressed around the clicks and released after, triple at most', () => {
+    expect(clickArgs(5, 6, 'left', 1)).toEqual(['click', '--repeat', '1', '--delay', '80', '1'])
+    expect(clickArgs(5, 6, 'right', 9, ['ctrl', 'shift', 'ctrl'])).toEqual(['keydown', 'ctrl', 'shift', 'click', '--repeat', '3', '--delay', '80', '3', 'keyup', 'shift', 'ctrl'])
+    expect(clickArgs(5, 6, 'left', 2, ['cmd', 'alt'])).toEqual(['keydown', 'super', 'alt', 'click', '--repeat', '2', '--delay', '80', '1', 'keyup', 'alt', 'super'])
   })
 
   test('typing: ASCII runs as text, non-ASCII runs as keys, capitals with Shift', () => {

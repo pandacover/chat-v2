@@ -22,9 +22,22 @@ export interface Screenshot {
   mime: 'image/jpeg' | 'image/png'
   imageWidth: number
   imageHeight: number
+  /** The rect captured, in input space: the monitor, or the region asked for. */
   screen: ScreenRect
   window: WindowInfo
+  /** The pointer, in input space, where the platform reads it with the capture (it is drawn into the image). */
+  cursor?: { x: number; y: number }
 }
+
+export interface ShotOptions {
+  /** Capture only this rect (input space) instead of the target window's monitor. */
+  region?: ScreenRect
+  /** Shrink the image to fit this height too (the width always fits `maxWidth`). Never enlarged. */
+  maxHeight?: number
+}
+
+/** Modifier keys held during a click. `cmd` is Command on macOS, Ctrl on Windows, Super on Linux (as in key combos). */
+export type Modifier = 'ctrl' | 'shift' | 'alt' | 'cmd'
 
 export interface UiElement {
   id: number
@@ -35,6 +48,21 @@ export interface UiElement {
   width: number
   height: number
   disabled?: boolean
+  /** The control's text or value (fields, combo boxes, sliders), cut short by the platform. Never for password fields. */
+  value?: string
+  /** Check boxes and toggles. */
+  checked?: boolean | 'mixed'
+  /** List items, tabs, radio buttons: only reported when selected. */
+  selected?: boolean
+  /** Menus, combo boxes, tree items: absent when the control can't expand. */
+  expanded?: boolean
+}
+
+/** The control with keyboard focus. */
+export interface FocusedControl {
+  type: string
+  name: string
+  value?: string
 }
 
 export interface SearchQuery {
@@ -69,9 +97,12 @@ export interface Platform {
   foreground(): Promise<WindowInfo>
   windows(): Promise<ReadonlyArray<WindowInfo & { minimized?: boolean }>>
   focusWindow(title: string): Promise<WindowInfo>
-  screenshot(maxWidth: number): Promise<Screenshot>
+  screenshot(maxWidth: number, opts?: ShotOptions): Promise<Screenshot>
   cursor(): Promise<{ x: number; y: number }>
-  click(x: number, y: number, button: 'left' | 'right' | 'middle', count: number): Promise<void>
+  /** Move the pointer without pressing anything (hover). */
+  move(x: number, y: number): Promise<void>
+  /** `count` 1-3 (double, triple click); `modifiers` are held down for the clicks and always released. */
+  click(x: number, y: number, button: 'left' | 'right' | 'middle', count: number, modifiers?: ReadonlyArray<Modifier>): Promise<void>
   drag(x1: number, y1: number, x2: number, y2: number): Promise<void>
   scroll(x: number, y: number, dy: number, dx: number): Promise<void>
   type(text: string): Promise<void>
@@ -80,7 +111,14 @@ export interface Platform {
    * `truncated`: the time budget or `max` cut the search short. Element ids are never reused
    * while the app runs: an id from an older list is the same control, or it fails as stale.
    */
-  uiTree(max: number): Promise<{ window: WindowInfo; elements: ReadonlyArray<UiElement>; truncated?: boolean }>
+  uiTree(max: number, opts?: { window?: string }): Promise<{ window: WindowInfo; elements: ReadonlyArray<UiElement>; truncated?: boolean }>
+  /**
+   * `uiTree`'s `window` (part of a window title, or an app name) picks a window other than the
+   * active one. True where that works; absent means only the active window can be read.
+   */
+  readonly otherWindows?: boolean
+  /** The control with keyboard focus in the target app, where it's cheap to read (absent: unknown). */
+  focused?(): Promise<FocusedControl | null>
   invoke(id: number): Promise<string>
   /**
    * Put text in an element. A text field's text is replaced: "set" (UI Automation, focus didn't

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildMdfindQuery, makeElementIds } from '../../src/main/computer/platform/macos'
+import { buildMdfindQuery, macCombo, makeElementIds, mouseFlags } from '../../src/main/computer/platform/macos'
 import { HOST_CS, HOST_PS1 } from '../../src/main/computer/platform/hostSource'
 import type { ScreenRect, UiElement } from '../../src/main/computer/platform/types'
 import { HostTimeout, buildSearchSql, hostTimeout, installHost, makeHostChannel, makeWindowsPlatform, startHost } from '../../src/main/computer/platform/windows'
@@ -146,6 +146,26 @@ describe('element ids (macOS registry)', () => {
   })
 })
 
+describe('macOS input helpers', () => {
+  test('key combos: key codes, single characters, punctuation by name, plus; words that are no key fail', () => {
+    expect(macCombo('cmd+shift+left')).toEqual({ mods: ['command down', 'shift down'], code: 123 })
+    expect(macCombo('ctrl+/')).toEqual({ mods: ['control down'], char: '/' })
+    expect(macCombo('cmd+plus')).toEqual({ mods: ['command down'], char: '+' })
+    expect(macCombo('cmd++')).toEqual({ mods: ['command down'], char: '+' })
+    expect(macCombo('+')).toEqual({ mods: [], char: '+' })
+    expect(macCombo('cmd+bracketleft')).toEqual({ mods: ['command down'], char: '[' })
+    expect(() => macCombo('cmd+banana')).toThrow('Unknown key "banana"')
+    expect(() => macCombo('cmd+a+b')).toThrow('one key at a time')
+    expect(() => macCombo('cmd+shift')).toThrow('No key')
+  })
+
+  test('click modifiers become CGEvent flags', () => {
+    expect(mouseFlags([])).toBe(0)
+    expect(mouseFlags(['cmd'])).toBe(0x100000)
+    expect(mouseFlags(['shift', 'alt', 'ctrl'])).toBe(0x20000 | 0x80000 | 0x40000)
+  })
+})
+
 describe('host install', () => {
   test('writes the inlined scripts once into a folder named by their hash', () => {
     const base = mkdtempSync(join(tmpdir(), 'cv2-host-'))
@@ -221,6 +241,62 @@ describe.skipIf(process.platform !== 'win32')('windows host process', () => {
           `[host] screenshot ${Math.round(shot.ms)} ms (${shot.v.imageWidth}x${shot.v.imageHeight} of ${shot.v.screen.width}x${shot.v.screen.height}, "${shot.v.window.title.slice(0, 40)}"), ` +
             `windows ${Math.round(wins.ms)} ms (${wins.v.length}), ui tree ${Math.round(tree.ms)} ms (${tree.v.elements.length}), ` +
             `element at ${Math.round(at.ms)} ms, search ${Math.round(search.ms)} ms (${search.v.length})`
+        )
+      } finally {
+        host.stop()
+      }
+    },
+    120_000
+  )
+
+  test(
+    'read-only: region shots, the pointer, control state, another window, focus, key names',
+    async () => {
+      const host = startHost(installHost(base), process.pid)
+      try {
+        type Shot = { data: string; imageWidth: number; imageHeight: number; screen: ScreenRect; cursor?: { x: number; y: number } }
+        const full = await host.call<Shot>('screenshot', { maxWidth: 1024 })
+        expect(full.cursor && typeof full.cursor.x).toBe('number')
+        // A region of the monitor: its own rect, at most 1:1, inside the box asked for.
+        const region = { rx: full.screen.x + 10, ry: full.screen.y + 20, rw: 300, rh: 200 }
+        const z = await timed(host.call<Shot>('screenshot', { maxWidth: 1024, maxHeight: 768, ...region }))
+        expect(z.v.screen).toEqual({ x: region.rx, y: region.ry, width: 300, height: 200 })
+        expect([z.v.imageWidth, z.v.imageHeight]).toEqual([300, 200])
+        expect(Buffer.from(z.v.data, 'base64').subarray(0, 2).toString('hex')).toBe('ffd8')
+        const tall = await host.call<Shot>('screenshot', { maxWidth: 1024, maxHeight: 100, rx: full.screen.x, ry: full.screen.y, rw: 400, rh: 400 })
+        expect([tall.imageWidth, tall.imageHeight]).toEqual([100, 100])
+        // Control state comes with the right types where the app reports it.
+        const tree = await host.call<{ elements: UiElement[] }>('uiTree', { max: 200 })
+        for (const e of tree.elements) {
+          if (e.value !== undefined) expect(typeof e.value).toBe('string')
+          if (e.checked !== undefined) expect([true, false, 'mixed']).toContain(e.checked)
+          if (e.selected !== undefined) expect(e.selected).toBe(true)
+          if (e.expanded !== undefined) expect(typeof e.expanded).toBe('boolean')
+        }
+        const states = tree.elements.filter((e) => e.value !== undefined || e.checked !== undefined || e.selected || e.expanded !== undefined).length
+        // Another window, by part of its title, without focusing it.
+        const wins = await host.call<Array<{ title: string; process: string; minimized: boolean }>>('windows')
+        const other = wins.find((w) => !w.minimized && w.title.length > 3)
+        let otherCount = -1
+        if (other) {
+          const t = await host.call<{ window: { title: string }; elements: UiElement[] }>('uiTree', { max: 40, title: other.title.slice(0, 20) })
+          expect(t.window.title.toLowerCase()).toContain(other.title.slice(0, 20).toLowerCase())
+          otherCount = t.elements.length
+        }
+        const none = (await host.call('uiTree', { max: 5, title: 'no window is called this 7f3a' }).catch((e: Error) => e)) as Error
+        expect(none.message).toContain('No open window matches')
+        const focus = await host.call<{ type: string; name: string } | null>('focused')
+        expect(focus === null || typeof focus.type === 'string').toBe(true)
+        // Key names: parsed only, nothing is pressed.
+        expect(await host.call('parseKeys', { combo: 'ctrl+/' })).toEqual([0x11, 0xbf])
+        expect(await host.call('parseKeys', { combo: 'ctrl++' })).toEqual([0x11, 0xbb])
+        expect(await host.call('parseKeys', { combo: '+' })).toEqual([0xbb])
+        expect(await host.call('parseKeys', { combo: 'Ctrl + Shift + T' })).toEqual([0x11, 0x10, 0x54])
+        expect(await host.call('parseKeys', { combo: 'ctrl+`' })).toEqual([0x11, 0xc0])
+        expect(await host.call('parseKeys', { combo: 'alt+[' })).toEqual([0x12, 0xdb])
+        expect(((await host.call('parseKeys', { combo: 'ctrl+banana' }).catch((e: Error) => e)) as Error).message).toContain('Unknown key "banana"')
+        console.log(
+          `[host] region shot ${Math.round(z.ms)} ms, ${tree.elements.length} controls (${states} with state), other window "${other?.title.slice(0, 30)}" ${otherCount} controls, focus ${focus ? `${focus.type} "${focus.name.slice(0, 30)}"` : 'none'}`
         )
       } finally {
         host.stop()

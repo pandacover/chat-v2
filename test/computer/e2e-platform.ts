@@ -17,6 +17,10 @@ export const platform: Platform = {
   // A 1920x1080 screen captured down to 1024x576.
   screenshot: async () => ({ data: '', mime: 'image/jpeg', imageWidth: 1024, imageHeight: 576, screen: { x: 0, y: 0, width: 1920, height: 1080 }, window: win }),
   cursor: async () => cursor,
+  move: async (x, y) => {
+    log(`move ${x},${y}`)
+    cursor = { x, y }
+  },
   click: async (x, y, button, count) => {
     log(`click ${x},${y} ${button} x${count}`)
     cursor = { x, y }

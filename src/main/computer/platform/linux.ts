@@ -15,7 +15,7 @@ import { accessSync, constants, existsSync, readdirSync, readFileSync, statSync 
 import { readFile, readlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, delimiter, dirname, extname, join, resolve as resolvePath } from 'node:path'
-import type { FileHit, Platform, SearchQuery, WindowInfo } from './types'
+import type { FileHit, Modifier, Platform, SearchQuery, ShotOptions, WindowInfo } from './types'
 
 /** Computer use needs an X11 display; Wayland sessions (even with XWayland's DISPLAY) are not supported. */
 export const linuxSupported = (env: NodeJS.ProcessEnv = process.env) => {
@@ -170,6 +170,26 @@ const PUNCT: Record<string, string> = {
 const MODS: Record<string, string> = {
   ctrl: 'ctrl', control: 'ctrl', alt: 'alt', option: 'alt', opt: 'alt', shift: 'shift',
   win: 'super', windows: 'super', super: 'super', cmd: 'super', command: 'super', meta: 'super'
+}
+
+/**
+ * ImageMagick `import` arguments: the whole X screen, or a region of it (`-crop`), shrunk to fit
+ * `maxWidth` (and `maxHeight`), never enlarged.
+ */
+export const importArgs = (maxWidth: number, o: ShotOptions = {}): string[] => {
+  const r = o.region
+  const crop = r ? ['-crop', `${Math.max(1, Math.round(r.width))}x${Math.max(1, Math.round(r.height))}+${Math.max(0, Math.round(r.x))}+${Math.max(0, Math.round(r.y))}`, '+repage'] : []
+  const fit = `${Math.round(maxWidth)}x${o.maxHeight ? Math.round(o.maxHeight) : ''}>`
+  return ['-silent', '-window', 'root', ...crop, '-resize', fit, '-quality', '80', 'jpg:-']
+}
+
+/** xdotool arguments for a click with modifiers held: they go down first and always come back up. */
+export const clickArgs = (x: number, y: number, button: 'left' | 'right' | 'middle', count: number, modifiers: ReadonlyArray<Modifier> = []): string[] => {
+  const b = button === 'right' ? '3' : button === 'middle' ? '2' : '1'
+  const n = String(Math.min(3, Math.max(1, Math.round(count))))
+  const mods = [...new Set(modifiers.map((m) => MODS[m]!))]
+  const click = ['click', '--repeat', n, '--delay', '80', b]
+  return mods.length ? ['keydown', ...mods, ...click, 'keyup', ...mods.reverse()] : click
 }
 
 const unicodeKey = (c: string) => `U${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}`
@@ -569,8 +589,8 @@ export const makeLinuxPlatform = (opts: { ownerPid: number; track?: (p: ChildPro
     return { width: w, height: h }
   }
 
-  const capture = async (maxWidth: number): Promise<Buffer> => {
-    const args = ['-silent', '-window', 'root', '-resize', `${Math.round(maxWidth)}x>`, '-quality', '80', 'jpg:-']
+  const capture = async (maxWidth: number, o: ShotOptions = {}): Promise<Buffer> => {
+    const args = importArgs(maxWidth, o)
     try {
       return await runBuf('import', args)
     } catch (e) {
@@ -661,29 +681,35 @@ export const makeLinuxPlatform = (opts: { ownerPid: number; track?: (p: ChildPro
       }
       throw new Error(`No open window matches ${title}`)
     },
-    screenshot: async (maxWidth) => {
+    screenshot: async (maxWidth, o = {}) => {
       // chat-v2 can't be hidden from capture on Linux: show the app the user was in instead of the chat.
       const front = await active()
       if (front && own(front) && (await rememberedOrBelow())) {
         // If the app won't come forward, still take the screenshot.
         if (await bringBack().catch(soft)) await new Promise((r) => setTimeout(r, 150))
       }
-      const [screen, data] = await Promise.all([screenSize(), capture(maxWidth)])
+      const [screen, data] = await Promise.all([screenSize(), capture(maxWidth, o)])
       const { width: imageWidth, height: imageHeight } = jpegSize(data)
       return {
         data: data.toString('base64'),
         mime: 'image/jpeg',
         imageWidth,
         imageHeight,
-        screen: { x: 0, y: 0, ...screen },
+        screen: o.region ? { ...o.region } : { x: 0, y: 0, ...screen },
         window: await target()
       }
     },
     cursor: async () => parseMouse(await run('xdotool', ['getmouselocation', '--shell'])),
-    click: async (x, y, button, count) => {
-      const b = button === 'right' ? '3' : button === 'middle' ? '2' : '1'
-      const n = String(Math.max(1, Math.round(count)))
-      await act([...moveTo(x, y), 'click', '--repeat', n, '--delay', '80', b])
+    move: async (x, y) => void (await act(moveTo(x, y))),
+    click: async (x, y, button, count, modifiers = []) => {
+      const args = clickArgs(x, y, button, count, modifiers)
+      try {
+        await act([...moveTo(x, y), ...args])
+      } catch (e) {
+        // Never leave a modifier held down.
+        if (modifiers.length) await run('xdotool', ['keyup', ...modifiers.map((m) => MODS[m]!)]).catch(() => undefined)
+        throw e
+      }
     },
     drag: async (x1, y1, x2, y2) => {
       const args = [...moveTo(x1, y1), 'mousedown', '1']
