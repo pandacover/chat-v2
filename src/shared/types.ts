@@ -210,6 +210,8 @@ export type StreamEvent =
   | { type: 'computerDoing'; messageId: string; doing: ComputerDoing | null }
   /** The mode a running computer reply works in: decided from the message, or switched by the user. */
   | { type: 'computerMode'; messageId: string; mode: ComputerMode }
+  /** Point: the user is marking part of the screen (active), or finished; a finished mark brings its image and note for the next message. */
+  | { type: 'point'; active: boolean; attachments: Attachment[]; error?: string }
 
 export interface AppError {
   tag: string
@@ -307,6 +309,8 @@ export interface Api {
     teachDone(id: string): Promise<void>
     /** Switches a running computer reply between doing it and showing how, for the rest of it. */
     setMode(sessionId: string, messageId: string, mode: ComputerMode): Promise<void>
+    /** Starts Point (the user marks a spot or box on screen for the next message), or cancels the one under way. True once it is on. */
+    point(): Promise<boolean>
   }
   updates: {
     get(): Promise<UpdateState>

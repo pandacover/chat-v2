@@ -13,7 +13,12 @@ const script: Script = async function* (t) {
   const prompt = t.call.prompt.at(-1)?.text ?? ''
   yield* t.tool('mcp__computer__look_at_screen')
   const said = (r: { result: { content: Array<{ text?: string }> } | null }) => (r.result?.content ?? []).map((c) => c.text ?? '').join('')
-  if (prompt.includes('change the scale')) {
+  // A message with a Point attached: say back what came with it.
+  const note = t.call.prompt.find((b) => b.text?.startsWith('<file name="point-'))?.text
+  if (note) {
+    const images = t.call.prompt.filter((b) => b.type === 'image').length
+    yield* t.text(`Point note: ${note}\n\nImages: ${images}`)
+  } else if (prompt.includes('change the scale')) {
     // The callout's other ways out: "Can't find it", then "Do it for me", after which acting is allowed.
     for (;;) {
       const r = said(yield* t.tool('mcp__computer__teach_step', { instruction: 'Click Scale', step: 1, total: 2, element: 4 }))

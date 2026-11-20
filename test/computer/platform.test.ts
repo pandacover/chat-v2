@@ -235,6 +235,15 @@ describe.skipIf(process.platform !== 'win32')('windows host process', () => {
         expect(Array.isArray(tree.v.elements)).toBe(true)
         const at = await timed(host.call<ScreenRect | null>('elementAt', { x: shot.v.screen.x + 40, y: shot.v.screen.y + 40 }))
         expect(at.v === null || typeof at.v.width === 'number').toBe(true)
+        // The user's Point: the window under a point (past chat-v2's own), and its control if any.
+        const centre = { x: shot.v.screen.x + Math.round(shot.v.screen.width / 2), y: shot.v.screen.y + Math.round(shot.v.screen.height / 2) }
+        const pick = await timed(host.call<{ window: { title: string; process: string }; control: (ScreenRect & { type: string; name: string }) | null } | null>('pointAt', { ...centre, budgetMs: 600 }))
+        expect(pick.v === null || typeof pick.v.window.process === 'string').toBe(true)
+        if (pick.v?.control) {
+          expect(typeof pick.v.control.type).toBe('string')
+          expect(pick.v.control.x <= centre.x && centre.x < pick.v.control.x + pick.v.control.width).toBe(true)
+        }
+        console.log(`[host] point at ${Math.round(pick.ms)} ms: ${pick.v ? `${pick.v.window.process}, ${pick.v.control ? `${pick.v.control.type} "${pick.v.control.name.slice(0, 30)}"` : 'no control'}` : 'no window'}`)
         const search = await timed(host.call<unknown[]>('sql', { query: buildSearchSql({ extensions: ['pdf'], limit: 3 }) }))
         expect(Array.isArray(search.v)).toBe(true)
         console.log(

@@ -77,7 +77,8 @@ const api: Api = {
     waiting: () => call('computer:waiting'),
     approve: (id, approved) => call('computer:approve', id, approved),
     teachDone: (id) => call('computer:teachDone', id),
-    setMode: (sessionId, messageId, mode) => call('computer:setMode', sessionId, messageId, mode)
+    setMode: (sessionId, messageId, mode) => call('computer:setMode', sessionId, messageId, mode),
+    point: () => call('computer:point')
   },
   browser: {
     attach: (id) => call('browser:attach', id),

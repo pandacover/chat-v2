@@ -117,6 +117,29 @@ const renderInElectron = async (outDir: string) => {
   const moved = await box()
   console.log(`[overlay] pinned at ${pinned.x},${pinned.y} (${pinned.pinned}); next target elsewhere: ${kept.x},${kept.y} (${kept.pinned}); next target under it: ${moved.x},${moved.y} (${moved.pinned})`)
   overlay.show(false, null, null)
+  // Point mode, as main drives it, with synthetic pointer events in the hidden page: a hovered
+  // control (main's answer sent by hand), then a box being dragged.
+  const fire = (type: string, x: number, y: number, buttons = 0) =>
+    wc.executeJavaScript(
+      `document.querySelector('[data-point]').dispatchEvent(new PointerEvent(${JSON.stringify(type)}, { clientX: ${x}, clientY: ${y}, button: 0, buttons: ${buttons}, pointerId: 1, bubbles: true }))`
+    )
+  for (const theme of ['light', 'dark'] as const) {
+    nativeTheme.themeSource = theme
+    overlay.point(d)
+    wc.send('computer-overlay:point', { display: d.id })
+    await sleep(100)
+    await fire('pointermove', 460, 318)
+    await sleep(150)
+    wc.send('computer-overlay:point-hit', { x: 460, y: 318, control: { rect: { x: 400, y: 300, width: 120, height: 36 }, label: 'Button · Save' } })
+    await shoot(`point-hover-${theme}`, true)
+    // Drag a box; pointer capture needs a real pointer, so it is skipped in the page.
+    await wc.executeJavaScript(`Element.prototype.setPointerCapture = () => {}; 0`)
+    await fire('pointerdown', 360, 260, 1)
+    await fire('pointermove', 700, 420, 1)
+    await shoot(`point-box-${theme}`, true)
+    wc.send('computer-overlay:point', null)
+    overlay.point(null)
+  }
   console.log(`[overlay] ${d.bounds.width}x${d.bounds.height} @${d.scaleFactor}x, wrote PNGs to ${outDir}`)
   overlay.dispose()
   app.quit()

@@ -109,6 +109,16 @@ class AppState {
   computerModes = new SvelteMap<string, ComputerMode>()
   /** A Show-me step of the open chat waits: a message sent now answers it. */
   teaching = $derived(this.computerWait?.kind === 'teach' && this.computerWait.sessionId === this.view?.session.id)
+  /** Point is under way: the user is marking part of the screen for their next message. */
+  pointing = $state(false)
+  /** Bumped each time a finished Point adds its attachments, so the composer can take focus. */
+  pointAdded = $state(0)
+  /** Point's image and note belong together: removing one from the draft removes the other. */
+  private pointPairs = new Map<string, string>()
+  /** The attachment that came with `id` from the same Point, if any. */
+  pointPartner(id: string): string | undefined {
+    return this.pointPairs.get(id)
+  }
 
   private toastSeq = 0
   private backfilling = new Map<string, Promise<void>>()
@@ -533,6 +543,19 @@ class AppState {
     }
     if (e.type === 'computerMode') {
       this.computerModes.set(e.messageId, e.mode)
+      return
+    }
+    if (e.type === 'point') {
+      this.pointing = e.active
+      for (const a of e.attachments) this.addDraftAttachment(a)
+      const [first, second] = e.attachments
+      if (first && second) {
+        this.pointPairs.set(first.id, second.id)
+        this.pointPairs.set(second.id, first.id)
+      }
+      if (e.error) this.toast(e.error)
+      else if (e.attachments.length) this.toast('Added to your message', 'info')
+      if (e.attachments.length) this.pointAdded++
       return
     }
     if (e.type === 'title') {

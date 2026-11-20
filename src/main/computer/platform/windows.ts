@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, extname, join } from 'node:path'
 import { HOST_CS, HOST_PS1 } from './hostSource'
-import type { FileHit, FocusedControl, Platform, ScreenRect, SearchQuery, Screenshot, UiElement, WindowInfo } from './types'
+import type { FileHit, FocusedControl, Platform, PointHit, ScreenRect, SearchQuery, Screenshot, UiElement, WindowInfo } from './types'
 
 interface HostWindow {
   title: string
@@ -302,6 +302,10 @@ export const makeWindowsPlatform = (opts: {
     setValue: (id, text) => call('setValue', { id, text }),
     elementRect: (id) => call<ScreenRect>('elementRect', { id }),
     elementAt: (x, y) => call<ScreenRect | null>('elementAt', { x: Math.round(x), y: Math.round(y) }),
+    pointAt: async (x, y, budgetMs = 1500) => {
+      const r = await call<{ window: HostWindow; control: PointHit['control'] } | null>('pointAt', { x: Math.round(x), y: Math.round(y), budgetMs: Math.round(budgetMs) })
+      return r && { window: toWindow(r.window), control: r.control }
+    },
     search: async (q) => {
       const rows = await call<Array<Record<string, unknown>>>('sql', { query: buildSearchSql(q) })
       return rows.map((r): FileHit => {

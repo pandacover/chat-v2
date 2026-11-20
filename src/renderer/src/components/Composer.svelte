@@ -11,6 +11,7 @@
   import AttachmentChip from './AttachmentChip.svelte'
   import Icon from './Icon.svelte'
   import ModelPicker from './ModelPicker.svelte'
+  import PointButton from './PointButton.svelte'
 
   let {
     placeholder = 'Message',
@@ -123,8 +124,10 @@
   }
 
   const removeAttachment = (a: Attachment) => {
-    app.draftAttachments = app.draftAttachments.filter((x) => x.id !== a.id)
-    void window.api.attachments.discard(a.id)
+    // A Point's image and note go together.
+    const gone = new Set([a.id, app.pointPartner(a.id)].filter((id): id is string => !!id && app.draftAttachments.some((x) => x.id === id)))
+    app.draftAttachments = app.draftAttachments.filter((x) => !gone.has(x.id))
+    for (const id of gone) void window.api.attachments.discard(id)
   }
 
   const answer = async () => {
@@ -377,6 +380,7 @@
       >
         <Icon name="monitor" size={14} /><span class="hidden @sm:inline">Computer</span>
       </button>
+      {#if computerOn}<PointButton onadded={() => textarea?.focus()} />{/if}
     {/if}
     <span class="ml-auto"></span>
     <ModelPicker placement="up" value={model} onchange={onmodel} />
