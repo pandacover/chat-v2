@@ -85,7 +85,7 @@ export const toolDefs = (d: ToolDeps) => {
     label: string,
     detail: string,
     eff: Effect.Effect<CallToolResult, { readonly _tag: string; readonly message?: string }>,
-    opts: { acting?: boolean; quiet?: boolean; ok?: (r: CallToolResult) => boolean; detail?: () => string } = {}
+    opts: { acting?: boolean; quiet?: boolean; detail?: () => string; outcome?: () => 'denied' | null } = {}
   ): Promise<CallToolResult> => {
     if (d.control.stopped() || d.signal.aborted) return Promise.resolve(text(STOPPED_TEXT, true))
     if (!d.count()) return Promise.resolve(text(TOO_MANY_TEXT, true))
@@ -94,7 +94,9 @@ export const toolDefs = (d: ToolDeps) => {
       if (opts.quiet || marked) return
       marked = true
       const shown = opts.detail?.() ?? detail
-      d.step({ tool: `computer_${name}`, label, ok, ...(shown ? { detail: shown } : {}) })
+      const step: Step = { tool: `computer_${name}`, label, ok, ...(shown ? { detail: shown } : {}) }
+      // The user said no: shown neutrally, not as a failure.
+      d.step(ok && opts.outcome?.() === 'denied' ? { ...step, label: 'Denied', denied: true } : step)
     }
     if (opts.acting) d.setActing(true)
     const stopped = Effect.sync(() => {
@@ -104,7 +106,7 @@ export const toolDefs = (d: ToolDeps) => {
     return Effect.runPromise(
       eff.pipe(
         Effect.map((r) => {
-          mark(opts.ok ? opts.ok(r) : !r.isError)
+          mark(!r.isError)
           return r
         }),
         Effect.catch((e) =>
@@ -348,7 +350,7 @@ export const toolDefs = (d: ToolDeps) => {
         run(
           'scroll',
           'Scroll',
-          `${a.amount > 0 ? 'down' : 'up'} ${Math.abs(a.amount)}`,
+          `${a.horizontal ? (a.amount > 0 ? 'right' : 'left') : a.amount > 0 ? 'down' : 'up'} ${Math.abs(a.amount)}`,
           Effect.gen(function* () {
             const p = yield* d.control.toScreen(a.x, a.y)
             yield* d.control.scroll(p.x, p.y, a.horizontal ? 0 : a.amount, a.horizontal ? a.amount : 0)
@@ -440,6 +442,9 @@ export const toolDefs = (d: ToolDeps) => {
                   ? yield* pointTarget(a.x, a.y, a.width, a.height)
                   : null
             if (!rect) return text('Give an element id or x/y.', true)
+            // After the user typed or pressed Done in the chat, chat-v2 is in front: bring the
+            // target app back so the spotlit control isn't under the chat window.
+            yield* Effect.ignore(d.control.restoreFocus())
             const outcome = yield* d.interaction.teach(d.owner, { rect, instruction: a.instruction, step: a.step, total: a.total })
             d.control.resetTakeover()
             yield* d.interaction.clearTeach()
@@ -471,19 +476,22 @@ export const toolDefs = (d: ToolDeps) => {
         action: z.string().describe('One plain sentence, e.g. "Delete 3 files from Downloads"'),
         detail: z.string().describe('The exact target: file names, recipient, command')
       },
-      (a) =>
-        run(
+      (a) => {
+        let denied = false
+        return run(
           'ask_approval',
           'Approval',
           a.action,
           Effect.gen(function* () {
             d.setActing(false)
             const ok = yield* d.interaction.requestApproval(d.owner, a.action, a.detail)
+            denied = !ok
             return text(ok ? 'Approved. Go ahead.' : "Denied. Don't do it; ask what they'd like instead.")
           }),
-          // A denial is shown as a failed step.
-          { ok: (r) => r.content[0]?.type === 'text' && r.content[0].text.startsWith('Approved') }
-        ),
+          // A denial is the user's choice, not a failure: a neutral "Denied" step.
+          { outcome: () => (denied ? 'denied' : null) }
+        )
+      },
       { searchHint: 'approve confirm permission ask before delete send buy install' }
     ),
 

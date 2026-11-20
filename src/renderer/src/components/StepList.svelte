@@ -13,7 +13,7 @@
   const desktop = $derived(isDesktopRun(steps))
   const working = $derived(running && app.control.active)
   // What the folded line shows while the reply is still going: the action under way, else the last one.
-  const current = $derived<{ label: string; ok: boolean } | null>(
+  const current = $derived<{ label: string; ok: boolean; detail?: string } | null>(
     working ? { label: app.control.label || 'Working', ok: true } : (steps.at(-1) ?? null)
   )
 
@@ -34,14 +34,16 @@
       {:else if !open && current}
         <!-- Slot: each new action rolls in from below as the previous one rolls out above. -->
         <span class="ml-1 grid h-[1lh] min-w-0 flex-1 overflow-hidden text-[13px] leading-snug" aria-live="polite">
-          {#key current.label}
+          {#key `${current.label}
+${current.detail ?? ''}`}
             <span
               class="flex min-w-0 items-center gap-2 [grid-area:1/1] {current.ok ? 'text-fg-2' : 'text-danger'}"
               in:fly={{ y: 14, duration: 260 }}
               out:fly={{ y: -14, duration: 260 }}
             >
               <span class="size-1.5 shrink-0 rounded-full {working ? 'bg-accent [animation:rec-pulse_1.2s_ease-in-out_infinite]' : current.ok ? 'bg-muted' : 'bg-danger'}"></span>
-              <span class="truncate {working ? 'thinking' : ''}">{current.label}</span>
+              <!-- What it did and to what; the target is cut first when the line is short of room. -->
+              <span class="truncate {working ? 'thinking' : ''}">{current.label}{#if current.detail}<span class="text-muted"> · {current.detail}</span>{/if}</span>
             </span>
           {/key}
         </span>

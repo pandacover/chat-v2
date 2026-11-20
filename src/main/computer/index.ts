@@ -3,7 +3,7 @@
 // point; the driver adds `module(ctx, { mode })` to a reply, and the chat shows `subscribe`'s
 // waits (approvals and Show-me steps) and answers them with `approve` and `teachDone`.
 import { Context, Effect, Layer } from 'effect'
-import type { Step } from '@shared/steps'
+import { type Step, stepText } from '@shared/steps'
 import type { RunContext, ToolModule } from '../agent/module'
 import { makeControl } from './control'
 import { makeInteraction, type Owner, type TeachOutcome, type TeachTarget, type Waiting } from './interaction'
@@ -59,13 +59,16 @@ export interface ComputerUseOptions {
   readonly remember: (fact: string, ctx: RunContext) => Promise<void>
 }
 
+/** The notch is narrow: longer step lines are cut (it ellipsizes any remainder itself). */
+const NOTCH_MAX = 60
+
 const make = (o: ComputerUseOptions): ComputerUseApi => {
   const p = o.platform
   const overlay = o.overlay
   let acting: Owner | null = null
   let spot: TeachTarget | null = null
   let live = 0
-  /** The label of the last step a computer reply took, for the notch. */
+  /** The last step a computer reply took (what and to what), for the notch. */
   let lastStep: string | null = null
   /** The chat's Stop of each computer reply running now. */
   const stops = new Set<() => void>()
@@ -74,7 +77,7 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
     if (live === 0) return null
     const w = interaction.current()
     if (w?.kind === 'approval') return { text: 'Waiting for your OK', waiting: true }
-    if (w?.kind === 'teach') return { text: `Your turn · Step ${w.step} of ${w.total}`, waiting: true }
+    if (w?.kind === 'teach') return { text: `Your turn · ${stepText({ label: `Step ${w.step} of ${w.total}`, detail: w.instruction }, NOTCH_MAX)}`, waiting: true }
     return { text: lastStep ? `Working · ${lastStep}` : 'Working', waiting: false }
   }
   const draw = () => overlay.show(acting !== null, spot, activity())
@@ -119,7 +122,7 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
     let calls = 0
     const stopReply = opts.stop ?? (() => {})
     const step = (s: Step) => {
-      lastStep = s.label
+      lastStep = stepText(s, NOTCH_MAX)
       draw()
       void ctx.step(s).catch(() => undefined)
     }

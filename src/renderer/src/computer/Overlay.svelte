@@ -11,11 +11,20 @@
    */
   const bridge = (window as unknown as { computerOverlay: ComputerOverlayBridge }).computerOverlay
 
+  type Box = { x: number; y: number; w: number; h: number }
+  const PAD = 6
+  const holeOf = (r: { x: number; y: number; width: number; height: number }): Box => ({ x: r.x - PAD, y: r.y - PAD, w: r.width + PAD * 2, h: r.height + PAD * 2 })
+  const overlaps = (a: Box, b: Box) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+  /** Keeps a position 8 px inside the screen. */
+  const clamp = (v: number, max: number) => Math.min(Math.max(8, v), max - 8)
+
   let st = $state<OverlayState>({ acting: false, teach: null, notch: null })
   $effect(() =>
     bridge.onState((s) => {
-      // Where the user dragged the callout holds for the rest of the lesson; a lesson starts at step 1.
+      // Where the user dragged the callout holds for the rest of the lesson (a lesson starts at
+      // step 1), unless it would cover the next target.
       if (s.teach?.step === 1 && st.teach?.step !== 1) pin = null
+      if (pin && s.teach && calloutEl && overlaps({ x: pin.left, y: pin.top, w: calloutEl.offsetWidth, h: calloutEl.offsetHeight }, holeOf(s.teach.rect))) pin = null
       st = s
     })
   )
@@ -63,7 +72,6 @@
   }
   const onmove = (e: PointerEvent) => {
     if (!drag || !calloutEl) return
-    const clamp = (v: number, max: number) => Math.min(Math.max(8, v), max - 8)
     pin = { left: clamp(e.clientX - drag.dx, innerWidth - calloutEl.offsetWidth), top: clamp(e.clientY - drag.dy, innerHeight - calloutEl.offsetHeight) }
   }
   const onup = () => {
@@ -75,20 +83,31 @@
 
   const n = $derived(st.notch)
 
-  const PAD = 6
   const t = $derived(st.teach)
-  const hole = $derived(t ? { x: t.rect.x - PAD, y: t.rect.y - PAD, w: t.rect.width + PAD * 2, h: t.rect.height + PAD * 2 } : null)
+  const hole = $derived(t ? holeOf(t.rect) : null)
 
-  // Callout below the target if there's room, otherwise above; clamped to the screen.
+  /** Past this many steps the progress dashes would overflow the callout; the count alone says it. */
+  const MAX_DASHES = 8
   const CALLOUT_W = 320
+  const GAP = 12
+  /** The callout's rendered height (a guess until it has rendered once). */
+  let calloutH = $state(120)
+
+  // Below the target if there's room, else above, else beside it, else inside it; always on screen.
   const callout = $derived.by(() => {
     if (!hole) return null
     const vw = window.innerWidth
     const vh = window.innerHeight
-    const below = hole.y + hole.h + 12
-    const placeBelow = below + 120 < vh
+    const h = calloutH
     const left = Math.min(Math.max(16, hole.x), vw - CALLOUT_W - 16)
-    return placeBelow ? { left, top: below, below: true } : { left, bottom: vh - hole.y + 12, below: false }
+    const at = (l: number, top: number, side: 'below' | 'above' | 'beside' | 'inside') => ({ left: clamp(l, vw - CALLOUT_W), top: clamp(top, vh - h), side })
+    if (hole.y + hole.h + GAP + h + 8 <= vh) return at(left, hole.y + hole.h + GAP, 'below')
+    if (hole.y - GAP - h >= 8) return at(left, hole.y - GAP - h, 'above')
+    // Beside: level with the middle of the part of the target that's on screen.
+    const top = (Math.max(0, hole.y) + Math.min(vh, hole.y + hole.h)) / 2 - h / 2
+    if (hole.x + hole.w + GAP + CALLOUT_W + 8 <= vw) return at(hole.x + hole.w + GAP, top, 'beside')
+    if (hole.x - GAP - CALLOUT_W >= 8) return at(hole.x - GAP - CALLOUT_W, top, 'beside')
+    return at(hole.x + GAP, hole.y + GAP, 'inside')
   })
 </script>
 
@@ -104,14 +123,15 @@
   </div>
   <div
     class="callout"
-    class:above={!callout.below && !pin}
+    class:above={callout.side === 'above' && !pin}
     class:pinned={!!pin}
-    style="{pin ? `left:${pin.left}px;top:${pin.top}px` : `left:${callout.left}px;${callout.below ? `top:${callout.top}px` : `bottom:${callout.bottom}px`}`};width:{CALLOUT_W}px"
+    style="left:{pin?.left ?? callout.left}px;top:{pin?.top ?? callout.top}px;width:{CALLOUT_W}px"
     role="dialog"
     tabindex="-1"
     aria-label="Step {t.step} of {t.total}"
     data-hit
     bind:this={calloutEl}
+    bind:offsetHeight={calloutH}
     onpointerdown={ondown}
     onpointermove={onmove}
     onpointerup={onup}
@@ -121,7 +141,9 @@
       <span class="count">{t.step}<span class="of">/{t.total}</span></span>
       <span class="grip" aria-hidden="true" title="Drag to move"></span>
       <span class="progress" aria-hidden="true">
-        {#each Array(t.total) as _, i}<i class:on={i < t.step}></i>{/each}
+        {#if t.total <= MAX_DASHES}
+          {#each Array(t.total) as _, i}<i class:on={i < t.step}></i>{/each}
+        {/if}
       </span>
     </div>
     <p>{t.instruction}</p>
@@ -175,6 +197,18 @@
   :global(:root) {
     --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
     --font-mono: 'Geist Mono Variable', 'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', monospace;
+    /* The app's accent (app.css, dark scheme): the notch is always dark. */
+    --accent: #e5703f;
+  }
+  /* As app.css: no loops or glides for people who asked for less motion. */
+  @media (prefers-reduced-motion: reduce) {
+    :global(*),
+    :global(*::before),
+    :global(*::after) {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 
   /* ---------------------------------------------------------------- acting */
@@ -243,8 +277,7 @@
     animation: rise 300ms var(--ease-out) both;
     transition:
       left 420ms var(--ease-out),
-      top 420ms var(--ease-out),
-      bottom 420ms var(--ease-out);
+      top 420ms var(--ease-out);
   }
   .callout.above {
     animation-name: sink;
@@ -387,11 +420,13 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: #6fd389;
+    background: var(--accent);
     animation: breathe 1.6s ease-in-out infinite;
   }
+  /* Waiting on the user: a steady ring in the same accent. */
   .dot.waiting {
-    background: #f2b950;
+    background: none;
+    box-shadow: inset 0 0 0 1.5px var(--accent);
     animation: none;
   }
   .stop {

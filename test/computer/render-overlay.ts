@@ -1,5 +1,6 @@
 // Renders the computer-use overlay headless and saves PNGs: the acting frame, and a Show-me
-// spotlight with its callout, in light and dark. The window is never shown.
+// spotlight with its callout, in light and dark, plus a long lesson, tall and full-screen targets,
+// and a dragged callout. The window is never shown.
 //   bun run build && bun test/computer/render-overlay.ts [outDir]
 // Under Bun it bundles itself for Electron and runs it; under Electron it renders.
 import { spawnSync } from 'node:child_process'
@@ -24,8 +25,8 @@ const renderInElectron = async (outDir: string) => {
     const win = overlay.window!
     if (win.webContents.isLoading()) await new Promise<void>((r) => win.webContents.once('did-finish-load', () => r()))
     // Stand-in for the desktop under the transparent window, so the frame and dim read in a picture.
-    // Entry animations only advance when a hidden window paints, so stills show their end state.
-    const css = `.frame,.spot,.callout,.notch{animation:none !important}${backdrop ? 'html,body{background:#d9d6cf !important}' : ''}`
+    // Animations and glides only advance when a hidden window paints, so stills show their end state.
+    const css = `.frame,.spot,.callout,.notch{animation:none !important;transition:none !important}${backdrop ? 'html,body{background:#d9d6cf !important}' : ''}`
     const key = await win.webContents.insertCSS(css)
     await sleep(700)
     await win.webContents.capturePage() // a hidden window hands back the previous frame first
@@ -47,9 +48,9 @@ const renderInElectron = async (outDir: string) => {
   }
   await shoot('teach-transparent', false)
   // The notch (no chat window has focus here): working, and waiting on the user with a step up.
-  overlay.show(true, null, { text: 'Working · Click', waiting: false })
+  overlay.show(true, null, { text: 'Working · Click · “Display”', waiting: false })
   await shoot('notch-working', true)
-  overlay.show(false, { rect, instruction: 'Click Display to open the screen settings.', step: 2, total: 4 }, { text: 'Your turn · Step 2 of 4', waiting: true })
+  overlay.show(false, { rect, instruction: 'Click Display to open the screen settings.', step: 2, total: 4 }, { text: 'Your turn · Step 2 of 4 · Click Display to open the screen settings.', waiting: true })
   await shoot('notch-teach', true)
   // Around a MacBook's camera housing, as main sends it on such a screen.
   overlay.window!.webContents.send('computer-overlay:state', { acting: false, teach: null, notch: { text: 'Working · Click', waiting: false, camera: { width: 200, height: 37 } } })
@@ -58,6 +59,41 @@ const renderInElectron = async (outDir: string) => {
     `(() => { const r = document.querySelector('.housing').getBoundingClientRect(); return { centre: r.left + r.width / 2, width: r.width, screen: innerWidth / 2 } })()`
   )
   console.log(`[overlay] camera gap: ${gap.width} px wide, centred at ${gap.centre} (screen centre ${gap.screen})`)
+  // A long lesson: the count stays, the progress dashes go.
+  const teach = (r: typeof rect, step: number, total: number, instruction = 'Click Display to open the screen settings.') =>
+    overlay.show(false, { rect: r, instruction, step, total }, null)
+  teach(rect, 12, 20)
+  await shoot('teach-many-steps', true)
+  // A target nearly the screen's height: no room above or below, so the callout sits beside it, on screen.
+  const tall = { x: Math.round((d.bounds.x + 40) * s), y: Math.round((d.bounds.y + 30) * s), width: Math.round(300 * s), height: Math.round((d.bounds.height - 60) * s) }
+  teach(tall, 1, 3, 'Scroll this list to the bottom.')
+  await shoot('teach-tall-target', true)
+  // A target filling the screen: the callout goes inside it.
+  teach({ x: d.bounds.x * s, y: d.bounds.y * s, width: d.bounds.width * s, height: d.bounds.height * s }, 2, 3, 'Click anywhere in the window.')
+  await shoot('teach-full-target', true)
+  const box = () =>
+    overlay.window!.webContents.executeJavaScript(`(() => { const r = document.querySelector('.callout').getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height, pinned: document.querySelector('.callout').classList.contains('pinned') } })()`)
+  // Pinned: drag the callout (input sent to the hidden window only), then a next target away from
+  // it keeps it there, and one under it unpins it.
+  teach(rect, 1, 3)
+  await sleep(700)
+  const b = await box()
+  const wc = overlay.window!.webContents
+  const at = (type: 'mouseDown' | 'mouseMove' | 'mouseUp', x: number, y: number) =>
+    wc.sendInputEvent({ type, x: Math.round(x), y: Math.round(y), button: 'left', clickCount: 1 })
+  at('mouseDown', b.x + 40, b.y + 10)
+  for (let i = 1; i <= 5; i++) at('mouseMove', b.x + 40 + i * 80, b.y + 10 + i * 60)
+  at('mouseUp', b.x + 440, b.y + 310)
+  await sleep(200)
+  const pinned = await box()
+  teach({ ...rect, x: Math.round((d.bounds.x + 60) * s) }, 2, 3)
+  await shoot('teach-pinned-kept', true)
+  const kept = await box()
+  // The next target right under the pinned callout.
+  teach({ x: Math.round((pinned.x + 20) * s + d.bounds.x * s), y: Math.round((pinned.y + 20) * s + d.bounds.y * s), width: Math.round(120 * s), height: Math.round(32 * s) }, 3, 3, 'Click Apply.')
+  await shoot('teach-pinned-covered', true)
+  const moved = await box()
+  console.log(`[overlay] pinned at ${pinned.x},${pinned.y} (${pinned.pinned}); next target elsewhere: ${kept.x},${kept.y} (${kept.pinned}); next target under it: ${moved.x},${moved.y} (${moved.pinned})`)
   overlay.show(false, null, null)
   console.log(`[overlay] ${d.bounds.width}x${d.bounds.height} @${d.scaleFactor}x, wrote PNGs to ${outDir}`)
   overlay.dispose()

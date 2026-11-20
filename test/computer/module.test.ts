@@ -86,10 +86,16 @@ describe('stopping mid-task', () => {
     await r.tool('look_at_screen')
     const step = r.tool('teach_step', { instruction: 'Click Personalize', step: 1, total: 3, element: 4 })
     await until(() => h.cu.waiting()?.kind === 'teach')
-    expect(h.overlay.last().activity).toEqual({ text: 'Your turn · Step 1 of 3', waiting: true })
+    expect(h.overlay.last().activity).toEqual({ text: 'Your turn · Step 1 of 3 · Click Personalize', waiting: true })
     h.overlay.pressDone()
     await step
-    expect(h.overlay.last().activity).toEqual({ text: 'Working · Step 1 of 3', waiting: false })
+    expect(h.overlay.last().activity).toEqual({ text: 'Working · Step 1 of 3 · Click Personalize', waiting: false })
+    // What a step did and to what, cut to fit.
+    h.setMode('do')
+    await r.tool('scroll', { x: 10, y: 10, amount: -3, horizontal: true })
+    expect(h.overlay.last().activity?.text).toBe('Working · Scroll · left 3')
+    await r.tool('type_text', { text: 'a fairly long sentence typed into the field, longer than fits' })
+    expect(h.overlay.last().activity?.text).toBe('Working · Type · a fairly long sentence typed into the field, lon…')
     await r.mod.end!()
     expect(h.overlay.last().activity).toBeNull()
   })
@@ -190,7 +196,13 @@ describe('waits on the human', () => {
     await h.run(h.cu.approve('stale', true)) // ignored
     await h.run(h.cu.approve(w.id, false))
     expect(textOf(await approval)).toContain('Denied')
-    expect(r.steps.at(-1)).toEqual({ tool: 'computer_ask_approval', label: 'Approval', ok: false, detail: 'Delete 3 files from Downloads' })
+    // A denial is neutral, not a failed step.
+    expect(r.steps.at(-1)).toEqual({ tool: 'computer_ask_approval', label: 'Denied', ok: true, denied: true, detail: 'Delete 3 files from Downloads' })
+    const yes = r.tool('ask_approval', { action: 'Empty the bin', detail: 'Recycle Bin' })
+    await until(() => h.cu.waiting() !== null)
+    await h.run(h.cu.approve(h.cu.waiting()!.id, true))
+    expect(textOf(await yes)).toContain('Approved')
+    expect(r.steps.at(-1)).toEqual({ tool: 'computer_ask_approval', label: 'Approval', ok: true, detail: 'Empty the bin' })
   })
 
   test('a Show-me step is marked done from the overlay or the chat, or answered in words', async () => {
@@ -210,6 +222,22 @@ describe('waits on the human', () => {
     await h.run(h.cu.teachDone(h.cu.waiting()!.id, { kind: 'said', text: 'where is it?' }))
     expect(textOf(await two)).toBe('The user said: "where is it?"')
     expect(r.steps.map((s) => s.label)).toEqual(['Step 1 of 2', 'Step 2 of 2'])
+  })
+
+  test('a Show-me step brings the target app back in front of the chat before the spotlight', async () => {
+    // Whether a spotlight was already up each time focus was handed back.
+    const focused: boolean[] = []
+    const h = await harness({ restoreFocus: async () => (focused.push(!!h.overlay.last().teach), { title: 'Settings', process: 'systemsettings' }) })
+    h.setMode('teach')
+    const r = await h.reply()
+    await r.tool('look_at_screen')
+    focused.length = 0
+    const step = r.tool('teach_step', { instruction: 'Click Display', step: 1, total: 1, element: 4 })
+    await until(() => h.cu.waiting()?.kind === 'teach')
+    expect(focused).toEqual([false])
+    expect(h.overlay.last().teach?.instruction).toBe('Click Display')
+    h.overlay.pressDone()
+    await step
   })
 
   test('the highlight snaps to the control under the point', async () => {
@@ -403,8 +431,14 @@ describe('what the driver gets', () => {
   })
 
   test('a message typed during a Show-me step: "done" and the like finish it, anything else is passed on', () => {
-    for (const t of ['done', 'Done!', 'ok', 'next', 'got it']) expect(teachAnswer(t)).toEqual({ kind: 'done' })
+    for (const t of ['done', 'Done!', 'ok', 'OK.', 'okay', 'next', 'got it', ' yes ', 'yep', 'did it']) expect(teachAnswer(t)).toEqual({ kind: 'done' })
     expect(teachAnswer(' I can’t find it ')).toEqual({ kind: 'said', text: 'I can’t find it' })
+    // Starting like an acknowledgement isn't one: the rest reaches the model.
+    for (const t of ['ok, but I can’t find it', 'yes but where is it?', 'next to what?', 'done? nothing happened', 'okay what now'])
+      expect(teachAnswer(t)).toEqual({ kind: 'said', text: t })
+    // Handing the task over is passed on too, so the model hears it and carries on itself.
+    expect(teachAnswer('ok just do it')).toEqual({ kind: 'said', text: 'ok just do it' })
+    expect(teachAnswer('just do it')).toEqual({ kind: 'said', text: 'just do it' })
   })
 
   test('the Stop shortcut is held while a computer reply runs, and pressing it stops every running reply', async () => {
