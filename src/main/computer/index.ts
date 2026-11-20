@@ -33,8 +33,10 @@ export interface ComputerUseApi {
    * this reply, which the Stop shortcut runs.
    */
   readonly module: (ctx: RunContext, opts: { mode: () => Mode; stop?: () => void }) => ToolModule
-  /** Cuts off input in progress and releases every wait. Input stays off until `userTurn`. The chat's Stop runs it. */
+  /** Cuts off input in progress and releases every wait. Input stays off until `userTurn`. The Stop shortcut runs it. */
   readonly stop: Effect.Effect<void>
+  /** The chat's Stop for reply `messageId`: `stop`, unless another reply has the computer, which it leaves alone. */
+  readonly stopReply: (messageId: string) => Effect.Effect<void>
   /**
    * A new user message (a new reply, or steering one that runs): input is allowed again, the
    * takeover check starts afresh, and the app the user was in is remembered. `module` calls it too.
@@ -65,6 +67,14 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
   let acting: Owner | null = null
   let spot: TeachTarget | null = null
   let live = 0
+  /**
+   * The reply using the computer: the first to call a computer tool holds it until it ends, and
+   * another chat's computer tools are refused meanwhile, so the two can't fight over the mouse,
+   * the approval card, or Stop.
+   */
+  let holder: Owner | null = null
+  /** Who held the computer when it was last stopped; a later holder's input is allowed again. */
+  let stoppedWith: Owner | null = null
   /** The label of the last step a computer reply took, for the notch. */
   let lastStep: string | null = null
   /** The chat's Stop of each computer reply running now. */
@@ -99,12 +109,15 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
     return control.remember().pipe(Effect.ignore)
   })
 
-  const stop = Effect.suspend(() => {
+  const stop: Effect.Effect<void> = Effect.suspend(() => {
+    stoppedWith = holder
     control?.cancel()
     acting = null
     draw()
     return interaction.cancelAll()
   })
+
+  const stopOne = (messageId: string): Effect.Effect<void> => (holder && holder.messageId !== messageId ? Effect.void : stop)
 
   // The Stop shortcut stops every computer reply, as the chat's Stop would.
   overlay.onStopKey(() => {
@@ -117,6 +130,24 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
     const owner: Owner = { sessionId: ctx.sessionId, messageId: ctx.messageId }
     let ended = false
     let calls = 0
+    /** Whether this reply has had its `userTurn`; one made while another holds the computer waits for its claim. */
+    let turned = false
+    const turn = () => {
+      turned = true
+      void Effect.runPromise(userTurn)
+    }
+    const claim = (): string | null => {
+      if (holder === owner) return null
+      if (holder) return 'The computer is in use by another chat right now. Tell the user it is busy, and to try again once that chat has finished or after stopping it.'
+      holder = owner
+      if (!turned) turn()
+      else {
+        control.resetTakeover()
+        // A Stop made for an earlier holder doesn't stop this reply.
+        if (control.stopped() && stoppedWith && stoppedWith !== owner) control.resume()
+      }
+      return null
+    }
     const stopReply = opts.stop ?? (() => {})
     const step = (s: Step) => {
       lastStep = s.label
@@ -133,7 +164,10 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
       if (++calls <= MAX_TASK_TOOLS) return true
       if (calls === MAX_TASK_TOOLS + 1) {
         step({ tool: 'computer_stop', label: `Stopped after ${MAX_TASK_TOOLS} steps`, ok: false })
-        control.cancel()
+        if (holder === owner) {
+          stoppedWith = owner
+          control.cancel()
+        }
         setActing(false)
         void Effect.runPromise(interaction.cancelAll(owner))
       }
@@ -142,6 +176,7 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
     const end = async () => {
       if (ended) return
       ended = true
+      if (holder === owner) holder = null
       setActing(false)
       await Effect.runPromise(interaction.cancelAll(owner))
       // A spotlight left on screen by this reply goes with it.
@@ -165,7 +200,7 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
     stops.add(stopReply)
     // The reply's waits resolve as denied or stopped the moment it ends, even before `end` is called.
     ctx.signal.addEventListener('abort', () => void end(), { once: true })
-    void Effect.runPromise(userTurn)
+    if (!holder) turn()
     return {
       name: SERVER,
       instructions: instructions(p.name),
@@ -177,11 +212,12 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
         remember: (fact) => o.remember(fact, ctx),
         step,
         signal: ctx.signal,
-        count
+        count,
+        claim
       }),
       builtins: BUILTIN_TOOLS,
       stepFor: builtinStep,
-      canUseTool: makePolicy({ control, interaction, owner, mode: opts.mode, ended: () => ended || ctx.signal.aborted, count }),
+      canUseTool: makePolicy({ control, interaction, owner, mode: opts.mode, ended: () => ended || ctx.signal.aborted, count, claim }),
       end
     }
   }
@@ -190,6 +226,7 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
     supported: p !== null,
     module,
     stop,
+    stopReply: stopOne,
     userTurn,
     waiting: interaction.current,
     subscribe: interaction.subscribe,

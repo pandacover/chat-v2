@@ -17,10 +17,12 @@
     return () => clearTimeout(t)
   })
 
-  const onkeydown = (e: KeyboardEvent) => {
+  /** Keys pressed with focus in the card: Enter approves, Escape denies. */
+  const oncardkey = (e: KeyboardEvent) => {
     if (wait.kind !== 'approval') return
     if (e.key === 'Enter' && modKey(e)) {
       e.preventDefault()
+      e.stopPropagation()
       if (armed) void app.approve(wait.id, true)
     } else if (e.key === 'Escape') {
       e.preventDefault()
@@ -28,15 +30,35 @@
       void app.approve(wait.id, false)
     }
   }
+
+  /**
+   * Keys pressed elsewhere. Escape denies only if nothing else used it (cancelling a recording,
+   * closing a dialog, a panel or an edit), so it waits until every handler has seen the key.
+   */
+  const onwindowkey = (e: KeyboardEvent) => {
+    if (wait.kind !== 'approval') return
+    if (e.key === 'Enter' && modKey(e)) {
+      e.preventDefault()
+      if (armed) void app.approve(wait.id, true)
+    } else if (e.key === 'Escape' && !e.isComposing && !e.defaultPrevented) {
+      const id = wait.id
+      setTimeout(() => {
+        if (e.defaultPrevented || document.querySelector('[aria-modal="true"]')) return
+        if (wait.kind === 'approval' && wait.id === id) void app.approve(id, false)
+      })
+    }
+  }
 </script>
 
-<svelte:window {onkeydown} />
+<svelte:window onkeydown={onwindowkey} />
 
 <div
   class="flex flex-wrap items-end gap-x-5 gap-y-3 rounded-lg bg-surface px-4 py-3.5 shadow-[0_0_0_1px_var(--muted)]"
   role={wait.kind === 'approval' ? 'alertdialog' : 'status'}
   aria-labelledby="wait-title"
   data-computer-wait={wait.kind}
+  tabindex="-1"
+  onkeydown={oncardkey}
   in:fly={{ y: 4, duration: 220 }}
 >
   <div class="min-w-0 flex-1 basis-60">

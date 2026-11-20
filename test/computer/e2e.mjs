@@ -100,6 +100,11 @@ try {
   // 2. Denied with Esc.
   await send('Delete them again')
   await card.waitFor()
+  // An Esc something else used (cancelling a recording, closing a panel) leaves the approval alone.
+  await page.evaluate(() => addEventListener('keydown', (e) => e.key === 'Escape' && e.preventDefault(), { capture: true, once: true }))
+  await page.keyboard.press('Escape')
+  await sleep(200)
+  ok((await card.count()) === 1, 'an Esc another handler used does not deny')
   await page.keyboard.press('Escape')
   await until(async () => (await lastReply().innerText()).includes('Left them alone.'), 'Esc denies')
 

