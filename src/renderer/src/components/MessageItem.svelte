@@ -7,6 +7,7 @@
   import { stopShortcutLabel } from '@shared/computer'
   import { isMac } from '@/lib/keys'
   import ComputerWaitCard from './ComputerWaitCard.svelte'
+  import PauseCard from './PauseCard.svelte'
   import StepList from './StepList.svelte'
   import type { Attachment, PathNode } from '@shared/types'
   import { collapse, fade, fly } from '@/lib/motion'
@@ -345,6 +346,9 @@
       </div>
     {/if}
 
+    {#if message.status === 'paused'}
+      <PauseCard messageId={message.id} reason={message.error} {busy} />
+    {/if}
     {#if message.status === 'interrupted' || message.status === 'stopped' || message.status === 'error'}
       <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] {message.status === 'error' ? 'text-danger' : 'text-fg-3'}" in:fade>
         <span class="flex items-center gap-1.5">
