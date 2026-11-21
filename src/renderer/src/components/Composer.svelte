@@ -5,12 +5,12 @@
   import type { Attachment } from '@shared/types'
   import { isMac, modKey, shortcut } from '@/lib/keys'
   import { fade, pop } from '@/lib/motion'
-  import { orb } from '@/lib/orb'
   import { app } from '@/lib/store.svelte'
   import { clock, voice } from '@/lib/voice.svelte'
   import { applyEdit, listEditing } from '@/lib/textarea'
   import AttachmentChip from './AttachmentChip.svelte'
   import Icon from './Icon.svelte'
+  import Mascot from './Mascot.svelte'
   import ModelPicker from './ModelPicker.svelte'
   import PointButton from './PointButton.svelte'
 
@@ -28,7 +28,7 @@
     placeholder?: string
     /** Home: a taller box. */
     tall?: boolean
-    /** In a chat the orb takes the mic's place while it listens; on Home the orb is in the middle. */
+    /** In a chat the mascot takes the mic's place while it listens; on Home the mascot is in the middle. */
     inChat?: boolean
     model: string
     onmodel: (id: string) => void
@@ -208,7 +208,7 @@
     }
   }
 
-  // A ring leaves the mic's orb on each spike in the voice.
+  // A ring leaves the mic's mascot on each spike in the voice.
   $effect(() => {
     void voice.spikes
     const host = untrack(() => micButton)
@@ -276,7 +276,7 @@
         : ''}"
     ></textarea>
     {#if listenLine}
-      <!-- Voice in a chat: the orb takes the mic's place, and this line the text's. -->
+      <!-- Voice in a chat: the mascot takes the mic's place, and this line the text's. -->
       <div class="absolute inset-0 flex items-start gap-2.5 px-[18px] pt-[15px] text-[15px]" in:fade={{ duration: 120 }}>
         <span class="thinking">{voice.phase === 'transcribing' ? 'Transcribing' : 'Listening'}</span>
         {#if voice.phase !== 'transcribing'}
@@ -340,11 +340,7 @@
       onpointerleave={micUp}
     >
       {#if listenLine}
-        <span
-          class="orb"
-          style="--s: 32px; --pk: 0.22; --lvl: {voice.level.toFixed(3)}"
-          use:orb={{ state: voice.phase === 'transcribing' ? 'thinking' : 'listening', level: voice.recording ? voice.level : undefined }}
-        ></span>
+        <Mascot size={30} state={voice.phase === 'transcribing' ? 'thinking' : 'listening'} level={voice.recording ? voice.level : undefined} />
       {:else}
         <Icon name="mic" size={18} />
       {/if}

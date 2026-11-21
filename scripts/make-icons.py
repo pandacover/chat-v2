@@ -2,7 +2,8 @@
 #   python scripts/make-icons.py        (needs Pillow and NumPy)
 # Cuts the fox out of its square (the background connected to the edges goes transparent, with a
 # softened edge), crops it, and writes:
-#   src/renderer/src/assets/logo.png   the in-app mark (sidebar, Settings > About), transparent
+#   src/renderer/src/assets/logo.png   the in-app mark (Settings > About) and the mascot (components/Mascot.svelte),
+#                                      transparent, 512 px so the voice stage's 168 px fox stays sharp at 2x
 #   assets/logo.png                    the same, for the README
 #   build/icon.png                     1024 px app icon (electron-builder makes the .ico and .icns)
 #   assets/icon-256.png, src/renderer/public/icon.png   smaller icons (the latter is the favicon)
@@ -57,8 +58,8 @@ cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
 box = (cx - side // 2, cy - side // 2, cx - side // 2 + side, cy - side // 2 + side)
 fox = img.crop(box)
 
-# In-app mark (sidebar, About): 256 px, transparent.
-fox.resize((256, 256), Image.LANCZOS).save(f'{out_dir}/src/renderer/src/assets/logo.png', optimize=True)
+# In-app mark and mascot: 512 px, transparent.
+fox.resize((512, 512), Image.LANCZOS).save(f'{out_dir}/src/renderer/src/assets/logo.png', optimize=True)
 
 # App icon: the fox on its own cream, a rounded square with the usual inset (macOS-style), 1024 and 256 px.
 def icon(size):

@@ -7,7 +7,7 @@
 /*
  * Studio: warm stone neutrals, a white workspace inset on a cream sidebar, hairline rings, and
  * solid black pill actions (white on dark). Dark is the near-black Agents palette. Blue is for
- * focus, selection, drafts and "the assistant is driving"; the orb carries the voice.
+ * focus, selection, drafts and "the assistant is driving"; the mascot (the fox) carries the voice.
  *
  * The older role names (--bg, --surface, --hover, --muted, --accent…) stay as aliases, so every
  * Tailwind class (bg-bg, text-muted, bg-accent…) follows the palette.
@@ -43,7 +43,6 @@
   --shadow-lg: 0 0 1px 0 rgb(0 0 0 / 0.4), 0 4px 28px 0 rgb(0 0 0 / 0.1);
   --shadow-float: 0 1px 1px rgb(0 0 0 / 0.04), 0 8px 24px -12px rgb(0 0 0 / 0.14);
   --scrim: rgb(0 0 0 / 0.3);
-  --orb-base: radial-gradient(circle at 50% 70%, #a0b9d1, #cadcfc 70%);
   --ripple: rgb(110 135 190 / 0.55);
   --thumb: radial-gradient(120% 90% at 20% 100%, #ffd29a 0%, transparent 60%), radial-gradient(80% 90% at 90% 10%, #f7b9c6 0%, transparent 70%), #fbeee4;
   /* Glass: raised and active surfaces are frosted, so what is behind them shows through, blurred. */
@@ -88,7 +87,6 @@
   --shadow-lg: 0 0 0 1px rgb(255 255 255 / 0.1), 0 40px 80px -20px rgb(0 0 0 / 0.9);
   --shadow-float: 0 24px 48px -16px rgb(0 0 0 / 0.7);
   --scrim: rgb(0 0 0 / 0.55);
-  --orb-base: radial-gradient(circle at 50% 70%, #a0b9d1, #1b2433 85%);
   --ripple: rgb(202 220 252 / 0.55);
   --thumb: radial-gradient(120% 90% at 20% 100%, rgb(255 210 154 / 0.35) 0%, transparent 60%), radial-gradient(80% 90% at 90% 10%, rgb(247 185 198 / 0.3) 0%, transparent 70%), #1c1a19;
   --glass-bg: rgb(44 44 48 / 0.45);
@@ -813,32 +811,7 @@ kbd.studio-kbd {
     var(--shadow-lg);
 }
 
-/* The orb: lib/orb.ts draws the shader into it; the gradient shows only without WebGL2. */
-.orb {
-  --s: 88px;
-  --lvl: 0;
-  --pk: 0.14;
-  position: relative;
-  display: block;
-  flex: none;
-  width: var(--s);
-  height: var(--s);
-  border-radius: 50%;
-  overflow: hidden;
-  background: var(--orb-base);
-  transform: scale(calc(1 + var(--lvl) * var(--pk)));
-}
-.orb.gl {
-  background: none;
-}
-.orb > canvas {
-  position: absolute;
-  inset: 0;
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-/* A ring leaves the orb on each spike in the voice level. */
+/* A ring leaves the mascot (components/Mascot.svelte) on each spike in the voice level; its halo is this colour too. */
 .ripple {
   position: absolute;
   left: 50%;

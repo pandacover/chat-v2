@@ -15,8 +15,8 @@
   import BranchSwitcher from './BranchSwitcher.svelte'
   import Icon from './Icon.svelte'
   import Markdown from './Markdown.svelte'
+  import Mascot from './Mascot.svelte'
   import { usageDetail, usageShort } from '@/lib/usage'
-  import { orb } from '@/lib/orb'
   import { listEditing } from '@/lib/textarea'
 
   let {
@@ -322,7 +322,7 @@
       <StepList steps={[]} live running {doing} />
     {:else if streaming && blocks.length === 0}
       <div class="flex h-[26px] items-center gap-2.5 text-[14px]" aria-live="polite">
-        <span class="orb" style="--s: 18px" use:orb={{ state: 'thinking' }}></span><span class="thinking">Thinking</span>
+        <Mascot size={20} state="thinking" /><span class="thinking">Thinking</span>
       </div>
     {/if}
     {#if computerRun}
