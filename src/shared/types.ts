@@ -4,8 +4,13 @@ import type { UsageEvent, UsageShare, UsageView } from './usage'
 
 export type Role = 'root' | 'system' | 'user' | 'assistant'
 
-/** Lifecycle of an assistant message. `interrupted` means the app stopped mid-stream. */
-export type MessageStatus = 'complete' | 'streaming' | 'interrupted' | 'stopped' | 'error'
+/**
+ * Lifecycle of an assistant message. `interrupted` means the app stopped mid-stream; `paused`,
+ * that the reply seemed stuck (its `error` says why, in plain words) and waits for Continue.
+ * A reply that hit a usage limit is `stopped` instead, with a UsagePause (shared/usage.ts) that
+ * continues it by itself once the limit resets; Continue and that resume take the same path.
+ */
+export type MessageStatus = 'complete' | 'streaming' | 'interrupted' | 'stopped' | 'paused' | 'error'
 
 export type AttachmentKind = 'image' | 'pdf' | 'text' | 'audio'
 

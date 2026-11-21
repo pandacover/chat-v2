@@ -9,6 +9,7 @@
   import ComputerWaitCard from './ComputerWaitCard.svelte'
   import LimitPause from './LimitPause.svelte'
   import { meter } from '@/lib/meter.svelte'
+  import PauseCard from './PauseCard.svelte'
   import StepList from './StepList.svelte'
   import type { Attachment, PathNode } from '@shared/types'
   import { collapse, fade, fly } from '@/lib/motion'
@@ -17,8 +18,8 @@
   import BranchSwitcher from './BranchSwitcher.svelte'
   import Icon from './Icon.svelte'
   import Markdown from './Markdown.svelte'
+  import Mascot from './Mascot.svelte'
   import { usageDetail, usageShort } from '@/lib/usage'
-  import { orb } from '@/lib/orb'
   import { listEditing } from '@/lib/textarea'
 
   let {
@@ -34,8 +35,8 @@
 
   const message = $derived(node.message)
   const streaming = $derived(message.status === 'streaming')
-  /** Paused at a usage limit: goes on by itself once it resets (lib/meter.svelte.ts). */
-  const paused = $derived(message.status === 'stopped' ? meter.pauseFor(message.id) : null)
+  /** Paused at a usage limit: stopped, and goes on by itself once it resets (lib/meter.svelte.ts). A stuck pause is status 'paused'. */
+  const limitPause = $derived(message.status === 'stopped' ? meter.pauseFor(message.id) : null)
   // Lines animate only when they arrive while you watch, never on history or a backfill.
   const live = $derived(streaming && app.liveIds.has(message.id))
   // Browser steps are their own blocks; artifacts are parsed out of the prose between them.
@@ -326,7 +327,7 @@
       <StepList steps={[]} live running {doing} />
     {:else if streaming && blocks.length === 0}
       <div class="flex h-[26px] items-center gap-2.5 text-[14px]" aria-live="polite">
-        <span class="orb" style="--s: 18px" use:orb={{ state: 'thinking' }}></span><span class="thinking">Thinking</span>
+        <Mascot size={20} state="thinking" /><span class="thinking">Thinking</span>
       </div>
     {/if}
     {#if computerRun}
@@ -349,8 +350,12 @@
       </div>
     {/if}
 
-    {#if paused}
-      <LimitPause pause={paused} />
+    <!-- A reply is paused one way or the other: stuck (status 'paused', PauseCard) or at a usage
+         limit (stopped, with a pause that continues by itself at the reset, LimitPause). -->
+    {#if limitPause}
+      <LimitPause pause={limitPause} />
+    {:else if message.status === 'paused'}
+      <PauseCard messageId={message.id} reason={message.error} {busy} />
     {:else if message.status === 'interrupted' || message.status === 'stopped' || message.status === 'error'}
       <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] {message.status === 'error' ? 'text-danger' : 'text-fg-3'}" in:fade>
         <span class="flex items-center gap-1.5">

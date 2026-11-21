@@ -380,6 +380,10 @@ describe('a reply at a usage limit', () => {
     expect(resumed.content).toContain('First part.')
     expect(resumed.content).toContain('The rest.')
     expect(t.usageEvents.some((e) => e.type === 'resumed' && e.messageId === assistant.id)).toBe(true)
+    // It went through Continue's path as a stopped reply: asked once for the rest, never told it looked stuck.
+    const resumedPrompt = t.fake.calls.at(-1)!.prompt.map((b) => b.text ?? '').join(' | ')
+    expect(resumedPrompt.match(/Continue it from exactly where it stopped/g)).toHaveLength(1)
+    expect(resumedPrompt).not.toContain('seemed stuck')
     expect((await t.run(Usage.use((u) => u.view))).pauses).toEqual([])
     // Readings kept for the meter: the warning's 90 and the rejection's 100.
     const latest = await t.run(Db.use((db) => db.use((d) => d.latestUsageSamples())))

@@ -67,9 +67,9 @@ export const fakeQuery = (script: Script, fakeOptions: FakeOptions = {}) => {
       close: () => options.abortController?.abort()
     })
   }
-  const query: QueryFn = (params) =>
-    // A query with no system prompt sends no message: it only asks Claude Code something.
-    !params.options.systemPrompt ? probe(params.options) : (async function* () {
+  type State = { ended: boolean; interrupted: boolean }
+  const run = (params: Parameters<QueryFn>[0], state: State) =>
+    (async function* () {
       const options = params.options
       let prompt: Call['prompt'] = []
       for await (const m of params.prompt as AsyncIterable<SDKUserMessage>) {
@@ -116,6 +116,25 @@ export const fakeQuery = (script: Script, fakeOptions: FakeOptions = {}) => {
             if (server && tool) result = (await (await clientFor(server)).callTool({ name: tool, arguments: (permission.updatedInput ?? input) as Record<string, unknown> })) as ToolResult
           }
           const content = result?.content ?? [{ type: 'text', text: permission.behavior === 'deny' ? permission.message : '' }]
+          // PostToolUse hooks, as Claude Code runs them for a call that ran: their context rides along
+          // with the result, and `continue: false` ends the query after it.
+          if (permission.behavior === 'allow') {
+            const failed = result?.isError === true
+            const event = failed ? 'PostToolUseFailure' : 'PostToolUse'
+            const input_ = failed
+              ? { hook_event_name: event, tool_name: name, tool_input: input, tool_use_id: id, error: content.map((c) => c.text ?? '').join('') }
+              : { hook_event_name: event, tool_name: name, tool_input: input, tool_use_id: id, tool_response: result }
+            for (const matcher of options.hooks?.[event] ?? [])
+              for (const hook of matcher.hooks) {
+                const out = (await hook({ session_id: session, transcript_path: '', cwd: '', ...input_ } as never, id, { signal: signal ?? new AbortController().signal })) as {
+                  continue?: boolean
+                  hookSpecificOutput?: { additionalContext?: string }
+                }
+                const context = out.hookSpecificOutput?.additionalContext
+                if (context) content.push({ type: 'text', text: `<system-reminder>\n${context}\n</system-reminder>` })
+                if (out.continue === false) state.ended = true
+              }
+          }
           yield { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content }] }, uuid: uuid(), ...base } as unknown as SDKMessage
           return { permission, result }
         },
@@ -153,11 +172,36 @@ export const fakeQuery = (script: Script, fakeOptions: FakeOptions = {}) => {
         yield { type: 'system', subtype: 'init', tools: options.tools, mcp_servers: [], model: options.model, session_id: session, uuid: uuid() } as unknown as SDKMessage
         for await (const m of script(turn)) {
           if (signal?.aborted) throw abortError()
+          if (state.interrupted) {
+            yield turn.result({ subtype: 'error_during_execution', isError: true })
+            return
+          }
           yield m
+          if (state.ended) {
+            yield turn.result()
+            return
+          }
         }
       } finally {
         for (const c of clients.values()) await c.close()
       }
     })()
-  return { query, calls, usageReads }
+  /** How many times interrupt() was called, over all queries. */
+  let interrupts = 0
+  // Like the SDK's Query: an async generator with interrupt(), which ends the turn at the next
+  // message. A hook's `continue: false` ends it too. A query with no system prompt sends no
+  // message: it only asks Claude Code something (the usage probe).
+  const query: QueryFn = (params) => {
+    if (!params.options.systemPrompt) return probe(params.options)
+    const state: State = { ended: false, interrupted: false }
+    return Object.assign(run(params, state), {
+      interrupt: async () => {
+        interrupts++
+        state.interrupted = true
+      }
+    })
+  }
+  /** The same without interrupt(), as a stand-in that can only be aborted. */
+  const plain: QueryFn = (params) => (!params.options.systemPrompt ? probe(params.options) : run(params, { ended: false, interrupted: false }))
+  return { query, plain, calls, usageReads, interrupts: () => interrupts }
 }

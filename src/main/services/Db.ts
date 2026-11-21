@@ -16,6 +16,7 @@ import type {
 } from '@shared/types'
 import type { ComputerMode } from '@shared/computer'
 import { DbError, NotFound, errorMessage } from '../errors'
+import { stuckStore } from './stuckStore'
 import { usageRows } from '../usage/rows'
 
 const MIGRATIONS: string[] = [
@@ -114,6 +115,32 @@ const MIGRATIONS: string[] = [
   create index messages_agent_session on messages(agent_session);`,
   // What a computer chat's last message was read as: 'do' (operate the computer) or 'teach' (show me how).
   `alter table sessions add column computer_mode text not null default 'do';`,
+  // Long-running replies (agent/watch.ts): the progress notes written at checkpoints, per chat,
+  // and every pause for being stuck, with whether the user resumed it, to tune the thresholds by.
+  `create table progress_notes (
+    id integer primary key autoincrement,
+    session_id text not null references sessions(id) on delete cascade,
+    message_id text not null,
+    step integer not null,
+    done text not null,
+    left_to_do text not null,
+    closer text not null,
+    verdict text not null,
+    confidence real not null,
+    created_at integer not null
+  );
+  create index progress_notes_session on progress_notes(session_id);
+  create table stuck_pauses (
+    id integer primary key autoincrement,
+    session_id text not null references sessions(id) on delete cascade,
+    message_id text not null,
+    signal text not null,
+    step integer not null,
+    reason text not null,
+    created_at integer not null,
+    resumed_at integer
+  );
+  create index stuck_pauses_message on stuck_pauses(message_id);`,
   // Usage (src/main/usage): each run of a reply with its API-equivalent cost and when it ran, and
   // readings of the plan's usage windows, from which a chat's (later, a job's) share is estimated;
   // and replies paused at a limit, which continue by themselves at resume_at. Runs keep no link to
@@ -911,6 +938,7 @@ export const makeDb = (file: string) => {
       run('update sessions set memory_rev = ? where id = ?', rev, sessionId)
       return rev
     },
+    ...stuckStore(run, all),
     ...usageRows({ all, one, run }),
     close: () => db.close()
   }

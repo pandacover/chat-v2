@@ -9,7 +9,10 @@ import { type ConfigError, type DbError, InvalidInput, type MissingApiKey, type 
 import { WRITING_GUIDELINES } from '../guidelines'
 import { MEMORY_INSTRUCTIONS, askedQuestion, memoryPrompt, memorySource, parseMemoryReply, profileBlock } from '../memory'
 import { browserModule } from '../agent/browser'
-import { Agent, type Auth, MAX_TURNS, type PromptBlock, type ReplyHooks } from '../agent/driver'
+import { Agent, type Auth, type PromptBlock, type ReplyHooks } from '../agent/driver'
+import { smallModelJudge } from '../agent/judge'
+import { type WatchDeps, makeWatch, pauseNote } from '../agent/watch'
+import { SMALL_MODEL } from '@shared/models'
 import { HISTORY_NOTE, type TurnPlan, continueNote, planTurn, transcriptText } from '../agent/history'
 import type { ToolModuleFactory } from '../agent/module'
 import { ComputerUse, type Mode, decideMode, effortFor, handsOver, modeTag, teachAnswer } from '../computer'
@@ -204,7 +207,7 @@ export class Chat extends Context.Service<
        * The user message the reply gets: the turns its session doesn't have, then the message
        * itself. Continuing, a note asking for the rest comes last.
        */
-      const promptFor = Effect.fn('Chat.promptFor')(function* (plan: TurnPlan, partial: string | null, mode: Mode | null) {
+      const promptFor = Effect.fn('Chat.promptFor')(function* (plan: TurnPlan, partial: string | null, mode: Mode | null, pausedFor: string | null = null) {
         // A computer chat tells the model its mode with each message.
         const tag = (text: string) => (mode ? modeTag(mode, text) : text)
         const stored = yield* db.use((d) => d.storedAttachmentsFor(plan.turns.map((m) => m.id)))
@@ -221,6 +224,8 @@ export class Chat extends Context.Service<
           if (!own) blocks.push({ type: 'text', text: transcriptText({ role: 'assistant', content: partial } as Message) ?? '' })
           blocks.push({ type: 'text', text: tag(continueNote(own ? partial : null)) })
         }
+        // A paused reply, continued: why it was paused, before the last block.
+        if (pausedFor) blocks.splice(Math.max(0, blocks.length - 1), 0, { type: 'text', text: pauseNote(pausedFor) })
         return blocks.filter((b) => b.type !== 'text' || b.text !== '')
       })
 
@@ -260,7 +265,20 @@ export class Chat extends Context.Service<
        * it seeds the buffer so the continuation completes that line instead of
        * starting a new one.
        */
-      const generate = (assistant: Message, partial: string | null, carry: string | null) => {
+      /**
+       * What watches a reply for being stuck (agent/watch.ts): a small model judges its checkpoints
+       * (a later phase swaps in the primary bot), and notes and pauses are kept in chat.db.
+       */
+      const watchDeps = (model: string): WatchDeps => ({
+        judge: smallModelJudge((system, prompt, signal) => Effect.runPromise(ask(model, system, prompt, '60 seconds'), { signal })),
+        notes: {
+          add: (note) => Effect.runSync(db.use((d) => d.addProgressNote(note)).pipe(Effect.ignore)),
+          recent: (sessionId, limit) => Effect.runSync(db.use((d) => d.progressNotes(sessionId, limit)).pipe(Effect.orElseSucceed(() => [])))
+        },
+        pauses: { record: (p) => Effect.runSync(db.use((d) => d.recordPause(p, Date.now())).pipe(Effect.ignore)) }
+      })
+
+      const generate = (assistant: Message, partial: string | null, carry: string | null, pausedFor: string | null = null) => {
         const buffer = makeLineBuffer()
         if (carry !== null) buffer.push(carry)
         // Continuing after a complete line: a leading newline would add a blank line.
@@ -283,6 +301,9 @@ export class Chat extends Context.Service<
         const startedAt = Date.now()
         let runCost: number | null = null
         let limit: LimitSignal | null = null
+        /** Why the reply was paused, when it was, and whether that cut its text off mid-line. */
+        let paused: string | null = null
+        let pausedMidText = false
 
         return Effect.gen(function* () {
           // Running again (continued by hand, or retried): a pause it was in is over.
@@ -309,7 +330,7 @@ export class Chat extends Context.Service<
             mode = asked?.role === 'user' ? decideMode(asked.content, lastMode(session.id)) : lastMode(session.id)
             saveMode(session.id, mode)
           }
-          const prompt = yield* promptFor(plan, partial, mode)
+          const prompt = yield* promptFor(plan, partial, mode, pausedFor)
           // The profile as it was when this chat first asked, so the system prompt stays the same.
           const facts = settings.memoryModel ? yield* db.use((d) => d.liveFacts(d.sessionMemoryRev(session.id))) : []
           // User instructions first so they win any conflict; the writing guideline is hidden from Settings.
@@ -354,7 +375,13 @@ export class Chat extends Context.Service<
                   prompt,
                   session: { id: sessionId, resume: plan.resume, baseCost: plan.baseCost },
                   modules: toolSets(session),
-                  auth
+                  auth,
+                  watch: (control) =>
+                    makeWatch(
+                      watchDeps(settings.titleModel || settings.memoryModel || SMALL_MODEL),
+                      { sessionId: session.id, messageId: assistant.id, task: lineage.findLast((m) => m.role === 'user')?.content ?? '' },
+                      control
+                    )
                 },
                 hooks,
                 signal
@@ -364,9 +391,9 @@ export class Chat extends Context.Service<
           runCost = result.usage?.cost ?? null
           if (result.usage) usage = sumUsage(usage, result.usage)
           if (result.sessionCost !== null) yield* db.use((d) => d.setAgentCost(assistant.id, result.sessionCost!))
-          if (result.maxTurns) {
-            yield* endLine
-            yield* emit(`Stopped after ${MAX_TURNS} steps. Ask me to keep going if you want me to continue.`)
+          if (result.paused) {
+            paused = result.paused.reason
+            pausedMidText = result.paused.signal === 'repeated_text'
           }
         }).pipe(
           Effect.onExit((exit) =>
@@ -378,6 +405,9 @@ export class Chat extends Context.Service<
               const stopped = stopRequested.delete(assistant.id)
               computerReplies.delete(assistant.id)
               meter?.replyEnded({ sessionId: assistant.sessionId, messageId: assistant.id, model, startedAt, endedAt: Date.now(), cost: runCost })
+              // Paused: kept as a stop keeps it, with why, for Continue.
+              // Paused at a tool call, its text had ended; only repeated text is cut off mid-line.
+              if (Exit.isSuccess(exit) && paused) return yield* finish(assistant.id, 'paused', paused, partial && pausedMidText, usage, model)
               if (Exit.isSuccess(exit)) return yield* finish(assistant.id, 'complete', null, false, usage, model)
               if (Cause.hasInterruptsOnly(exit.cause))
                 return yield* finish(assistant.id, stopped ? 'stopped' : 'interrupted', null, partial, usage, model)
@@ -393,8 +423,8 @@ export class Chat extends Context.Service<
         )
       }
 
-      const start = (assistant: Message, partial: string | null = null, carry: string | null = null) =>
-        FiberMap.run(generations, assistant.id, generate(assistant, partial, carry), { onlyIfMissing: true }).pipe(
+      const start = (assistant: Message, partial: string | null = null, carry: string | null = null, pausedFor: string | null = null) =>
+        FiberMap.run(generations, assistant.id, generate(assistant, partial, carry, pausedFor), { onlyIfMissing: true }).pipe(
           Effect.asVoid
         )
 
@@ -573,12 +603,15 @@ export class Chat extends Context.Service<
         const message = yield* messageIn(input.sessionId, input.assistantId)
         if (message.role !== 'assistant') return yield* new InvalidInput({ message: 'Not an assistant reply' })
         if (message.status === 'streaming') return yield* view(input.sessionId)
+        // A paused reply keeps why it was paused for the continuation, and the pause is marked resumed.
+        const pausedFor = message.status === 'paused' ? (message.error ?? '') || null : null
         const carry = yield* db.use((d) => {
           const tail = d.reopenTail(message.id)
+          if (message.status === 'paused') d.resumePause(message.id, Date.now())
           d.setStatus(message.id, 'streaming', null)
           return tail
         })
-        yield* start(message, message.content.trim() ? message.content : null, carry)
+        yield* start(message, message.content.trim() ? message.content : null, carry, pausedFor)
         return yield* view(input.sessionId)
       })
 
