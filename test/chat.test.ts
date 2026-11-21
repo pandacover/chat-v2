@@ -13,6 +13,7 @@ import { Browser, type BrowserApi, type PageSnapshot } from '../src/main/service
 import { SettingsStore } from '../src/main/services/SettingsStore'
 import { Agent } from '../src/main/agent/driver'
 import { BROWSER_INSTRUCTIONS } from '../src/main/agent/browser'
+import { RECALL_INSTRUCTIONS } from '../src/main/agent/recall'
 import { HISTORY_NOTE } from '../src/main/agent/history'
 import { WRITING_GUIDELINES } from '../src/main/guidelines'
 import { ComputerUse, noOverlay, type OverlayPort, type Platform } from '../src/main/computer'
@@ -263,18 +264,38 @@ describe('replies', () => {
     await t.runtime.dispose()
   })
 
-  test('a reply that reaches the step limit says so and stays complete', async () => {
+  test('a reply has no step limit: 55 different calls run to the end, judged at checkpoints', async () => {
     const t = setup(async function* (t) {
-      yield* t.text('Working on it.')
-      yield t.result({ subtype: 'error_max_turns', isError: true, turns: 40 })
+      // The checkpoint judge (a hidden small-model call): clearly progressing.
+      if (isAsk(t.call)) {
+        yield* t.text('{"done": "Read 30 pages", "left": "30 more", "closer": "closer", "verdict": "progressing", "confidence": 0.95}')
+        return void (yield t.result())
+      }
+      for (let i = 0; i < 55; i++) {
+        yield* t.tool('mcp__nothing__look', { page: i })
+        // Let the judge's call run in between, as a real model call would.
+        await new Promise((r) => setTimeout(r, 1))
+      }
+      yield* t.text('Done after 55 calls.')
+      yield t.result({ turns: 56 })
     })
     const s = await t.run(newSession)
     await t.run(sendTo(s, s.rootId, 'Do a lot'))
     await t.waitForDone(1)
-    expect((await t.run(Chat.use((c) => c.view(s.id)))).path[1]!.message).toMatchObject({
-      status: 'complete',
-      content: 'Working on it.\nStopped after 40 steps. Ask me to keep going if you want me to continue.'
-    })
+    expect(t.replies()[0]!.options.maxTurns).toBeUndefined()
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    expect(view.path[1]!.message).toMatchObject({ status: 'complete', content: 'Done after 55 calls.' })
+    // Checkpoints at 30, then 15 later while clearly progressing: 45 (the next, 60, is past the end).
+    const notes = await t.run(Db.use((db) => db.use((d) => d.progressNotes(s.id, 10))))
+    expect(notes.map((n) => [n.step, n.verdict, n.done])).toEqual([
+      [30, 'progressing', 'Read 30 pages'],
+      [45, 'progressing', 'Read 30 pages']
+    ])
+    const judged = t.calls.filter(isAsk)
+    expect(judged).toHaveLength(2)
+    expect(systemOf(judged[0]!)).toContain('You check on an AI assistant')
+    expect(promptText(judged[0]!)).toContain('<task>\nDo a lot\n</task>')
+    expect(promptText(judged[1]!)).toContain('- At step 30: done: Read 30 pages')
     await t.runtime.dispose()
   })
 
@@ -611,6 +632,11 @@ describe('memory', () => {
     await t.run(sendTo(later, later.rootId, 'What should I see this weekend?'))
     await t.waitForDone(2)
     expect(systemOf(t.replies().at(-1)!)).toContain('- Lives in Lisbon.')
+    // Replies can search long-term memory, read-only, with recall.
+    const reply = t.replies().at(-1)!
+    expect(Object.keys(reply.options.mcpServers!)).toEqual(['memory'])
+    expect(reply.options.tools).toEqual(['ToolSearch'])
+    expect(systemOf(reply)).toContain(RECALL_INSTRUCTIONS)
     await t.runtime.dispose()
   })
 
@@ -649,6 +675,7 @@ describe('memory', () => {
     await new Promise((r) => setTimeout(r, 20))
     expect(t.calls).toHaveLength(1)
     expect(t.events.some((e) => e.type === 'memory')).toBe(false)
+    expect(t.calls[0]!.options.mcpServers).toEqual({})
     await t.runtime.dispose()
   })
 })
@@ -1043,3 +1070,68 @@ describe('computer use', () => {
   })
 })
 
+
+describe('stuck replies', () => {
+  test('a reply looping on the same browser call is paused with why, kept, recorded, and Continue resumes it with the reason', async () => {
+    let looped = 0
+    const t = setup(async function* (t) {
+      const last = t.call.prompt.at(-1)?.text ?? ''
+      if (last.includes('cut off')) {
+        yield* t.text('Tried another way: done.')
+        return void (yield t.result())
+      }
+      yield* t.text('Looking at the page.')
+      for (;;) {
+        looped++
+        yield* t.tool('mcp__browser__snapshot')
+      }
+    })
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { browserEnabled: true }))))
+    const view = await t.run(sendTo(s, s.rootId, 'Find the camera settings'))
+    const id = view.path[1]!.message.id
+    await t.waitForDone(1)
+    expect(looped).toBe(4)
+    const paused = (await t.run(Chat.use((c) => c.view(s.id)))).path[1]!.message
+    expect(paused).toMatchObject({ status: 'paused', error: 'It made the same snapshot call 4 times in a row and got the same result each time.' })
+    expect(paused.content.startsWith('Looking at the page.')).toBe(true)
+    expect(t.events.find((e) => e.type === 'done')).toMatchObject({ status: 'paused' })
+    const recorded = await t.run(Db.use((db) => db.use((d) => d.stuckPauses())))
+    expect(recorded).toMatchObject([{ sessionId: s.id, messageId: id, signal: 'same_result', step: 5, resumedAt: null }])
+
+    const point = (await t.run(Db.use((db) => db.use((d) => d.agentPoint(id)))))!
+    await t.run(Chat.use((c) => c.continue({ sessionId: s.id, assistantId: id })))
+    await t.waitForDone(2)
+    const call = t.replies()[1]!
+    expect(call.options).toMatchObject({ resume: point.session, resumeSessionAt: point.uuid })
+    expect(promptText(call)).toContain('You were paused because you seemed stuck: It made the same snapshot call 4 times in a row')
+    expect(promptText(call).endsWith("don't say that you are continuing.")).toBe(true)
+    const done = (await t.run(Chat.use((c) => c.view(s.id)))).path[1]!.message
+    expect(done).toMatchObject({ status: 'complete', error: null })
+    expect(done.content.endsWith('Tried another way: done.')).toBe(true)
+    const [resumed] = await t.run(Db.use((db) => db.use((d) => d.stuckPauses())))
+    expect(resumed!.resumedAt).not.toBeNull()
+    await t.runtime.dispose()
+  })
+
+  test('progress notes and pauses survive a restart in chat.db', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chat-v2-'))
+    const first = setup(reply, undefined, dir)
+    const s = await first.run(newSession)
+    await first.run(
+      Db.use((db) =>
+        db.use((d) => {
+          d.addProgressNote({ sessionId: s.id, messageId: 'm', step: 30, done: 'a', left: 'b', closer: 'closer', verdict: 'progressing', confidence: 0.9, createdAt: 1 })
+          d.addProgressNote({ sessionId: s.id, messageId: 'm', step: 45, done: 'c', left: 'd', closer: 'same', verdict: 'unclear', confidence: 0.5, createdAt: 2 })
+          d.recordPause({ sessionId: s.id, messageId: 'm', signal: 'alternating', reason: 'r', step: 9 }, 3)
+        })
+      )
+    )
+    await first.runtime.dispose()
+    const second = setup(reply, undefined, dir)
+    const [notes, pauses] = await second.run(Db.use((db) => db.use((d) => [d.progressNotes(s.id, 1), d.stuckPauses()] as const)))
+    expect(notes.map((n) => n.step)).toEqual([45])
+    expect(pauses).toMatchObject([{ signal: 'alternating', step: 9, createdAt: 3, resumedAt: null }])
+    await second.runtime.dispose()
+  })
+})

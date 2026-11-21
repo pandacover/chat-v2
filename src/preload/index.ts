@@ -37,7 +37,8 @@ const api: Api = {
     get: () => call('memory:get'),
     add: (fact) => call('memory:add', fact),
     edit: (id, fact) => call('memory:edit', id, fact),
-    remove: (id) => call('memory:remove', id),
+    purge: (id) => call('memory:purge', id),
+    versions: (id) => call('memory:versions', id),
     clear: () => call('memory:clear'),
     restore: (rev) => call('memory:restore', rev)
   },

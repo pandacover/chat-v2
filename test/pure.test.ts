@@ -181,6 +181,7 @@ describe('steps', () => {
     expect(segments.map((s) => s.type)).toEqual(['text', 'steps', 'text'])
     expect(segments[1]).toMatchObject({ steps: [{ label: 'Opened example.com' }, { label: 'Clicked “Buy”' }] })
     expect(summarizeSteps(content)).toBe('Let me look.\n[Used the browser: Opened example.com; Clicked “Buy”]\nDone.')
+    expect(summarizeSteps(stepLine({ tool: 'memory_recall', label: 'Recalled “Kyoto”', ok: true }))).toBe('[Used memory: Recalled “Kyoto”]')
   })
 
   test('text without steps is one segment, and blank text none', () => {

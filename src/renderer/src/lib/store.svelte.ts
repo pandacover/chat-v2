@@ -70,6 +70,8 @@ class AppState {
   bots = $state<Bot[]>([])
   jobs = $state<Job[]>([])
   primaryBot = $derived(this.bots.find((b) => b.isPrimary) ?? null)
+  /** The id of the primary bot's conversation, once loaded. */
+  primaryId = $state<string | null>(null)
   /** The primary bot's conversation is open (rather than a job's thread). */
   isPrimary = $derived(this.view?.session.kind === 'primary')
   /** Each job by its thread, for labelling turns and finding a thread's job. */
@@ -494,6 +496,7 @@ class AppState {
 
   /** Installs a fresh view and catches up any replies that are still streaming. */
   setView(view: SessionView) {
+    if (view.session.kind === 'primary') this.primaryId = view.session.id
     if (this.view?.session.id !== view.session.id) this.artifact = null
     this.view = view
     for (const node of view.path) {

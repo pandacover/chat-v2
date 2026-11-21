@@ -229,7 +229,16 @@ const script = (route: string[]): Script =>
       yield t.result()
       return
     }
-    yield* t.text(`Reply to ${promptText(t.call).split('\n---\n').at(-1)}`)
+    const said = promptText(t.call).split('\n---\n').at(-1) ?? ''
+    // "recall: words" searches memory and says what came back.
+    const query = /^recall: (.+)$/.exec(said)?.[1]
+    if (query) {
+      const found = yield* t.tool('mcp__memory__recall', { query })
+      yield* t.text(`Recalled: ${(found.result?.content ?? []).map((c) => c.text ?? '').join('')}`)
+      yield t.result()
+      return
+    }
+    yield* t.text(`Reply to ${said}`)
     yield t.result()
   }
 
@@ -259,6 +268,10 @@ const setup = (route: string[], config: Record<string, unknown> = { titleModel: 
 
 const send = (text: string, target: 'auto' | 'new' | { jobId: string } = 'auto') => Jobs.use((j) => j.send({ text, attachmentIds: [], target }))
 const listJobs = Db.use((db) => db.use((d) => d.listJobs()))
+const replies = (calls: Call[]) => calls.filter((c) => !isAsk(c))
+const until = async (ok: () => Promise<boolean>) => {
+  for (let i = 0; i < 400 && !(await ok()); i++) await new Promise((r) => setTimeout(r, 5))
+}
 
 describe('talking to the primary bot', () => {
   test('routes each message to a job, keeps the conversation in order, and moves a wrong guess', async () => {
@@ -351,6 +364,81 @@ describe('talking to the primary bot', () => {
     // Deleting a job takes its thread with it.
     await t.run(Jobs.use((j) => j.remove(firstJob.id)))
     expect((await t.run(listJobs)).map((j) => j.title)).toEqual(['Second topic'])
+    await t.runtime.dispose()
+  })
+})
+
+describe('jobs and memory', () => {
+  test("a job's replies keep its notes and recall them; a finished job is archived, a deleted one forgotten", async () => {
+    const t = setup([], { titleModel: 'claude-haiku-5-5', memoryModel: 'claude-haiku-5-5', systemPrompt: 'Be a fox.' })
+    await t.run(send('Fix the garden gate'))
+    await t.settle(() => t.doneCount() >= 1)
+    let [job] = await t.run(listJobs)
+    // A reply on a job gets the notes tool, and recall scoped to its bot and job.
+    const first = replies(t.calls)[0]!
+    expect(Object.keys(first.options.mcpServers ?? {})).toEqual(expect.arrayContaining(['notes', 'memory']))
+    expect(systemOf(first)).not.toContain('Notes on this job so far')
+
+    // Notes written on the job show in the next reply's instructions, and recall finds them in that job only.
+    await t.run(Db.use((db) => db.use((d) => d.writeNote(job!.id, { kind: 'state', text: 'Hinge ordered, zanzibar bolts pending.' }, { sessionId: job!.threadId }))))
+    await t.run(send('recall: zanzibar', { jobId: job!.id }))
+    await t.settle(() => t.doneCount() >= 2)
+    const second = replies(t.calls)[1]!
+    expect(systemOf(second)).toContain('Notes on this job so far')
+    expect(systemOf(second)).toContain('Hinge ordered, zanzibar bolts pending.')
+    expect((await t.run(Jobs.use((j) => j.primary))).path.at(-1)!.message.content).toContain('Hinge ordered')
+    await t.run(send('recall: zanzibar', 'new'))
+    await t.settle(() => t.doneCount() >= 3)
+    expect((await t.run(Jobs.use((j) => j.primary))).path.at(-1)!.message.content).toContain('Nothing in memory matches')
+
+    // Finished: filed in the archive with its one-line summary.
+    await until(async () => !!(await t.run(listJobs)).find((j) => j.id === job!.id)?.summary)
+    job = (await t.run(listJobs)).find((j) => j.id === job!.id)!
+    expect(job.summary).toBeTruthy()
+    await t.run(Jobs.use((j) => j.setStatus(job!.id, 'done')))
+    const archived = Db.use((db) => db.use((d) => d.records('archive', job!.id)))
+    await until(async () => (await t.run(archived)).length > 0)
+    expect((await t.run(archived))[0]).toMatchObject({ type: 'job', title: job.title, body: job.summary! })
+
+    // Deleted: its notes and archive record go with it.
+    await t.run(Jobs.use((j) => j.remove(job!.id)))
+    expect(await t.run(archived)).toEqual([])
+    expect(await t.run(Db.use((db) => db.use((d) => d.jobNotes(job!.id))))).toEqual([])
+    await t.runtime.dispose()
+  })
+
+  test('a finished job with no summary yet gets one from the small model for the archive', async () => {
+    const t = setup([], { titleModel: 'claude-haiku-5-5', memoryModel: 'claude-haiku-5-5', systemPrompt: 'Be a fox.' })
+    await t.run(send('Paint the fence'))
+    await t.settle(() => t.doneCount() >= 1)
+    const [job] = await t.run(listJobs)
+    // The summary written after the reply, taken away again.
+    await until(async () => !!(await t.run(listJobs))[0]!.summary)
+    await t.run(Db.use((db) => db.use((d) => d.setJobSummary(job!.id, null))))
+    const asked = t.calls.filter((c) => systemOf(c) === SUMMARY_INSTRUCTIONS).length
+    await t.run(Jobs.use((j) => j.setStatus(job!.id, 'done')))
+    const archived = Db.use((db) => db.use((d) => d.records('archive', job!.id)))
+    await until(async () => (await t.run(archived)).length > 0)
+    expect((await t.run(archived))[0]!.body).toBe('Summary of: Paint the fence')
+    expect(t.calls.filter((c) => systemOf(c) === SUMMARY_INSTRUCTIONS).length).toBe(asked + 1)
+    expect((await t.run(listJobs))[0]!.summary).toBe('Summary of: Paint the fence')
+    await t.runtime.dispose()
+  })
+
+  test('what memory learns in a job records the job and its thread as the source', async () => {
+    const t = setup([], { titleModel: '', memoryModel: '' })
+    await t.run(send('Plan the trip'))
+    await t.settle(() => t.doneCount() >= 1)
+    const [job] = await t.run(listJobs)
+    const versions = await t.run(
+      Db.use((db) =>
+        db.use((d) => {
+          d.changeMemory({ add: ['Lives in Lisbon.'], update: [], remove: [] }, { kind: 'learned', sessionId: job!.threadId, jobId: job!.id })
+          return d.recordVersions(d.profile()[0]!.id)
+        })
+      )
+    )
+    expect(versions[0]).toMatchObject({ sourceJobId: job!.id, sourceSessionId: job!.threadId, sourceTitle: job!.title })
     await t.runtime.dispose()
   })
 })

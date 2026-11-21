@@ -40,7 +40,8 @@ const abortError = () => Object.assign(new Error('Claude Code process aborted by
 
 export const fakeQuery = (script: Script) => {
   const calls: Call[] = []
-  const query: QueryFn = (params) =>
+  type State = { ended: boolean; interrupted: boolean }
+  const run = (params: Parameters<QueryFn>[0], state: State) =>
     (async function* () {
       const options = params.options
       let prompt: Call['prompt'] = []
@@ -88,6 +89,25 @@ export const fakeQuery = (script: Script) => {
             if (server && tool) result = (await (await clientFor(server)).callTool({ name: tool, arguments: (permission.updatedInput ?? input) as Record<string, unknown> })) as ToolResult
           }
           const content = result?.content ?? [{ type: 'text', text: permission.behavior === 'deny' ? permission.message : '' }]
+          // PostToolUse hooks, as Claude Code runs them for a call that ran: their context rides along
+          // with the result, and `continue: false` ends the query after it.
+          if (permission.behavior === 'allow') {
+            const failed = result?.isError === true
+            const event = failed ? 'PostToolUseFailure' : 'PostToolUse'
+            const input_ = failed
+              ? { hook_event_name: event, tool_name: name, tool_input: input, tool_use_id: id, error: content.map((c) => c.text ?? '').join('') }
+              : { hook_event_name: event, tool_name: name, tool_input: input, tool_use_id: id, tool_response: result }
+            for (const matcher of options.hooks?.[event] ?? [])
+              for (const hook of matcher.hooks) {
+                const out = (await hook({ session_id: session, transcript_path: '', cwd: '', ...input_ } as never, id, { signal: signal ?? new AbortController().signal })) as {
+                  continue?: boolean
+                  hookSpecificOutput?: { additionalContext?: string }
+                }
+                const context = out.hookSpecificOutput?.additionalContext
+                if (context) content.push({ type: 'text', text: `<system-reminder>\n${context}\n</system-reminder>` })
+                if (out.continue === false) state.ended = true
+              }
+          }
           yield { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content }] }, uuid: uuid(), ...base } as unknown as SDKMessage
           return { permission, result }
         },
@@ -124,11 +144,34 @@ export const fakeQuery = (script: Script) => {
         yield { type: 'system', subtype: 'init', tools: options.tools, mcp_servers: [], model: options.model, session_id: session, uuid: uuid() } as unknown as SDKMessage
         for await (const m of script(turn)) {
           if (signal?.aborted) throw abortError()
+          if (state.interrupted) {
+            yield turn.result({ subtype: 'error_during_execution', isError: true })
+            return
+          }
           yield m
+          if (state.ended) {
+            yield turn.result()
+            return
+          }
         }
       } finally {
         for (const c of clients.values()) await c.close()
       }
     })()
-  return { query, calls }
+  /** How many times interrupt() was called, over all queries. */
+  let interrupts = 0
+  // Like the SDK's Query: an async generator with interrupt(), which ends the turn at the next
+  // message. A hook's `continue: false` ends it too.
+  const query: QueryFn = (params) => {
+    const state: State = { ended: false, interrupted: false }
+    return Object.assign(run(params, state), {
+      interrupt: async () => {
+        interrupts++
+        state.interrupted = true
+      }
+    })
+  }
+  /** The same without interrupt(), as a stand-in that can only be aborted. */
+  const plain: QueryFn = (params) => run(params, { ended: false, interrupted: false })
+  return { query, plain, calls, interrupts: () => interrupts }
 }

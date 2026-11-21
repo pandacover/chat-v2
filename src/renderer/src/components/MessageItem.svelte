@@ -7,6 +7,7 @@
   import { stopShortcutLabel } from '@shared/computer'
   import { isMac } from '@/lib/keys'
   import ComputerWaitCard from './ComputerWaitCard.svelte'
+  import PauseCard from './PauseCard.svelte'
   import StepList from './StepList.svelte'
   import type { Attachment, Job, PathNode } from '@shared/types'
   import BotAvatar from './BotAvatar.svelte'
@@ -16,8 +17,8 @@
   import BranchSwitcher from './BranchSwitcher.svelte'
   import Icon from './Icon.svelte'
   import Markdown from './Markdown.svelte'
+  import Mascot from './Mascot.svelte'
   import { usageDetail, usageShort } from '@/lib/usage'
-  import { orb } from '@/lib/orb'
   import { listEditing } from '@/lib/textarea'
 
   let {
@@ -281,7 +282,7 @@
     {#if author}
       <!-- Who answered, and in which job: the primary's conversation runs across jobs. -->
       <div class="-mb-1 flex h-6 min-w-0 items-center gap-2 text-[13px]" data-reply-author>
-        <BotAvatar bot={author} size={22} />
+        <BotAvatar bot={author} size={22} state={streaming ? 'thinking' : ''} />
         <span class="shrink-0 font-medium text-fg">{author.name}</span>
         {#if job}
           <span class="text-fg-4">·</span>
@@ -346,7 +347,7 @@
       <StepList steps={[]} live running {doing} />
     {:else if streaming && blocks.length === 0}
       <div class="flex h-[26px] items-center gap-2.5 text-[14px]" aria-live="polite">
-        <span class="orb" style="--s: 18px" use:orb={{ state: 'thinking' }}></span><span class="thinking">Thinking</span>
+        <Mascot size={20} state="thinking" /><span class="thinking">Thinking</span>
       </div>
     {/if}
     {#if computerRun}
@@ -369,6 +370,9 @@
       </div>
     {/if}
 
+    {#if message.status === 'paused'}
+      <PauseCard messageId={message.id} reason={message.error} {busy} />
+    {/if}
     {#if message.status === 'interrupted' || message.status === 'stopped' || message.status === 'error'}
       <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] {message.status === 'error' ? 'text-danger' : 'text-fg-3'}" in:fade>
         <span class="flex items-center gap-1.5">

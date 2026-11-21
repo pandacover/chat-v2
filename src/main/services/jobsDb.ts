@@ -362,7 +362,7 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
     setJobStatus: (id: string, status: JobStatus) => {
       run('update jobs set status = ? where id = ?', status, id)
     },
-    setJobSummary: (id: string, summary: string) => {
+    setJobSummary: (id: string, summary: string | null) => {
       run('update jobs set summary = ? where id = ?', summary, id)
     },
     /** Renames a job and its threads. */

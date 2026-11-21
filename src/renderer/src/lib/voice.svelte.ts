@@ -1,10 +1,10 @@
-// Voice input, shared by the composer's mic and the orb on Home. Hold the mic to talk, or click
-// once to start and again to stop; Ctrl+M (Cmd+M) toggles it, Esc cancels. ElevenLabs Scribe
+// Voice input, from the composer's mic. Hold the mic to talk, or click once to start and again
+// to stop; Ctrl+M (Cmd+M) toggles it, Esc cancels. ElevenLabs Scribe
 // transcribes it, and the text goes into the composer.
 //
 // On a new chat, talking opens the voice stage (`home`): the composer docks, the rest fades, and
-// the orb takes the centre as the visualiser. In a chat the orb takes the mic button's place.
-// Either way the orb swells with `level` and sends out a ring on each spike (`spikes`).
+// the mascot takes the centre as the visualiser. In a chat the mascot takes the mic button's place.
+// Either way the mascot swells with `level` and sends out a ring on each spike (`spikes`).
 import { app } from './store.svelte'
 import { startRecording, type Recording } from './recorder'
 
@@ -15,7 +15,7 @@ class Voice {
   elapsed = $state(0)
   /** The voice's loudness, smoothed, 0..1. */
   level = $state(0)
-  /** Bumped on each spike in the voice, for the orb's ring. */
+  /** Bumped on each spike in the voice, for the mascot's ring. */
   spikes = $state(0)
   /** The voice stage on a new chat: listening (or transcribing), then ready to send. */
   home = $state<'off' | 'on' | 'ready'>('off')

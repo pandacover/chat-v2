@@ -9,7 +9,7 @@ export interface Recording {
   /** Stops capture and resolves with the recorded audio. */
   stop(): Promise<{ data: ArrayBuffer; mime: string }>
   cancel(): void
-  /** The voice's loudness now, 0..1 (what the orb swells with). */
+  /** The voice's loudness now, 0..1 (what the mascot swells with). */
   level(): number
 }
 
@@ -36,7 +36,7 @@ export const startRecording = async (): Promise<Recording> => {
     audio.createMediaStreamSource(stream).connect(analyser)
     buf = new Float32Array(analyser.fftSize)
   } catch {
-    // No meter: the orb animates by its state alone.
+    // No meter: the mascot animates by its state alone.
   }
 
   const release = () => {

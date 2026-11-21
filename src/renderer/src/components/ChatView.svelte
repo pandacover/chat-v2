@@ -3,7 +3,6 @@
   import { tick, untrack } from 'svelte'
   import { isClaudeModel } from '@shared/models'
   import { fade, fly, pop } from '@/lib/motion'
-  import { orb } from '@/lib/orb'
   import { shortcut } from '@/lib/keys'
   import { app } from '@/lib/store.svelte'
   import { clock, voice } from '@/lib/voice.svelte'
@@ -11,6 +10,7 @@
   import BotAvatar from './BotAvatar.svelte'
   import Composer from './Composer.svelte'
   import JobChip from './JobChip.svelte'
+  import Mascot from './Mascot.svelte'
   import Icon from './Icon.svelte'
   import MessageItem from './MessageItem.svelte'
   import SelectionReply from './SelectionReply.svelte'
@@ -22,7 +22,7 @@
   let dockH = $state(0)
   let heroSlot: HTMLDivElement | undefined = $state()
   let stageSlot: HTMLDivElement | undefined = $state()
-  let orbButton: HTMLButtonElement | undefined = $state()
+  let mascotHost: HTMLDivElement | undefined = $state()
   let composer: ReturnType<typeof Composer> | undefined = $state()
   let pinned = $state(true)
   let promptOpen = $state(false)
@@ -41,7 +41,7 @@
       { message: { ...base, id: 'pending-reply', role: 'assistant', content: '', status: 'streaming', authorBotId: app.primaryBot?.id ?? null }, siblingIds: [], siblingIndex: 0 }
     ]
   })
-  /** Voice on a new chat: the composer docks, the rest fades, and the orb takes the centre. */
+  /** Voice on a new chat: the composer docks, the rest fades, and the mascot takes the centre. */
   const stage = $derived(empty && voice.home !== 'off')
   // A chat from before Claude keeps its old model id; it now runs on the default.
   const model = $derived(isClaudeModel(app.chat.model) ? app.chat.model : (app.settings?.settings.defaultModel ?? ''))
@@ -206,18 +206,18 @@
   })
 
   /**
-   * The Home orb floats over the canvas, over whichever slot holds it: the hero's, or the voice
+   * The Home mascot floats over the canvas, over whichever slot holds it: the hero's, or the voice
    * stage's centre. It glides between them, growing as it goes.
    */
-  let orbAt = $state<{ x: number; y: number; s: number } | null>(null)
-  let orbGlides = $state(false)
+  let mascotAt = $state<{ x: number; y: number; s: number } | null>(null)
+  let mascotGlides = $state(false)
   const place = () => {
     const slot = stage ? stageSlot : heroSlot
     if (!canvas || !slot) return
     const c = canvas.getBoundingClientRect()
     const r = slot.getBoundingClientRect()
     const s = stage ? 168 : 88
-    orbAt = { x: r.left - c.left + r.width / 2 - s / 2, y: r.top - c.top + r.height / 2 - s / 2, s }
+    mascotAt = { x: r.left - c.left + r.width / 2 - s / 2, y: r.top - c.top + r.height / 2 - s / 2, s }
   }
   $effect(() => {
     void stage
@@ -229,18 +229,18 @@
   $effect(() => {
     if (!canvas) return
     const observer = new ResizeObserver(() => {
-      orbGlides = false
+      mascotGlides = false
       place()
-      requestAnimationFrame(() => (orbGlides = true))
+      requestAnimationFrame(() => (mascotGlides = true))
     })
     observer.observe(canvas)
     return () => observer.disconnect()
   })
 
-  // A ring leaves the orb on each spike in the voice.
+  // A ring leaves the mascot on each spike in the voice.
   $effect(() => {
     void voice.spikes
-    const host = untrack(() => orbButton)
+    const host = untrack(() => mascotHost)
     if (!host || !untrack(() => stage) || untrack(() => voice.spikes) === 0) return
     const ring = document.createElement('span')
     ring.className = 'ripple'
@@ -250,12 +250,8 @@
     ring.addEventListener('animationend', () => ring.remove())
   })
 
-  const orbState = $derived(voice.phase === 'recording' || voice.phase === 'starting' ? 'listening' : voice.phase === 'transcribing' ? 'thinking' : '')
+  const mascotState = $derived(voice.phase === 'recording' || voice.phase === 'starting' ? 'listening' : voice.phase === 'transcribing' ? 'thinking' : '')
   const homeVoice = $derived(empty)
-  const orbClick = () => {
-    if (voice.phase === 'transcribing' || voice.phase === 'starting') return
-    voice.toggle()
-  }
 
   const toggleBrowser = async () => {
     const next = !app.chat.browserEnabled
@@ -402,32 +398,25 @@
       </div>
       <div class="mt-2.5 flex h-[18px] items-center gap-2.5 text-[13px] text-fg-3">
         {#if voice.home === 'ready' && voice.phase === 'idle'}
-          <span>Enter to send · click the orb to keep talking · Esc to start over</span>
+          <span>Enter to send · {shortcut('M')} to keep talking · Esc to start over</span>
         {:else if voice.phase !== 'transcribing'}
           <span class="font-label text-[12.5px] font-medium text-fg-2 tabular-nums">{clock(voice.elapsed)}</span>
-          <span>{voice.held ? 'Release to transcribe' : 'Click the orb to finish · Esc to cancel'}</span>
+          <span>{voice.held ? 'Release to transcribe' : `${shortcut('M')} or the mic to finish · Esc to cancel`}</span>
         {/if}
       </div>
     </div>
 
-    {#if orbAt}
-      <button
-        bind:this={orbButton}
-        class="absolute z-[2] grid place-items-center rounded-full {orbGlides ? 'orb-glide' : ''}"
-        style="left: {orbAt.x}px; top: {orbAt.y}px; width: {orbAt.s}px; height: {orbAt.s}px"
-        aria-label={voice.recording ? 'Finish talking' : 'Talk'}
-        data-tip-no-label
-        use:tip={stage ? null : { text: 'Talk', kbd: shortcut('M') }}
-        onclick={orbClick}
+    {#if mascotAt}
+      <!-- Not a control: voice starts and stops from the composer's mic and Ctrl+M (Cmd+M). -->
+      <div
+        bind:this={mascotHost}
+        class="pointer-events-none absolute z-[2] {mascotGlides ? 'mascot-glide' : ''}"
+        style="left: {mascotAt.x}px; top: {mascotAt.y}px; width: {mascotAt.s}px; height: {mascotAt.s}px"
         in:fade={{ duration: 260 }}
-        onintroend={() => (orbGlides = true)}
+        onintroend={() => (mascotGlides = true)}
       >
-        <span
-          class="orb"
-          style="--s: 100%; --lvl: {stage ? voice.level.toFixed(3) : 0}"
-          use:orb={{ state: orbState, level: stage && voice.recording ? voice.level : undefined }}
-        ></span>
-      </button>
+        <Mascot size="100%" state={stage ? mascotState : ''} level={stage && voice.recording ? voice.level : undefined} />
+      </div>
     {/if}
   {/if}
 </section>
@@ -477,7 +466,7 @@
   .thread-fade {
     mask-image: linear-gradient(to bottom, #000 calc(100% - 46px), transparent calc(100% - 16px));
   }
-  .orb-glide {
+  .mascot-glide {
     transition:
       left 650ms var(--ease-studio),
       top 650ms var(--ease-studio),

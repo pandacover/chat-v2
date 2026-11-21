@@ -26,8 +26,9 @@ export class Jobs extends Context.Service<
     readonly send: (input: { text: string; attachmentIds: string[]; target: JobTarget }) => Effect.Effect<SessionView, JobsError>
     /** Moves the primary's newest turn to another job (or a new one), replies and all: a wrong guess put right. */
     readonly move: (input: { messageId: string; target: 'new' | { jobId: string } }) => Effect.Effect<SessionView, JobsError>
+    /** Marks a job finished (filing it in memory's archive) or open again. */
     readonly setStatus: (jobId: string, status: JobStatus) => Effect.Effect<void, DbError>
-    /** Deletes a job, its threads and the files and Claude Code sessions only they used. */
+    /** Deletes a job, its threads, its notes and archive record, and the files and Claude Code sessions only they used. */
     readonly remove: (jobId: string) => Effect.Effect<void, DbError>
   }
 >()('chat-v2/Jobs') {
@@ -174,6 +175,7 @@ export class Jobs extends Context.Service<
           // A job made for this message alone goes with it.
           if (from.jobId && d.threadEmpty(from.id)) {
             const job = d.deleteJob(from.jobId)
+            d.forgetJob(from.jobId)
             return { files: [...gone.files, ...job.files], agentSessions: [...gone.agentSessions, ...job.agentSessions] }
           }
           return gone
@@ -187,7 +189,12 @@ export class Jobs extends Context.Service<
         Effect.gen(function* () {
           const threads = yield* db.use((d) => d.listSessions().filter((s) => s.jobId === jobId))
           for (const t of threads) for (const id of yield* db.use((d) => d.streamingIds(t.id))) yield* chat.stop(id)
-          const orphans = yield* db.use((d) => d.deleteJob(jobId))
+          // The job's notes and its archive record go with it, for good.
+          const orphans = yield* db.use((d) => {
+            const gone = d.deleteJob(jobId)
+            d.forgetJob(jobId)
+            return gone
+          })
           yield* forget(orphans).pipe(Effect.ignore)
           changed()
         })
@@ -218,6 +225,47 @@ export class Jobs extends Context.Service<
             Cause.hasInterruptsOnly(cause) ? Effect.void : Effect.logWarning(`Job summary failed: ${errorMessage(Cause.squash(cause))}`)
           )
         )
+      /**
+       * Files a finished job in memory's archive, where `recall` finds it later: its one-line
+       * summary, or one the small model writes from the last exchange when it has none yet. Nothing
+       * is kept while memory is off.
+       */
+      const archiving = yield* FiberMap.make<string>()
+      const archive = (jobId: string) =>
+        Effect.gen(function* () {
+          const settings = yield* settingsStore.get.pipe(Effect.orElseSucceed(() => null))
+          if (!settings?.memoryModel) return
+          const info = yield* db.use((d) => {
+            const job = d.getJob(jobId)
+            const thread = job?.threadId ? d.getSession(job.threadId) : undefined
+            if (!job || job.status !== 'done' || !thread) return null
+            const path = d.activePath(thread)
+            const reply = path.findLast((n) => n.message.role === 'assistant')?.message
+            const user = path.findLast((n) => n.message.role === 'user')?.message
+            return { job, thread, user, reply }
+          })
+          if (!info) return
+          let summary = info.job.summary
+          if (!summary && settings.titleModel && info.reply) {
+            const reply = yield* ask(settings.titleModel, SUMMARY_INSTRUCTIONS, summaryPrompt(info.job, info.user?.content ?? '', info.reply.content), '30 seconds')
+            summary = cleanSummary(reply)
+            if (summary) yield* db.use((d) => d.setJobSummary(jobId, summary!))
+          }
+          yield* db.use((d) => d.archiveJob(jobId, summary ?? info.job.title, { title: info.job.title, sessionId: info.thread.id }))
+          changed()
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause) ? Effect.void : Effect.logWarning(`Archiving a job failed: ${errorMessage(Cause.squash(cause))}`)
+          )
+        )
+
+      const setStatus = (jobId: string, status: JobStatus) =>
+        Effect.gen(function* () {
+          yield* db.use((d) => d.setJobStatus(jobId, status))
+          changed()
+          if (status === 'done') yield* FiberMap.run(archiving, jobId, archive(jobId))
+        })
+
       const unsubscribe = chat.onReplyEnd(({ messageId, status }) => {
         const thread = Effect.runSync(db.use((d) => d.getMessage(messageId)?.sessionId ?? null).pipe(Effect.orElseSucceed(() => null)))
         if (thread) Effect.runFork(FiberMap.run(summaries, thread, summarize(messageId, status)))
@@ -228,7 +276,7 @@ export class Jobs extends Context.Service<
         primary,
         send,
         move,
-        setStatus: (jobId, status) => db.use((d) => d.setJobStatus(jobId, status)).pipe(Effect.tap(() => Effect.sync(changed))),
+        setStatus,
         remove
       })
     })
