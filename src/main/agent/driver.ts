@@ -14,6 +14,7 @@ import type { Step } from '@shared/steps'
 import type { Effort, NewAttachmentInput, Usage } from '@shared/types'
 import { errorMessage } from '../errors'
 import type { RunContext, ToolModule, ToolModuleFactory } from './module'
+import { type AccountReading, REJECTED, probeAccount, rateLimitOf } from '../usage/sdk'
 
 /** `query` from the SDK, or a stand-in in tests. */
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => AsyncIterable<SDKMessage>
@@ -73,6 +74,8 @@ export interface ReplyHooks {
   attach(file: NewAttachmentInput): Promise<void>
   /** The newest entry of this reply in its session: where the next turn continues from. */
   checkpoint(uuid: string): void
+  /** A rate-limit event (the SDK's SDKRateLimitInfo; see usage/sdk.ts), or a failure on a rate limit. */
+  rateLimit?(info: unknown): void
 }
 
 export interface ReplyResult {
@@ -213,6 +216,8 @@ export interface AgentApi {
   readonly hasSession: (id: string) => boolean
   /** Deletes the files of sessions no chat needs any more. */
   readonly forget: (ids: readonly string[]) => void
+  /** Reads the account's usage meter, without calling a model (see usage/sdk.ts). */
+  readonly readUsage: (auth: Auth) => Promise<AccountReading>
 }
 
 export const makeAgent = (deps: AgentDeps): AgentApi => {
@@ -292,9 +297,22 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
       let failure: Failure | null = null
       // Built-in tool calls waiting for their result, with the step line each gets then.
       const builtinCalls = new Map<string, Step>()
+      // A failure on a rate limit pauses the reply (services/Chat.ts) when no event said so already.
+      let rejected = false
+      const limited = (said: string) => {
+        if (rejected || (failure?.kind ?? kindOf(said)) !== 'rate_limit') return
+        rejected = true
+        hooks.rateLimit?.(REJECTED)
+      }
       try {
         for await (const m of deps.query({ prompt: once(req.prompt), options })) {
           if (abort.signal.aborted) break
+          const limit = rateLimitOf(m)
+          if (limit !== undefined) {
+            rejected ||= (limit as { status?: string }).status === 'rejected'
+            hooks.rateLimit?.(limit)
+            continue
+          }
           // A subagent's messages; the reply is the main thread's.
           if ('parent_tool_use_id' in m && m.parent_tool_use_id) continue
           if (m.type === 'stream_event') {
@@ -304,6 +322,7 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
           } else if (m.type === 'assistant') {
             hooks.checkpoint(m.uuid)
             if (m.error) failure = { kind: m.error, text: textOf(m.message.content) }
+            if (m.error === 'rate_limit') limited('')
             for (const b of m.message.content) {
               if (b.type !== 'tool_use') continue
               const owner = modules.find((x) => x.builtins?.includes(b.name))
@@ -325,6 +344,7 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
         }
       } catch (e) {
         if (abort.signal.aborted) throw abortError()
+        limited(errorMessage(e))
         throw new AgentError(explain(failure, errorMessage(e), req.auth, req.model))
       }
       if (abort.signal.aborted) throw abortError()
@@ -333,7 +353,9 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
       const usage = usageOf(result, Math.max(0, sessionCost - req.session.baseCost))
       if (result.subtype === 'error_max_turns') return { usage, sessionCost, maxTurns: true }
       if (result.subtype !== 'success' || result.is_error) {
-        throw new AgentError(explain(failure, result.subtype === 'success' ? result.result : result.errors.join(' '), req.auth, req.model))
+        const said = result.subtype === 'success' ? result.result : result.errors.join(' ')
+        limited(said)
+        throw new AgentError(explain(failure, said, req.auth, req.model))
       }
       return { usage, sessionCost, maxTurns: false }
     } finally {
@@ -388,6 +410,7 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
     reply,
     ask,
     hasSession: (id) => sessionFiles(id).length > 0,
+    readUsage: (auth) => probeAccount(deps.query, base(auth)),
     forget: (ids) => {
       for (const id of ids)
         for (const file of sessionFiles(id)) {

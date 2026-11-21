@@ -16,6 +16,7 @@ import type {
 } from '@shared/types'
 import type { ComputerMode } from '@shared/computer'
 import { DbError, NotFound, errorMessage } from '../errors'
+import { usageRows } from '../usage/rows'
 
 const MIGRATIONS: string[] = [
   `create table sessions (
@@ -112,7 +113,43 @@ const MIGRATIONS: string[] = [
   alter table messages add column agent_cost real;
   create index messages_agent_session on messages(agent_session);`,
   // What a computer chat's last message was read as: 'do' (operate the computer) or 'teach' (show me how).
-  `alter table sessions add column computer_mode text not null default 'do';`
+  `alter table sessions add column computer_mode text not null default 'do';`,
+  // Usage (src/main/usage): each run of a reply with its API-equivalent cost and when it ran, and
+  // readings of the plan's usage windows, from which a chat's (later, a job's) share is estimated;
+  // and replies paused at a limit, which continue by themselves at resume_at. Runs keep no link to
+  // their chat, so deleting it leaves the dollars spent in the totals. Earlier replies' costs are
+  // carried over, timed when they started.
+  `create table usage_runs (
+    id integer primary key autoincrement,
+    session_id text not null,
+    message_id text,
+    auth text,
+    model text,
+    started_at integer not null,
+    ended_at integer not null,
+    cost real not null default 0
+  );
+  create index usage_runs_ended on usage_runs(ended_at);
+  create table usage_samples (
+    id integer primary key autoincrement,
+    win text not null,
+    percent real not null,
+    resets_at integer,
+    at integer not null,
+    source text not null
+  );
+  create index usage_samples_win on usage_samples(win, at);
+  create table usage_pauses (
+    message_id text primary key references messages(id) on delete cascade,
+    session_id text not null,
+    win text,
+    resets_at integer,
+    resume_at integer not null,
+    created_at integer not null
+  );
+  insert into usage_runs (session_id, message_id, model, started_at, ended_at, cost)
+    select session_id, id, model, created_at, created_at, coalesce(json_extract(usage, '$.cost'), 0)
+      from messages where role = 'assistant' and usage is not null and json_valid(usage);`
 ]
 
 /** At most this many facts are kept; past it, new ones are dropped until some are removed. */
@@ -874,6 +911,7 @@ export const makeDb = (file: string) => {
       run('update sessions set memory_rev = ? where id = ?', rev, sessionId)
       return rev
     },
+    ...usageRows({ all, one, run }),
     close: () => db.close()
   }
 }

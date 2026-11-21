@@ -24,6 +24,7 @@ import { makeElectronOverlay } from './computer/overlay'
 import { type Bitmap, type Pointer, makePointer } from './computer/point'
 import { isSensitive } from './memory'
 import { Db } from './services/Db'
+import { Usage } from './usage/Usage'
 import { ElevenLabs } from './services/ElevenLabs'
 import { type SecretCipher, SettingsStore } from './services/SettingsStore'
 
@@ -245,11 +246,16 @@ const makeRuntime = () => {
     Layer.provideMerge(base)
   )
   const computer = computerLayer.pipe(Layer.provide(base))
+  // The usage meter and limit pauses (src/main/usage), which Chat reports replies to.
+  // CHAT_V2_MIN_PAUSE_MS (tests only): how soon a paused reply may continue, instead of a minute.
+  const minPause = Number(process.env.CHAT_V2_MIN_PAUSE_MS)
+  const timing = Number.isFinite(minPause) && minPause >= 0 ? { minPauseMs: minPause, marginMs: Math.min(minPause, 15_000) } : {}
+  const usage = Usage.layer((e) => sendAll('usage:event', e), timing).pipe(Layer.provide(providers))
   const chat = Chat.layer.pipe(
-    Layer.provide(Layer.merge(providers, computer)),
+    Layer.provide(Layer.mergeAll(providers, computer, usage)),
     Layer.provide(Layer.succeed(Broadcaster, broadcaster))
   )
-  return ManagedRuntime.make(Layer.mergeAll(chat, providers, computer))
+  return ManagedRuntime.make(Layer.mergeAll(chat, providers, computer, usage))
 }
 
 let runtime: ManagedRuntime.ManagedRuntime<MainServices | AppPaths, unknown> | null = null

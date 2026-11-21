@@ -15,8 +15,9 @@ import { Db, type DbApi } from './services/Db'
 import { isSensitive } from './memory'
 import { ElevenLabs } from './services/ElevenLabs'
 import { SettingsStore } from './services/SettingsStore'
+import { Usage } from './usage/Usage'
 
-export type MainServices = Db | Chat | Attachments | SettingsStore | Agent | ElevenLabs | Browser | ComputerUse
+export type MainServices = Db | Chat | Attachments | SettingsStore | Agent | ElevenLabs | Browser | ComputerUse | Usage
 
 type Handler = (...args: any[]) => Effect.Effect<unknown, { readonly _tag: string; readonly message: string }, MainServices>
 
@@ -248,6 +249,13 @@ const handlers: Record<string, Handler> = {
       return path
     }),
   'browser:reveal': (path) => Effect.sync(() => shell.showItemInFolder(str(path, 'path'))),
+
+  // The usage meter: `get` answers at once from what is known and reads the meter if a read is due;
+  // `refresh` (a view of it opened) waits for that read.
+  'usage:get': () => Usage.use((u) => u.view.pipe(Effect.tap(() => Effect.forkDetach(u.refresh(false))))),
+  'usage:refresh': () => Usage.use((u) => u.refresh(true)),
+  'usage:cancelPause': (messageId) => Usage.use((u) => u.cancelPause(str(messageId, 'messageId'))),
+  'usage:share': (keys, window) => Usage.use((u) => u.share({ keys: ids(keys), ...(typeof window === 'string' ? { window } : {}) })),
 
   'computer:supported': () => ComputerUse.use((c) => Effect.succeed(c.supported)),
   'computer:waiting': () => ComputerUse.use((c) => Effect.sync(c.waiting)),

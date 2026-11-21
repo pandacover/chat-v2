@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { Cause, Context, Effect, Exit, FiberMap, Layer, Semaphore } from 'effect'
+import { Cause, Context, Effect, Exit, FiberMap, Layer, Option, Semaphore } from 'effect'
 import { ARTIFACT_INSTRUCTIONS } from '@shared/artifacts'
 import { makeLineBuffer } from '@shared/lines'
 import { isClaudeModel } from '@shared/models'
@@ -17,6 +17,9 @@ import { Attachments } from './Attachments'
 import { Browser } from './Browser'
 import { Db } from './Db'
 import { SettingsStore } from './SettingsStore'
+import { limitName, type LimitSignal } from '@shared/usage'
+import { shouldPause } from '../usage/decide'
+import { Usage as AccountUsage } from '../usage/Usage'
 
 /** Pushes stream events to every open window. */
 export class Broadcaster extends Context.Service<Broadcaster, { readonly send: (event: StreamEvent) => void }>()(
@@ -116,6 +119,8 @@ export class Chat extends Context.Service<
       const broadcaster = yield* Broadcaster
       const browser = yield* Browser
       const computer = yield* ComputerUse
+      // Usage limits and the meter (src/main/usage); optional, so a test without it runs as before.
+      const meter = Option.getOrNull(yield* Effect.serviceOption(AccountUsage))
 
       // Open windows show what computer use waits on (an approval, a Show-me step) in its chat.
       const unsubscribe = computer.subscribe((waiting) => broadcaster.send({ type: 'computer', waiting }))
@@ -274,8 +279,14 @@ export class Chat extends Context.Service<
         // A continued reply keeps counting from what it already used.
         let usage: Usage | null = assistant.usage ? { ...assistant.usage } : null
         let model = assistant.model
+        // For the usage meter: when this run started, what it cost, and the last rate-limit event it saw.
+        const startedAt = Date.now()
+        let runCost: number | null = null
+        let limit: LimitSignal | null = null
 
         return Effect.gen(function* () {
+          // Running again (continued by hand, or retried): a pause it was in is over.
+          meter?.clearPause(assistant.id)
           const settings = yield* settingsStore.get
           const session = yield* db.require('Session', (d) => d.getSession(assistant.sessionId))
           const runOn = isClaudeModel(assistant.model) ? assistant.model : settings.defaultModel
@@ -324,7 +335,10 @@ export class Chat extends Context.Service<
             text: (delta) => Effect.runSync(Effect.forEach(buffer.push(delta), emit, { discard: true })),
             step: (step) => Effect.runPromise(endLine.pipe(Effect.andThen(emit(stepLine(step))))),
             attach: (file) => Effect.runPromise(attachToReply(assistant.id, file)),
-            checkpoint: (uuid) => Effect.runSync(db.use((d) => d.checkpoint(assistant.id, uuid)).pipe(Effect.ignore))
+            checkpoint: (uuid) => Effect.runSync(db.use((d) => d.checkpoint(assistant.id, uuid)).pipe(Effect.ignore)),
+            rateLimit: (info) => {
+              limit = meter?.signal(info) ?? limit
+            }
           }
           const result = yield* Effect.tryPromise({
             try: (signal) =>
@@ -347,6 +361,7 @@ export class Chat extends Context.Service<
               ),
             catch: (e) => new ProviderError({ provider: 'Claude', message: errorMessage(e) })
           })
+          runCost = result.usage?.cost ?? null
           if (result.usage) usage = sumUsage(usage, result.usage)
           if (result.sessionCost !== null) yield* db.use((d) => d.setAgentCost(assistant.id, result.sessionCost!))
           if (result.maxTurns) {
@@ -362,9 +377,15 @@ export class Chat extends Context.Service<
               const partial = tail.length > 0
               const stopped = stopRequested.delete(assistant.id)
               computerReplies.delete(assistant.id)
+              meter?.replyEnded({ sessionId: assistant.sessionId, messageId: assistant.id, model, startedAt, endedAt: Date.now(), cost: runCost })
               if (Exit.isSuccess(exit)) return yield* finish(assistant.id, 'complete', null, false, usage, model)
               if (Cause.hasInterruptsOnly(exit.cause))
                 return yield* finish(assistant.id, stopped ? 'stopped' : 'interrupted', null, partial, usage, model)
+              // At a usage limit the reply pauses with its work kept, and continues once the limit resets.
+              if (meter && shouldPause(limit)) {
+                meter.pause({ sessionId: assistant.sessionId, messageId: assistant.id, signal: limit })
+                return yield* finish(assistant.id, 'stopped', `Paused at your ${limitName(limit?.window ?? null)}.`, partial, usage, model)
+              }
               const error = Cause.squash(exit.cause)
               return yield* finish(assistant.id, 'error', errorMessage(error), partial, usage, model)
             })
@@ -531,6 +552,7 @@ export class Chat extends Context.Service<
         const original = yield* messageIn(input.sessionId, input.assistantId)
         if (original.role !== 'assistant' || !original.parentId)
           return yield* new InvalidInput({ message: 'Only assistant replies can be regenerated' })
+        meter?.clearPause(original.id)
         const session = yield* db.require('Session', (d) => d.getSession(input.sessionId))
         const settings = yield* settingsStore.get.pipe(Effect.orElseSucceed(() => null))
         const assistant = yield* db.use((d) =>
@@ -587,6 +609,9 @@ export class Chat extends Context.Service<
       const linesSince = Effect.fn('Chat.linesSince')(function* (messageId: string, fromIndex: number) {
         return yield* db.require('Message', (d) => d.linesSince(messageId, fromIndex))
       })
+
+      // A paused reply continues by itself once its limit resets, as Continue would.
+      meter?.onResume((p) => Effect.runPromise(continueReply({ sessionId: p.sessionId, assistantId: p.messageId }).pipe(Effect.asVoid)))
 
       return Chat.of({
         view,

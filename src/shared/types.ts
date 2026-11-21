@@ -1,5 +1,6 @@
 // Types shared by the main process, preload bridge and renderer.
 import type { ComputerDoing, ComputerMode, ComputerWait } from './computer'
+import type { UsageEvent, UsageShare, UsageView } from './usage'
 
 export type Role = 'root' | 'system' | 'user' | 'assistant'
 
@@ -311,6 +312,16 @@ export interface Api {
     setMode(sessionId: string, messageId: string, mode: ComputerMode): Promise<void>
     /** Starts Point (the user marks a spot or box on screen for the next message), or cancels the one under way. True once it is on. */
     point(): Promise<boolean>
+  }
+  /** Account usage: the plan's windows or an API key's dollars, and replies paused at a limit (shared/usage.ts). */
+  usage: {
+    get(): Promise<UsageView>
+    refresh(): Promise<UsageView>
+    /** Keeps a reply paused at a limit from continuing by itself. */
+    cancelPause(messageId: string): Promise<UsageView>
+    /** The estimated share of a window (default weekly) used by these chats. */
+    share(keys: string[], window?: string): Promise<UsageShare>
+    onEvent(listener: (event: UsageEvent) => void): () => void
   }
   updates: {
     get(): Promise<UpdateState>

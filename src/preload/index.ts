@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { Api, BrowserEvent, IpcResult, StreamEvent, UpdateState } from '@shared/types'
+import type { UsageEvent } from '@shared/usage'
 
 /** Unwraps the main process's `IpcResult`, rethrowing failures with their tag. */
 const call = async <A>(channel: string, ...args: unknown[]): Promise<A> => {
@@ -70,6 +71,17 @@ const api: Api = {
       const handler = (_event: unknown, state: UpdateState) => listener(state)
       ipcRenderer.on('updates:event', handler)
       return () => ipcRenderer.removeListener('updates:event', handler)
+    }
+  },
+  usage: {
+    get: () => call('usage:get'),
+    refresh: () => call('usage:refresh'),
+    cancelPause: (messageId) => call('usage:cancelPause', messageId),
+    share: (keys, window) => call('usage:share', keys, window),
+    onEvent: (listener) => {
+      const handler = (_event: unknown, payload: UsageEvent) => listener(payload)
+      ipcRenderer.on('usage:event', handler)
+      return () => ipcRenderer.removeListener('usage:event', handler)
     }
   },
   computer: {
