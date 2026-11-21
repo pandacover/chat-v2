@@ -10,6 +10,7 @@
   import { theme, type ThemePref } from '@/lib/theme.svelte'
   import Icon, { type IconName } from './Icon.svelte'
   import UpdateButton from './UpdateButton.svelte'
+  import UsageMeter from './UsageMeter.svelte'
 
   let renaming = $state<string | null>(null)
   let confirming = $state<string | null>(null)
@@ -292,6 +293,7 @@
       {/each}
     </nav>
 
+    <UsageMeter />
     <UpdateButton />
     <div class="mb-1.5 flex shrink-0 rounded-[10px] bg-wash p-[3px]" role="radiogroup" aria-label="Theme">
       {#each themes as t (t.id)}

@@ -7,6 +7,8 @@
   import { stopShortcutLabel } from '@shared/computer'
   import { isMac } from '@/lib/keys'
   import ComputerWaitCard from './ComputerWaitCard.svelte'
+  import LimitPause from './LimitPause.svelte'
+  import { meter } from '@/lib/meter.svelte'
   import PauseCard from './PauseCard.svelte'
   import StepList from './StepList.svelte'
   import type { Attachment, PathNode } from '@shared/types'
@@ -33,6 +35,8 @@
 
   const message = $derived(node.message)
   const streaming = $derived(message.status === 'streaming')
+  /** Paused at a usage limit: stopped, and goes on by itself once it resets (lib/meter.svelte.ts). A stuck pause is status 'paused'. */
+  const limitPause = $derived(message.status === 'stopped' ? meter.pauseFor(message.id) : null)
   // Lines animate only when they arrive while you watch, never on history or a backfill.
   const live = $derived(streaming && app.liveIds.has(message.id))
   // Browser steps are their own blocks; artifacts are parsed out of the prose between them.
@@ -346,10 +350,13 @@
       </div>
     {/if}
 
-    {#if message.status === 'paused'}
+    <!-- A reply is paused one way or the other: stuck (status 'paused', PauseCard) or at a usage
+         limit (stopped, with a pause that continues by itself at the reset, LimitPause). -->
+    {#if limitPause}
+      <LimitPause pause={limitPause} />
+    {:else if message.status === 'paused'}
       <PauseCard messageId={message.id} reason={message.error} {busy} />
-    {/if}
-    {#if message.status === 'interrupted' || message.status === 'stopped' || message.status === 'error'}
+    {:else if message.status === 'interrupted' || message.status === 'stopped' || message.status === 'error'}
       <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] {message.status === 'error' ? 'text-danger' : 'text-fg-3'}" in:fade>
         <span class="flex items-center gap-1.5">
           {#if message.status === 'error'}<Icon name="alert" size={14} />{/if}

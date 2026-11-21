@@ -16,6 +16,7 @@ import type { ComputerMode } from '@shared/computer'
 import { DbError, NotFound, errorMessage } from '../errors'
 import { stuckStore } from './stuckStore'
 import { MEMORY_RECORDS_MIGRATION, makeMemoryStore } from './memoryStore'
+import { usageRows } from '../usage/rows'
 
 export { MEMORY_LIMIT, type MemoryChange } from './memoryStore'
 
@@ -142,7 +143,43 @@ export const MIGRATIONS: string[] = [
   );
   create index stuck_pauses_message on stuck_pauses(message_id);`,
   // Memory records replace memory_facts: stable ids, versions with sources, purge, full-text search.
-  MEMORY_RECORDS_MIGRATION
+  MEMORY_RECORDS_MIGRATION,
+  // Usage (src/main/usage): each run of a reply with its API-equivalent cost and when it ran, and
+  // readings of the plan's usage windows, from which a chat's (later, a job's) share is estimated;
+  // and replies paused at a limit, which continue by themselves at resume_at. Runs keep no link to
+  // their chat, so deleting it leaves the dollars spent in the totals. Earlier replies' costs are
+  // carried over, timed when they started.
+  `create table usage_runs (
+    id integer primary key autoincrement,
+    session_id text not null,
+    message_id text,
+    auth text,
+    model text,
+    started_at integer not null,
+    ended_at integer not null,
+    cost real not null default 0
+  );
+  create index usage_runs_ended on usage_runs(ended_at);
+  create table usage_samples (
+    id integer primary key autoincrement,
+    win text not null,
+    percent real not null,
+    resets_at integer,
+    at integer not null,
+    source text not null
+  );
+  create index usage_samples_win on usage_samples(win, at);
+  create table usage_pauses (
+    message_id text primary key references messages(id) on delete cascade,
+    session_id text not null,
+    win text,
+    resets_at integer,
+    resume_at integer not null,
+    created_at integer not null
+  );
+  insert into usage_runs (session_id, message_id, model, started_at, ended_at, cost)
+    select session_id, id, model, created_at, created_at, coalesce(json_extract(usage, '$.cost'), 0)
+      from messages where role = 'assistant' and usage is not null and json_valid(usage);`
 ]
 
 interface SessionRow {
@@ -779,6 +816,7 @@ export const makeDb = (file: string) => {
       }),
     ...memory,
     ...stuckStore(run, all),
+    ...usageRows({ all, one, run }),
     close: () => db.close()
   }
 }

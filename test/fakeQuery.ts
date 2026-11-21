@@ -29,6 +29,8 @@ export interface Turn {
   apiError(kind: string, text: string): SDKMessage[]
   /** Waits for `gate`, or throws as the SDK does when the query is aborted first. */
   wait(gate: Promise<unknown>): Promise<void>
+  /** A rate-limit event, as Claude Code sends one on a Claude sign-in (SDKRateLimitInfo). */
+  rateLimit(info: Record<string, unknown>): SDKMessage
 }
 
 export type Script = (t: Turn) => AsyncGenerator<SDKMessage, void, undefined>
@@ -38,8 +40,33 @@ const uuid = () => `00000000-0000-4000-8000-${String(++seq).padStart(12, '0')}`
 
 const abortError = () => Object.assign(new Error('Claude Code process aborted by user'), { name: 'AbortError' })
 
-export const fakeQuery = (script: Script) => {
+export interface FakeOptions {
+  /**
+   * Answers the usage control request (SDKControlGetUsageResponse) of a query that sends no
+   * message (usage/sdk.ts probeAccount); without it, such a query has no usage method.
+   */
+  usage?: () => unknown | Promise<unknown>
+}
+
+export const fakeQuery = (script: Script, fakeOptions: FakeOptions = {}) => {
   const calls: Call[] = []
+  /** Usage reads answered. */
+  const usageReads: Options[] = []
+  const probe = (options: Options) => {
+    const signal = options.abortController?.signal
+    const q = (async function* (): AsyncGenerator<SDKMessage> {
+      if (signal && !signal.aborted) await new Promise((r) => signal.addEventListener('abort', r))
+    })()
+    if (!fakeOptions.usage) return q
+    const usage = fakeOptions.usage
+    return Object.assign(q, {
+      usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => {
+        usageReads.push(options)
+        return usage()
+      },
+      close: () => options.abortController?.abort()
+    })
+  }
   type State = { ended: boolean; interrupted: boolean }
   const run = (params: Parameters<QueryFn>[0], state: State) =>
     (async function* () {
@@ -133,6 +160,7 @@ export const fakeQuery = (script: Script) => {
           { type: 'assistant', error: kind, message: { role: 'assistant', content: [{ type: 'text', text }] }, uuid: uuid(), ...base } as unknown as SDKMessage,
           turn.result({ isError: true, text })
         ],
+        rateLimit: (info) => ({ type: 'rate_limit_event', rate_limit_info: info, uuid: uuid(), session_id: session }) as unknown as SDKMessage,
         wait: (gate) =>
           new Promise<void>((resolve, reject) => {
             if (signal?.aborted) return reject(abortError())
@@ -161,8 +189,10 @@ export const fakeQuery = (script: Script) => {
   /** How many times interrupt() was called, over all queries. */
   let interrupts = 0
   // Like the SDK's Query: an async generator with interrupt(), which ends the turn at the next
-  // message. A hook's `continue: false` ends it too.
+  // message. A hook's `continue: false` ends it too. A query with no system prompt sends no
+  // message: it only asks Claude Code something (the usage probe).
   const query: QueryFn = (params) => {
+    if (!params.options.systemPrompt) return probe(params.options)
     const state: State = { ended: false, interrupted: false }
     return Object.assign(run(params, state), {
       interrupt: async () => {
@@ -172,6 +202,6 @@ export const fakeQuery = (script: Script) => {
     })
   }
   /** The same without interrupt(), as a stand-in that can only be aborted. */
-  const plain: QueryFn = (params) => run(params, { ended: false, interrupted: false })
-  return { query, plain, calls, interrupts: () => interrupts }
+  const plain: QueryFn = (params) => (!params.options.systemPrompt ? probe(params.options) : run(params, { ended: false, interrupted: false }))
+  return { query, plain, calls, usageReads, interrupts: () => interrupts }
 }
