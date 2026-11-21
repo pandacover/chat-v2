@@ -13,6 +13,7 @@ import { Browser, type BrowserApi, type PageSnapshot } from '../src/main/service
 import { SettingsStore } from '../src/main/services/SettingsStore'
 import { Agent } from '../src/main/agent/driver'
 import { BROWSER_INSTRUCTIONS } from '../src/main/agent/browser'
+import { RECALL_INSTRUCTIONS } from '../src/main/agent/recall'
 import { HISTORY_NOTE } from '../src/main/agent/history'
 import { WRITING_GUIDELINES } from '../src/main/guidelines'
 import { ComputerUse, noOverlay, type OverlayPort, type Platform } from '../src/main/computer'
@@ -631,6 +632,11 @@ describe('memory', () => {
     await t.run(sendTo(later, later.rootId, 'What should I see this weekend?'))
     await t.waitForDone(2)
     expect(systemOf(t.replies().at(-1)!)).toContain('- Lives in Lisbon.')
+    // Replies can search long-term memory, read-only, with recall.
+    const reply = t.replies().at(-1)!
+    expect(Object.keys(reply.options.mcpServers!)).toEqual(['memory'])
+    expect(reply.options.tools).toEqual(['ToolSearch'])
+    expect(systemOf(reply)).toContain(RECALL_INSTRUCTIONS)
     await t.runtime.dispose()
   })
 
@@ -669,6 +675,7 @@ describe('memory', () => {
     await new Promise((r) => setTimeout(r, 20))
     expect(t.calls).toHaveLength(1)
     expect(t.events.some((e) => e.type === 'memory')).toBe(false)
+    expect(t.calls[0]!.options.mcpServers).toEqual({})
     await t.runtime.dispose()
   })
 })

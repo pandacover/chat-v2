@@ -58,7 +58,7 @@ const typedFact = (v: unknown): string => {
 
 const memoryView = Effect.gen(function* () {
   const lastRun = yield* (yield* Chat).lastMemoryRun
-  return yield* (yield* Db).use((d): MemoryView => ({ facts: d.liveFacts(), revisions: d.memoryHistory(), lastRun }))
+  return yield* (yield* Db).use((d): MemoryView => ({ records: d.profile(), revisions: d.memoryHistory(), lastRun }))
 })
 
 /** Runs a change to memory made in Settings, then returns the new state. */
@@ -130,9 +130,9 @@ const handlers: Record<string, Handler> = {
   'memory:add': (fact) => editMemory((d) => d.changeMemory({ add: [typedFact(fact)], update: [], remove: [] }, { kind: 'edited' })),
   'memory:edit': (id, fact) =>
     editMemory((d) => d.changeMemory({ add: [], update: [{ id: int(id, 'id'), fact: typedFact(fact) }], remove: [] }, { kind: 'edited' })),
-  'memory:remove': (id) => editMemory((d) => d.changeMemory({ add: [], update: [], remove: [int(id, 'id')] }, { kind: 'edited' })),
-  'memory:clear': () =>
-    editMemory((d) => d.changeMemory({ add: [], update: [], remove: d.liveFacts().map((f) => f.id) }, { kind: 'cleared' })),
+  'memory:purge': (id) => editMemory((d) => d.purgeRecord(int(id, 'id'))),
+  'memory:versions': (id) => Db.use((db) => db.use((d) => d.recordVersions(int(id, 'id')))),
+  'memory:clear': () => editMemory((d) => d.clearMemory()),
   'memory:restore': (rev) => editMemory((d) => d.restoreMemory(int(rev, 'rev'))),
 
   'chat:send': (input) =>

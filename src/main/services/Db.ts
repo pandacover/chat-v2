@@ -9,17 +9,18 @@ import type {
   PathNode,
   Role,
   AudioAnalysis,
-  MemoryFact,
-  MemoryRevision,
   Session,
   Usage
 } from '@shared/types'
 import type { ComputerMode } from '@shared/computer'
 import { DbError, NotFound, errorMessage } from '../errors'
 import { stuckStore } from './stuckStore'
+import { MEMORY_RECORDS_MIGRATION, makeMemoryStore } from './memoryStore'
 import { usageRows } from '../usage/rows'
 
-const MIGRATIONS: string[] = [
+export { MEMORY_LIMIT, type MemoryChange } from './memoryStore'
+
+export const MIGRATIONS: string[] = [
   `create table sessions (
     id text primary key,
     title text not null,
@@ -141,6 +142,8 @@ const MIGRATIONS: string[] = [
     resumed_at integer
   );
   create index stuck_pauses_message on stuck_pauses(message_id);`,
+  // Memory records replace memory_facts: stable ids, versions with sources, purge, full-text search.
+  MEMORY_RECORDS_MIGRATION,
   // Usage (src/main/usage): each run of a reply with its API-equivalent cost and when it ran, and
   // readings of the plan's usage windows, from which a chat's (later, a job's) share is estimated;
   // and replies paused at a limit, which continue by themselves at resume_at. Runs keep no link to
@@ -178,9 +181,6 @@ const MIGRATIONS: string[] = [
     select session_id, id, model, created_at, created_at, coalesce(json_extract(usage, '$.cost'), 0)
       from messages where role = 'assistant' and usage is not null and json_valid(usage);`
 ]
-
-/** At most this many facts are kept; past it, new ones are dropped until some are removed. */
-export const MEMORY_LIMIT = 150
 
 interface SessionRow {
   id: string
@@ -284,18 +284,10 @@ export interface NewMessage {
   model?: string | null
 }
 
-/** Changes the memory extractor asked for; `update` and `remove` refer to fact ids. */
-export interface MemoryChange {
-  add: string[]
-  update: Array<{ id: number; fact: string }>
-  remove: number[]
-}
-
-const factKey = (fact: string) => fact.trim().toLowerCase().replace(/[.!]+$/, '')
-
 export const makeDb = (file: string) => {
   const db = new DatabaseSync(file)
-  db.exec('pragma journal_mode = wal; pragma foreign_keys = on; pragma synchronous = normal;')
+  // secure_delete zeroes what is deleted, so memory purged (memoryStore.purgeRecord) leaves no copy in the file.
+  db.exec('pragma journal_mode = wal; pragma foreign_keys = on; pragma synchronous = normal; pragma secure_delete = on;')
   const version = (db.prepare('pragma user_version').get() as { user_version: number }).user_version
   MIGRATIONS.slice(version).forEach((sql, i) => {
     db.exec('begin')
@@ -576,107 +568,7 @@ export const makeDb = (file: string) => {
       return getSession(fork.id)!
     })
 
-  /** The profile now, or as it was at revision `rev`. */
-  const liveFacts = (rev?: number): MemoryFact[] =>
-    (rev === undefined
-      ? all<{ id: number; fact: string; created_at: number }>(
-          'select id, fact, created_at from memory_facts where removed_rev is null order by id'
-        )
-      : all<{ id: number; fact: string; created_at: number }>(
-          `select id, fact, created_at from memory_facts
-            where added_rev <= ? and (removed_rev is null or removed_rev > ?) order by id`,
-          rev,
-          rev
-        )
-    ).map((r) => ({ id: r.id, fact: r.fact, createdAt: r.created_at }))
-
-  const memoryRev = (): number => one<{ rev: number | null }>('select max(rev) as rev from memory_revisions')?.rev ?? 0
-
-  /**
-   * Applies a change as one new revision. Adds that repeat a live fact are skipped, so the
-   * extractor can be sloppy. Returns what changed, or null when nothing did (no revision).
-   */
-  const changeMemory = (
-    change: MemoryChange,
-    origin: { kind: MemoryRevision['kind']; sessionId?: string | null; note?: string | null }
-  ): { rev: number; added: string[]; removed: string[] } | null =>
-    transaction(() => {
-      const live = liveFacts()
-      const byId = new Map(live.map((f) => [f.id, f]))
-      const removeIds = new Set<number>()
-      const adds: string[] = []
-      const seen = new Set<string>()
-      for (const id of change.remove) if (byId.has(id)) removeIds.add(id)
-      for (const u of change.update) {
-        const old = byId.get(u.id)
-        if (!old || factKey(old.fact) === factKey(u.fact)) continue
-        removeIds.add(u.id)
-        adds.push(u.fact)
-        seen.add(factKey(u.fact))
-      }
-      for (const f of live) if (!removeIds.has(f.id)) seen.add(factKey(f.fact))
-      for (const fact of change.add) {
-        if (seen.has(factKey(fact))) continue
-        seen.add(factKey(fact))
-        adds.push(fact)
-      }
-      const room = Math.max(0, MEMORY_LIMIT - (live.length - removeIds.size))
-      const added = adds.slice(0, room)
-      if (added.length === 0 && removeIds.size === 0) return null
-      const now = Date.now()
-      const rev = Number(
-        run(
-          'insert into memory_revisions (kind, session_id, note, created_at) values (?, ?, ?, ?)',
-          origin.kind,
-          origin.sessionId ?? null,
-          origin.note ?? null,
-          now
-        ).lastInsertRowid
-      )
-      for (const id of removeIds) run('update memory_facts set removed_rev = ? where id = ?', rev, id)
-      for (const fact of added) run('insert into memory_facts (fact, added_rev, created_at) values (?, ?, ?)', fact, rev, now)
-      return { rev, added, removed: [...removeIds].map((id) => byId.get(id)!.fact) }
-    })
-
-  const memoryHistory = (limit = 100): MemoryRevision[] => {
-    const revs = all<{ rev: number; kind: string; session_id: string | null; note: string | null; created_at: number }>(
-      'select * from memory_revisions order by rev desc limit ?',
-      limit
-    )
-    if (revs.length === 0) return []
-    const oldest = revs.at(-1)!.rev
-    const facts = all<{ fact: string; added_rev: number; removed_rev: number | null }>(
-      'select fact, added_rev, removed_rev from memory_facts where added_rev >= ? or removed_rev >= ? order by id',
-      oldest,
-      oldest
-    )
-    return revs.map((r) => ({
-      rev: r.rev,
-      kind: r.kind as MemoryRevision['kind'],
-      sessionId: r.session_id,
-      note: r.note,
-      createdAt: r.created_at,
-      added: facts.filter((f) => f.added_rev === r.rev).map((f) => f.fact),
-      removed: facts.filter((f) => f.removed_rev === r.rev).map((f) => f.fact)
-    }))
-  }
-
-  /** Brings back the profile as it was at `rev`, as a new revision, so history is kept. */
-  const restoreMemory = (rev: number) =>
-    transaction(() => {
-      const target = liveFacts(rev)
-      const live = liveFacts()
-      const wanted = new Set(target.map((t) => factKey(t.fact)))
-      const have = new Set(live.map((f) => factKey(f.fact)))
-      return changeMemory(
-        {
-          add: target.filter((t) => !have.has(factKey(t.fact))).map((t) => t.fact),
-          update: [],
-          remove: live.filter((f) => !wanted.has(factKey(f.fact))).map((f) => f.id)
-        },
-        { kind: 'restored', note: `Restored version ${rev}` }
-      )
-    })
+  const memory = makeMemoryStore({ all, one, run, transaction, exec: (sql) => db.exec(sql) })
 
   /** Deletes a session; returns the attachment files and Claude Code sessions nothing else refers to. */
   const deleteSession = (id: string): { files: string[]; agentSessions: string[] } =>
@@ -922,22 +814,7 @@ export const makeDb = (file: string) => {
         run('delete from attachments where message_id is null and created_at < ?', olderThan)
         return rows.map((r) => r.path).filter((p) => !one('select 1 from attachments where path = ?', p))
       }),
-    liveFacts,
-    memoryRev,
-    changeMemory,
-    memoryHistory,
-    restoreMemory,
-    /**
-     * The memory revision a chat sees. It is fixed the first time the chat asks, so the
-     * profile reaches the model once per chat and the system prompt stays the same after.
-     */
-    sessionMemoryRev: (sessionId: string): number => {
-      const row = one<{ memory_rev: number | null }>('select memory_rev from sessions where id = ?', sessionId)
-      if (row?.memory_rev != null) return row.memory_rev
-      const rev = memoryRev()
-      run('update sessions set memory_rev = ? where id = ?', rev, sessionId)
-      return rev
-    },
+    ...memory,
     ...stuckStore(run, all),
     ...usageRows({ all, one, run }),
     close: () => db.close()
