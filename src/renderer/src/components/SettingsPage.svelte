@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tip } from '@/lib/tooltip'
   import { onDestroy, onMount } from 'svelte'
-  import type { MemoryRevision, MemoryRun, Settings, UpdateState } from '@shared/types'
+  import type { MemoryRevision, MemoryRun, MemoryVersion, MemoryWriter, Settings, UpdateState } from '@shared/types'
   import { shortcut } from '@/lib/keys'
   import { modelName } from '@shared/models'
   import { CODE_FONTS, READING_FONTS, READING_SIZES, UI_FONTS, appearance, type FontOption, type ReadingSize } from '@/lib/appearance.svelte'
@@ -90,13 +90,52 @@
 
   const close = () => (app.page = 'chat')
 
-  // Memory: what the app has learned, edited in place. Every change is a new version.
+  // Memory: what the app has learned, as records edited in place. Every change is a new version.
   onMount(() => void app.loadMemory())
   let newFact = $state('')
   let editing = $state<number | null>(null)
   let editDraft = $state('')
   let confirmForget = $state(false)
   let showHistory = $state(false)
+  // "Why does Tomo think this?": one record's versions, each with where it came from.
+  let why = $state<number | null>(null)
+  let versions = $state<MemoryVersion[] | null>(null)
+  let confirmPurge = $state<number | null>(null)
+
+  const loadVersions = async (id: number) => {
+    const list = await app.attempt(() => window.api.memory.versions(id))
+    if (why === id && list) versions = list
+  }
+
+  const toggleWhy = (id: number) => {
+    if (why === id) return void (why = null)
+    why = id
+    versions = null
+    void loadVersions(id)
+  }
+
+  const purge = async (id: number) => {
+    confirmPurge = null
+    if (why === id) why = null
+    if (await app.editMemory(() => window.api.memory.purge(id))) app.toast('Deleted it and its history', 'info')
+  }
+
+  /** Opens the chat a version came from, over Settings. */
+  const openSource = (sessionId: string) => {
+    close()
+    void app.open(sessionId)
+  }
+
+  // [[Links]] read as the names they are.
+  const plain = (text: string) => text.replace(/\[\[([^[\]\n]{1,80})\]\]/g, '$1')
+
+  const WRITERS: Record<MemoryWriter, string> = {
+    extractor: 'Learned',
+    reconciler: 'Tidied up in the daily review',
+    user: 'Written by you',
+    bot: 'Saved by Tomo when asked',
+    archiver: 'Summed up when a job ended'
+  }
 
   const addFact = async () => {
     const fact = newFact.trim()
@@ -106,7 +145,7 @@
   const saveEdit = async () => {
     const id = editing
     editing = null
-    if (id !== null && editDraft.trim()) await app.editMemory(() => window.api.memory.edit(id, editDraft.trim()))
+    if (id !== null && editDraft.trim() && (await app.editMemory(() => window.api.memory.edit(id, editDraft.trim()))) && why === id) void loadVersions(id)
   }
 
   const forget = async () => {
@@ -122,7 +161,10 @@
     learned: 'Learned from a chat',
     edited: 'Edited by you',
     restored: 'Restored',
-    cleared: 'Forgot everything'
+    cleared: 'Forgot everything',
+    purged: 'Deleted a record and its history',
+    noted: 'Job note',
+    archived: 'Archived a job'
   }
 
   const when = (at: number) => new Date(at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
@@ -349,7 +391,7 @@
           <h3 class="mt-1.5 mb-1 font-display text-[22px] leading-[1.2] font-normal tracking-[-0.02em]">Memory</h3>
           <p class="mb-5 max-w-[60ch] text-fg-3">
             A model reads each message you send for lasting facts about you, like your name, work or how you like answers, and keeps them on this device. Each new chat starts with them.
-            Passwords, keys and account numbers are never kept. Every change is versioned.
+            Passwords, keys and account numbers are never kept. Every change is versioned, and forgetting a fact deletes it and its history for good.
           </p>
           <div class="group-card">
             <div class="srow">
@@ -380,8 +422,8 @@
 
           <div class="mx-0.5 mt-[22px] mb-2.5 flex items-baseline gap-2">
             <span class="mono-label">What Tomo knows about you</span>
-            {#if app.memory && app.memory.facts.length > 0}
-              <span class="mono-label !text-fg-4 tabular-nums">{app.memory.facts.length}</span>
+            {#if app.memory && app.memory.records.length > 0}
+              <span class="mono-label !text-fg-4 tabular-nums">{app.memory.records.length}</span>
               <span class="ml-auto"></span>
               {#if confirmForget}
                 <span class="text-[12.5px] text-fg-2" in:fade={{ duration: 120 }}>Forget all of it?</span>
@@ -393,29 +435,72 @@
             {/if}
           </div>
           <ul class="group-card">
-            {#each app.memory?.facts ?? [] as f (f.id)}
-              <li class="fact group">
-                {#if editing === f.id}
-                  <input
-                    use:focusSelect
-                    bind:value={editDraft}
-                    aria-label="Edit fact"
-                    class="h-7 min-w-0 flex-1 rounded-md bg-canvas px-2 outline-none"
-                    onkeydown={(e) => {
-                      if (e.key === 'Enter') void saveEdit()
-                      if (e.key === 'Escape') {
-                        e.preventDefault()
-                        editing = null
-                      }
-                    }}
-                    onblur={saveEdit}
-                  />
-                {:else}
-                  <span class="min-w-0 flex-1 text-fg">{f.fact}</span>
-                  <span class="flex shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-                    <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Edit'} onclick={() => ((editing = f.id), (editDraft = f.fact))}><Icon name="edit" size={14} /></button>
-                    <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Forget this'} onclick={() => app.editMemory(() => window.api.memory.remove(f.id))}><Icon name="trash" size={14} /></button>
-                  </span>
+            {#each app.memory?.records ?? [] as r (r.id)}
+              <li class="fact group !block">
+                <div class="flex min-h-7 items-center gap-2">
+                  {#if editing === r.id}
+                    <input
+                      use:focusSelect
+                      bind:value={editDraft}
+                      aria-label="Edit fact"
+                      class="h-7 min-w-0 flex-1 rounded-md bg-canvas px-2 outline-none"
+                      onkeydown={(e) => {
+                        if (e.key === 'Enter') void saveEdit()
+                        if (e.key === 'Escape') {
+                          e.preventDefault()
+                          editing = null
+                        }
+                      }}
+                      onblur={saveEdit}
+                    />
+                  {:else}
+                    <span class="min-w-0 flex-1">
+                      <span class="text-fg">{plain(r.body)}</span>
+                      {#if r.title || r.aliases.length > 0 || r.links.length > 0}
+                        <span class="mt-0.5 block truncate text-[12px] text-fg-3">
+                          {[r.title, ...r.aliases].filter(Boolean).join(' · ')}{#if r.links.length > 0}{r.title || r.aliases.length > 0 ? ' · ' : ''}Links to {r.links.map((l) => l.title).join(', ')}{/if}
+                        </span>
+                      {/if}
+                    </span>
+                    {#if confirmPurge === r.id}
+                      <span class="flex shrink-0 items-center gap-2" in:fade={{ duration: 120 }}>
+                        <span class="text-[12.5px] text-fg-2">Delete it and its history for good?</span>
+                        <button class="text-[12px] text-fg-3 hover:text-fg" onclick={() => (confirmPurge = null)}>Keep</button>
+                        <button class="text-[12px] font-medium text-danger" onclick={() => purge(r.id)}>Delete</button>
+                      </span>
+                    {:else}
+                      <span class="mono-label shrink-0 !text-fg-4">{r.type}</span>
+                      <span class="flex shrink-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 {why === r.id ? '' : 'opacity-0'}">
+                        <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Edit'} onclick={() => ((editing = r.id), (editDraft = r.body))}><Icon name="edit" size={14} /></button>
+                        <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Why does Tomo think this?'} aria-expanded={why === r.id} onclick={() => toggleWhy(r.id)}><Icon name="info" size={14} /></button>
+                        <button class="icon-btn size-[26px] !rounded-lg hover:!text-danger" use:tip={'Forget this for good'} onclick={() => (confirmPurge = r.id)}><Icon name="trash" size={14} /></button>
+                      </span>
+                    {/if}
+                  {/if}
+                </div>
+                {#if why === r.id}
+                  <div class="mt-2 mb-1 rounded-[10px] bg-canvas px-3 py-2.5 shadow-[inset_0_0_0_1px_var(--line)]" transition:fade={{ duration: 120 }}>
+                    <div class="mono-label mb-2">Why Tomo thinks this</div>
+                    {#if !versions}
+                      <div class="text-[12.5px] text-fg-3">Loading…</div>
+                    {:else}
+                      <ol class="flex flex-col gap-2">
+                        {#each versions as v (v.id)}
+                          <li class="text-[12.5px]">
+                            <div class="flex flex-wrap items-baseline gap-x-2 text-fg-3">
+                              <span class="font-label text-[11px] text-fg-4">{when(v.createdAt)}</span>
+                              <span>
+                                {WRITERS[v.writer]}{#if v.sourceSessionId}{' '}{v.writer === 'user' ? 'from' : 'in'}
+                                  {#if v.sourceTitle}<button class="text-fg-2 underline decoration-fg-4 underline-offset-2 hover:text-fg" use:tip={'Open this chat'} onclick={() => openSource(v.sourceSessionId!)}>{v.sourceTitle}</button>{:else}a chat that has since been deleted{/if}{/if}{#if v.sourceJobId}{' '}on a job{/if}
+                              </span>
+                              {#if v.removedRev === null}<span class="mono-label ml-auto">Current</span>{/if}
+                            </div>
+                            <div class={v.removedRev === null ? 'text-fg-2' : 'text-fg-3 line-through decoration-fg-4'}>{plain(v.body)}</div>
+                          </li>
+                        {/each}
+                      </ol>
+                    {/if}
+                  </div>
                 {/if}
               </li>
             {:else}

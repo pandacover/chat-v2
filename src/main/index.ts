@@ -194,7 +194,7 @@ const computerLayer = Layer.unwrap(
     const remember = async (fact: string, ctx: RunContext) => {
       if (!(await Effect.runPromise(settings.get)).memoryModel) throw new Error('Memory is off in Settings, so nothing was saved.')
       if (isSensitive(fact)) throw new Error("That looks like a password, key or account number, which memory doesn't keep.")
-      const saved = await Effect.runPromise(db.use((d) => d.changeMemory({ add: [fact], update: [], remove: [] }, { kind: 'learned', sessionId: ctx.sessionId })))
+      const saved = await Effect.runPromise(db.use((d) => d.changeMemory({ add: [fact], update: [], remove: [] }, { kind: 'learned', writer: 'bot', sessionId: ctx.sessionId })))
       if (saved) broadcaster.send({ type: 'memory', sessionId: ctx.sessionId, added: saved.added, removed: saved.removed })
     }
     // CHAT_V2_FAKE_COMPUTER (tests only): a module whose `platform` stands in for the real one,

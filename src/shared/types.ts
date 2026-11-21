@@ -102,17 +102,69 @@ export interface Session {
   updatedAt: number
 }
 
-/** Something the app learned about the user, from their messages or added by hand. */
-export interface MemoryFact {
+/** What a profile or playbook record is about. */
+export type MemoryRecordType = 'preference' | 'person' | 'project' | 'procedure'
+/** What a bot on a job notes down: decisions, the state of things, what's left, files touched, progress. */
+export type JobNoteKind = 'decision' | 'state' | 'left' | 'files' | 'progress'
+/**
+ * Whose a record is: the user's profile (every bot sees it), one bot's playbook, one job's notes,
+ * or the archive of finished jobs and old conversations (searched with `recall`, never in a prompt).
+ */
+export type MemoryScope = 'profile' | 'bot' | 'job' | 'archive'
+/**
+ * Who wrote a version: the per-message extractor, the daily reconciler, the user in Settings, a bot
+ * (job notes; computer use's `remember`), or the archiver when a job ends.
+ */
+export type MemoryWriter = 'extractor' | 'reconciler' | 'user' | 'bot' | 'archiver'
+
+/**
+ * One thing memory knows, with a stable id: an update is a new version of the same record, and a
+ * restore brings an old version back under the same id. `body` is the current version.
+ */
+export interface MemoryRecord {
   id: number
-  fact: string
+  /** A MemoryRecordType for the profile and playbooks; a JobNoteKind for job notes; 'job' or 'conversation' in the archive. */
+  type: string
+  /** A short name (a person, a project); '' when the body says it all. */
+  title: string
+  /** Other names it goes by, which `recall` matches too. */
+  aliases: string[]
+  scope: MemoryScope
+  /** The bot or job it belongs to, or the archived job or chat; null for the profile. */
+  scopeId: string | null
+  body: string
+  /** Records the body links to with [[title]]. */
+  links: Array<{ id: number; title: string }>
+  /** How many versions it has had, this one included. */
+  versions: number
+  /** Who wrote the current version. */
+  writer: MemoryWriter
+  createdAt: number
+  /** When the current version was written. */
+  updatedAt: number
+}
+
+/** One version of a record, with where it came from ("Why does Tomo think this?"). */
+export interface MemoryVersion {
+  id: number
+  recordId: number
+  body: string
+  addedRev: number
+  /** The revision that replaced or hid it; null for the current version. */
+  removedRev: number | null
+  writer: MemoryWriter
+  sourceJobId: string | null
+  sourceSessionId: string | null
+  /** The source chat's title; null without one, or once the chat is deleted. */
+  sourceTitle: string | null
   createdAt: number
 }
 
 /** One change to memory. Every change is kept, so earlier versions can be restored. */
 export interface MemoryRevision {
   rev: number
-  kind: 'learned' | 'edited' | 'restored' | 'cleared'
+  kind: 'learned' | 'edited' | 'restored' | 'cleared' | 'purged' | 'noted' | 'archived'
+  writer: MemoryWriter
   /** The chat a learned fact came from. */
   sessionId: string | null
   note: string | null
@@ -138,7 +190,8 @@ export interface MemoryRun {
 }
 
 export interface MemoryView {
-  facts: MemoryFact[]
+  /** The profile now. */
+  records: MemoryRecord[]
   revisions: MemoryRevision[]
   lastRun: MemoryRun | null
 }
@@ -263,7 +316,10 @@ export interface Api {
     get(): Promise<MemoryView>
     add(fact: string): Promise<MemoryView>
     edit(id: number, fact: string): Promise<MemoryView>
-    remove(id: number): Promise<MemoryView>
+    /** Deletes a record and every version of it, for good (unlike clear, which hides). */
+    purge(id: number): Promise<MemoryView>
+    /** A record's versions, newest first, each with its source: "Why does Tomo think this?" */
+    versions(id: number): Promise<MemoryVersion[]>
     clear(): Promise<MemoryView>
     /** Brings back the facts as they were after revision `rev` (as a new revision). */
     restore(rev: number): Promise<MemoryView>

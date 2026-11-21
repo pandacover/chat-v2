@@ -21,8 +21,8 @@ const openDb = () => {
 }
 
 const facts = [
-  { id: 1, fact: 'Lives in Lisbon.', createdAt: 0 },
-  { id: 2, fact: 'Works as a nurse.', createdAt: 0 }
+  { id: 1, body: 'Lives in Lisbon.' },
+  { id: 2, body: 'Works as a nurse.' }
 ]
 
 describe('memory gate', () => {
@@ -129,19 +129,30 @@ describe('memory versions', () => {
     // Repeats (in any case, with or without the full stop) are not added again.
     expect(db.changeMemory({ add: ['lives in lisbon'], update: [], remove: [] }, { kind: 'learned' })).toBeNull()
 
-    const lisbon = db.liveFacts().find((f) => f.fact === 'Lives in Lisbon.')!
+    const lisbon = db.profile().find((f) => f.body === 'Lives in Lisbon.')!
     const moved = db.changeMemory({ add: [], update: [{ id: lisbon.id, fact: 'Lives in Porto.' }], remove: [] }, { kind: 'learned' })
     expect(moved).toEqual({ rev: 2, added: ['Lives in Porto.'], removed: ['Lives in Lisbon.'] })
-    db.changeMemory({ add: [], update: [], remove: db.liveFacts().map((f) => f.id) }, { kind: 'cleared' })
-    expect(db.liveFacts()).toEqual([])
+    // An update is a new version of the same record.
+    expect(db.getRecord(lisbon.id)).toMatchObject({ body: 'Lives in Porto.', versions: 2, writer: 'extractor' })
+    expect(db.clearMemory()!.removed).toEqual(['Lives in Porto.', 'Works as a nurse.'])
+    expect(db.profile()).toEqual([])
 
     // The profile at each version is still there.
-    expect(db.liveFacts(1).map((f) => f.fact)).toEqual(['Lives in Lisbon.', 'Works as a nurse.'])
-    expect(db.liveFacts(2).map((f) => f.fact)).toEqual(['Works as a nurse.', 'Lives in Porto.'])
+    expect(db.profile(1).map((f) => f.body)).toEqual(['Lives in Lisbon.', 'Works as a nurse.'])
+    expect(db.profile(2).map((f) => f.body)).toEqual(['Lives in Porto.', 'Works as a nurse.'])
 
     const restored = db.restoreMemory(1)!
     expect(restored.rev).toBe(4)
-    expect(db.liveFacts().map((f) => f.fact)).toEqual(['Lives in Lisbon.', 'Works as a nurse.'])
+    expect(db.profile().map((f) => [f.id, f.body])).toEqual([
+      [lisbon.id, 'Lives in Lisbon.'],
+      [lisbon.id + 1, 'Works as a nurse.']
+    ])
+    // Restoring keeps the ids, and the source of the version brought back.
+    expect(db.recordVersions(lisbon.id).map((v) => [v.body, v.writer, v.sourceSessionId])).toEqual([
+      ['Lives in Lisbon.', 'user', 's1'],
+      ['Lives in Porto.', 'extractor', null],
+      ['Lives in Lisbon.', 'extractor', 's1']
+    ])
     const history = db.memoryHistory()
     expect(history.map((r) => [r.rev, r.kind])).toEqual([
       [4, 'restored'],
@@ -150,7 +161,8 @@ describe('memory versions', () => {
       [1, 'learned']
     ])
     expect(history[0]!.note).toBe('Restored version 1')
-    expect(history[1]!.removed).toEqual(['Works as a nurse.', 'Lives in Porto.'])
+    expect(history[1]!.removed).toEqual(['Lives in Porto.', 'Works as a nurse.'])
+    expect(history.map((r) => r.writer)).toEqual(['user', 'user', 'extractor', 'extractor'])
     expect(history[3]!.sessionId).toBe('s1')
     db.close()
   })

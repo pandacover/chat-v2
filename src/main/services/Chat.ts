@@ -13,6 +13,7 @@ import { Agent, type Auth, type PromptBlock, type ReplyHooks } from '../agent/dr
 import { smallModelJudge } from '../agent/judge'
 import { type WatchDeps, makeWatch, pauseNote } from '../agent/watch'
 import { SMALL_MODEL } from '@shared/models'
+import { recallModule } from '../agent/recall'
 import { HISTORY_NOTE, type TurnPlan, continueNote, planTurn, transcriptText } from '../agent/history'
 import type { ToolModuleFactory } from '../agent/module'
 import { ComputerUse, type Mode, decideMode, effortFor, handsOver, modeTag, teachAnswer } from '../computer'
@@ -146,6 +147,10 @@ export class Chat extends Context.Service<
         broadcaster.send({ type: 'computerMode', messageId, mode })
         return true
       }
+
+      // Long-term memory, read-only, for every reply while memory is on.
+      // TODO(jobs): pass the reply's bot and job as recall's scope (recallModule's second argument).
+      const recall = recallModule((query, scope) => Effect.runPromise(db.use((d) => d.recall(query, scope))))
 
       /** The tool sets a reply in `session` gets, built afresh for each reply. */
       const toolSets = (session: Session): ToolModuleFactory[] => [
@@ -321,7 +326,7 @@ export class Chat extends Context.Service<
           }
           const prompt = yield* promptFor(plan, partial, mode, pausedFor)
           // The profile as it was when this chat first asked, so the system prompt stays the same.
-          const facts = settings.memoryModel ? yield* db.use((d) => d.liveFacts(d.sessionMemoryRev(session.id))) : []
+          const facts = settings.memoryModel ? yield* db.use((d) => d.profile(d.sessionMemoryRev(session.id))) : []
           // User instructions first so they win any conflict; the writing guideline is hidden from Settings.
           const instructions = [
             session.systemPrompt ?? settings.systemPrompt,
@@ -360,7 +365,7 @@ export class Chat extends Context.Service<
                   profile: profileBlock(facts),
                   prompt,
                   session: { id: sessionId, resume: plan.resume, baseCost: plan.baseCost },
-                  modules: toolSets(session),
+                  modules: [...toolSets(session), ...(settings.memoryModel ? [recall] : [])],
                   auth,
                   watch: (control) =>
                     makeWatch(
@@ -436,7 +441,7 @@ export class Chat extends Context.Service<
         memoryLock
           .withPermit(
             Effect.gen(function* () {
-              const facts = yield* db.use((d) => d.liveFacts())
+              const facts = yield* db.use((d) => d.profile())
               const reply = yield* ask(input.model, MEMORY_INSTRUCTIONS, memoryPrompt(facts, input.source, input.previous), '45 seconds')
               const run = { message: input.message, model: input.model }
               const reading = parseMemoryReply(reply, facts, input.source)
