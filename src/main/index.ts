@@ -430,8 +430,18 @@ if (process.platform === 'darwin') nativeUpdater.on('before-quit-for-update', ()
 const quitTest = () => {
   const child = trackChild(spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, stdio: 'pipe' }))
   console.log(`[quit-test] child ${child.pid}`)
-  setTimeout(() => {
-    console.log('[quit-test] quitting')
-    app.quit()
-  }, 1000)
+  // Quits once the window has loaded and settled, as a user would. On a macOS VM without a GPU
+  // (CI), quitting in the first seconds after launch stalls the main thread until startup work
+  // drains, on main as well as here (2-5 s, past the test's limit); quitting a few seconds in, it
+  // exits in well under a second. That stall isn't what this test is for: a quit that hangs is.
+  const quit = () =>
+    setTimeout(() => {
+      console.log('[quit-test] quitting')
+      app.quit()
+    }, SETTLE_MS)
+  const win = BrowserWindow.getAllWindows()[0]
+  if (!win || !win.webContents.isLoading()) quit()
+  else win.webContents.once('did-finish-load', quit)
 }
+/** How long the quit test lets the window settle after it loads. */
+const SETTLE_MS = 5000

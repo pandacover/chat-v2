@@ -1,6 +1,7 @@
 // Checks that the app quits: run after `bun run build`. Starts the app hidden (CHAT_V2_HEADLESS=1,
 // no window is ever shown) with a fresh data folder and CHAT_V2_QUIT_TEST, which makes it start a
-// stand-in helper process that never exits on its own and then call app.quit() (src/main/index.ts).
+// stand-in helper process that never exits on its own and then, once the window has loaded and
+// settled, call app.quit() (src/main/index.ts).
 // Twice: once as is, once with closing the services made to hang forever. Each time the app must
 // exit within the limit, and the stand-in helper must be gone after it.
 //
