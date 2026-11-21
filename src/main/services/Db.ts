@@ -349,9 +349,6 @@ export const makeDb = (file: string) => {
     return row ? toMessages([row])[0] : undefined
   }
 
-  const childIds = (parentId: string): string[] =>
-    all<{ id: string }>('select id from messages where parent_id = ? order by seq', parentId).map((r) => r.id)
-
   const insertMessage = (m: NewMessage): Message => {
     const id = randomUUID()
     const now = Date.now()
@@ -404,18 +401,39 @@ export const makeDb = (file: string) => {
       return getSession(id)!
     })
 
-  /** The visible conversation: follow `active_child_id` from the root, skipping the root itself. */
+  /**
+   * The visible conversation: follow `active_child_id` from the root, skipping the root itself.
+   * The chat's tree is read once without its text and walked here, then the path's rows are read
+   * in one go: walking it a row at a time, and asking each message's siblings apart, was two
+   * queries per message every time a chat opened or a message was sent.
+   */
   const activePath = (session: Session): PathNode[] => {
-    const rows: MessageRow[] = []
-    let cursor = one<MessageRow>('select * from messages where id = ?', session.rootId)
+    const tree = all<{ id: string; parent_id: string | null; active_child_id: string | null }>(
+      'select id, parent_id, active_child_id from messages where session_id = ? order by seq',
+      session.id
+    )
+    const byId = new Map(tree.map((m) => [m.id, m]))
+    const children = new Map<string, string[]>()
+    for (const m of tree) {
+      if (!m.parent_id) continue
+      const list = children.get(m.parent_id)
+      if (list) list.push(m.id)
+      else children.set(m.parent_id, [m.id])
+    }
+    const ids: string[] = []
     const seen = new Set<string>()
+    let cursor = byId.get(session.rootId)
     while (cursor?.active_child_id && !seen.has(cursor.active_child_id)) {
       seen.add(cursor.active_child_id)
-      cursor = one<MessageRow>('select * from messages where id = ?', cursor.active_child_id)
-      if (cursor) rows.push(cursor)
+      cursor = byId.get(cursor.active_child_id)
+      if (cursor) ids.push(cursor.id)
     }
-    return toMessages(rows).map((message) => {
-      const siblingIds = message.parentId ? childIds(message.parentId) : [message.id]
+    if (ids.length === 0) return []
+    const rows = new Map(
+      all<MessageRow>('select * from messages where id in (select value from json_each(?))', JSON.stringify(ids)).map((r) => [r.id, r])
+    )
+    return toMessages(ids.flatMap((id) => rows.get(id) ?? [])).map((message) => {
+      const siblingIds = message.parentId ? (children.get(message.parentId) ?? [message.id]) : [message.id]
       return { message, siblingIds, siblingIndex: siblingIds.indexOf(message.id) }
     })
   }
@@ -664,6 +682,31 @@ export const makeDb = (file: string) => {
         (r) => r.id
       ),
     getMessage,
+    /**
+     * A reply's lines from `fromIndex` on, and its status. A window catching up on a streaming
+     * reply asks this after every reply ends; reading only the lines it lacks, rather than the
+     * whole reply joined and split again, keeps that small however long the reply is.
+     */
+    linesSince: (messageId: string, fromIndex: number): { lines: string[]; status: MessageStatus } | undefined => {
+      const row = one<{ content: string; line_count: number; status: string }>(
+        'select content, line_count, status from messages where id = ?',
+        messageId
+      )
+      if (!row) return undefined
+      const status = row.status as MessageStatus
+      const from = Math.max(0, fromIndex)
+      if (row.line_count === 0 || from >= row.line_count) return { lines: [], status }
+      const pending = all<{ idx: number; text: string }>(
+        'select idx, text from message_lines where message_id = ? and idx >= ? order by idx',
+        messageId,
+        from
+      )
+      // Every line asked for is still in message_lines (the usual case while it streams).
+      if (pending.length === row.line_count - from && (pending[0]?.idx ?? from) === from) return { lines: pending.map((l) => l.text), status }
+      // Some are folded into content already: read the reply whole.
+      const streamed = pendingLines([messageId]).get(messageId)
+      return { lines: joinLines(row, streamed).split('\n').slice(from), status }
+    },
     insertMessage: (m: NewMessage) => transaction(() => insertMessage(m)),
     activePath,
     lineage,

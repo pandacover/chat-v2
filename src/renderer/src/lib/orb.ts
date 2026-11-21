@@ -367,9 +367,28 @@ const draw = (o: Orb, px: number, inverted: number) => {
   o.ctx.drawImage(glCanvas, 0, glCanvas.height - px, px, px, 0, 0, px, px)
 }
 
+/**
+ * Frames apart, in ms, that orbs are drawn: 60 a second while one listens, thinks or talks, 30 while
+ * all idle (Home's orb at rest moves slowly). The display's own rate (120 or 144 Hz) drew the
+ * shader and copied it out that often for nothing, all the time Home was open.
+ */
+const ACTIVE_GAP = 1000 / 60
+const IDLE_GAP = 1000 / 30
+/** When the next drawing is due. It moves on by the gap, so frames skipped round up and down and average out. */
+let due = 0
+
 const frame = (now: number) => {
   raf = 0
   if (orbs.size === 0) return
+  let active = false
+  for (const o of orbs) if (o.params.state || typeof o.params.level === 'number') active = true
+  const gap = active ? ACTIVE_GAP : IDLE_GAP
+  // A millisecond of slack for the display's own jitter, so a 60 Hz one draws every frame.
+  if (now + 1 < due && phase === 'ready') {
+    raf = requestAnimationFrame(frame)
+    return
+  }
+  due = Math.max(due, now - gap) + gap
   const delta = Math.max(0, (now - last) / 1000)
   last = now
   if (phase === 'compiling' && gl && prog && (!parallel || gl.getProgramParameter(prog, parallel.COMPLETION_STATUS_KHR))) {

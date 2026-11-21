@@ -65,6 +65,53 @@ describe('streamed lines', () => {
     expect(again.getMessage(m.id)).toMatchObject({ content: 'kept', status: 'interrupted' })
     again.close()
   })
+
+  test('lines since an index: while streaming, once folded, and when part is folded', () => {
+    const { db } = open()
+    const m = reply(db)
+    for (const l of ['a', 'b', 'c']) db.appendLine(m.id, l)
+    expect(db.linesSince(m.id, 0)).toEqual({ lines: ['a', 'b', 'c'], status: 'streaming' })
+    expect(db.linesSince(m.id, 2)).toEqual({ lines: ['c'], status: 'streaming' })
+    expect(db.linesSince(m.id, 3)).toEqual({ lines: [], status: 'streaming' })
+    expect(db.linesSince(m.id, 9)).toEqual({ lines: [], status: 'streaming' })
+    // Stopped, then continued: the first lines are in content, the new one still streamed.
+    db.setStatus(m.id, 'stopped')
+    expect(db.linesSince(m.id, 1)).toEqual({ lines: ['b', 'c'], status: 'stopped' })
+    db.setStatus(m.id, 'streaming')
+    db.appendLine(m.id, 'd')
+    expect(db.linesSince(m.id, 1)).toEqual({ lines: ['b', 'c', 'd'], status: 'streaming' })
+    expect(db.linesSince(m.id, 3)).toEqual({ lines: ['d'], status: 'streaming' })
+    expect(db.linesSince('missing', 0)).toBeUndefined()
+  })
+})
+
+describe('active path', () => {
+  test('follows the active branch, with each message among its siblings', () => {
+    const { db } = open()
+    const s = db.createSession({ title: 'Branches', model: null, systemPrompt: null, forkedFromSessionId: null })
+    const u1 = db.insertMessage({ sessionId: s.id, parentId: s.rootId, role: 'user', content: 'first', status: 'complete' })
+    const a1 = db.insertMessage({ sessionId: s.id, parentId: u1.id, role: 'assistant', content: 'one', status: 'complete' })
+    const a2 = db.insertMessage({ sessionId: s.id, parentId: u1.id, role: 'assistant', content: 'two', status: 'complete' })
+    db.insertMessage({ sessionId: s.id, parentId: a2.id, role: 'user', content: 'next', status: 'complete' })
+    const path = () => db.activePath(db.getSession(s.id)!).map((n) => [n.message.content, n.siblingIds.length, n.siblingIndex])
+    expect(path()).toEqual([
+      ['first', 1, 0],
+      ['two', 2, 1],
+      ['next', 1, 0]
+    ])
+    db.activate(a1.id)
+    expect(path()).toEqual([
+      ['first', 1, 0],
+      ['one', 2, 0]
+    ])
+    expect(db.activePath(db.getSession(s.id)!)[1]!.siblingIds).toEqual([a1.id, a2.id])
+  })
+
+  test('an empty chat has no path', () => {
+    const { db } = open()
+    const s = db.createSession({ title: 'Empty', model: null, systemPrompt: null, forkedFromSessionId: null })
+    expect(db.activePath(s)).toEqual([])
+  })
 })
 
 describe('attachment blocks', () => {

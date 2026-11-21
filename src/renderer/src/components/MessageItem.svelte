@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tip } from '@/lib/tooltip'
   import { untrack } from 'svelte'
-  import { parseContent, type ContentBlock } from '@shared/artifacts'
+  import { parseContentCached, type ContentBlock } from '@shared/artifacts'
   import { modelName } from '@shared/models'
   import { splitSteps, type Step } from '@shared/steps'
   import { stopShortcutLabel } from '@shared/computer'
@@ -19,7 +19,16 @@
   import { orb } from '@/lib/orb'
   import { listEditing } from '@/lib/textarea'
 
-  let { node, last = false }: { node: PathNode; last?: boolean } = $props()
+  let {
+    node,
+    last = false,
+    far = false
+  }: {
+    node: PathNode
+    last?: boolean
+    /** Well before the end of the chat: skips layout and paint while off-screen (app.css .far). */
+    far?: boolean
+  } = $props()
 
   const message = $derived(node.message)
   const streaming = $derived(message.status === 'streaming')
@@ -29,7 +38,10 @@
   type Block = ContentBlock | { type: 'steps'; steps: Step[] }
   const blocks = $derived<Block[]>(
     message.role === 'assistant'
-      ? splitSteps(message.content).flatMap((seg): Block[] => (seg.type === 'steps' ? [seg] : parseContent(seg.content)))
+      ? splitSteps(message.content).flatMap((seg, i): readonly Block[] =>
+          // Keyed by where the text is, so the reply being written replaces its cached parse.
+          seg.type === 'steps' ? [seg] : parseContentCached(seg.content, seg.content === message.content ? message.id : `${message.id}:${i}`)
+        )
       : []
   )
   const busy = $derived(app.streaming)
@@ -153,14 +165,16 @@
     error: 'Something went wrong.'
   }
 
+  // Counted, not split: an artifact being written is counted again on every line.
   const lines = (s: string) => {
-    const n = s.split('\n').length
+    let n = 1
+    for (let i = s.indexOf('\n'); i !== -1; i = s.indexOf('\n', i + 1)) n++
     return `${n} ${n === 1 ? 'line' : 'lines'}`
   }
 </script>
 
 {#if message.role === 'user'}
-  <div class="group flex flex-col items-end gap-1.5" in:fly={{ y: 8, duration: fresh ? 240 : 0 }}>
+  <div class="msg user group flex flex-col items-end gap-1.5 {far ? 'far' : ''}" in:fly={{ y: 8, duration: fresh ? 240 : 0 }}>
     {#if message.attachments.length > 0}
       <div class="flex flex-wrap justify-end gap-1.5">
         {#each editing ? message.attachments.filter((a) => keptAttachments.includes(a.id)) : message.attachments as a (a.id)}
@@ -250,7 +264,7 @@
   </div>
 {:else if message.role === 'assistant'}
   <!-- data-reply-scope: text selected in here can be quoted in a reply (SelectionReply). -->
-  <div class="group flex flex-col gap-3" data-reply-scope in:fade={{ duration: fresh ? 200 : 0 }}>
+  <div class="msg group flex flex-col gap-3 {far ? 'far' : ''}" data-reply-scope in:fade={{ duration: fresh ? 200 : 0 }}>
     {#each blocks as block, i (i)}
       {#if block.type === 'text'}
         <Markdown source={block.content} streaming={streaming && i === blocks.length - 1} live={live && i === blocks.length - 1} />

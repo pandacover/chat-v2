@@ -478,6 +478,25 @@ code.hljs {
   transition: none !important;
 }
 
+/*
+ * A message well before the end of a chat (MessageItem `far`) skips layout and paint while it is
+ * off-screen: a long chat otherwise laid out every message whenever the column changed width
+ * (the panel or sidebar opening, a resize) and when it opened. Every message remembers its size
+ * once shown (the `auto`), so one that turns far as the chat grows keeps its height; the length
+ * is a guess for those never shown yet. Paint containment clips at the box, so rings and
+ * shadows get some room.
+ */
+.msg {
+  contain-intrinsic-block-size: auto 480px;
+}
+.msg.user {
+  contain-intrinsic-block-size: auto 72px;
+}
+.msg.far {
+  content-visibility: auto;
+  overflow-clip-margin: 16px;
+}
+
 /* "Thinking" label with a slow light sweep. */
 @keyframes sweep {
   from {

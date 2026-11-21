@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { parseContent } from '../src/shared/artifacts'
+import { parseContent, parseContentCached } from '../src/shared/artifacts'
 import { makeLineBuffer } from '../src/shared/lines'
 import { splitSteps, stepLine, summarizeSteps } from '../src/shared/steps'
 import { normalizeSettings, DEFAULT_SETTINGS } from '../src/main/services/SettingsStore'
@@ -59,6 +59,22 @@ describe('artifacts', () => {
     expect(blocks).toEqual([{ type: 'artifact', identifier: 'a', title: 'A', content: '```html\n<div>', complete: false }])
     const fenced = parseContent('<artifact title="B">\n```html\n<b>x</b>\n```\n</artifact>')
     expect(fenced[0]).toMatchObject({ content: '<b>x</b>', identifier: 'artifact-1', complete: true })
+  })
+
+  test('the cached parse gives what parseContent does, and the same blocks for the same text', () => {
+    for (const content of ['', '  \n ', 'Just prose.', 'Before <artifact identifier="x" title="X">\n<p>hi</p>\n</artifact> after', '<ARTIFACT id="y">\n<b>', 'a\n\nb']) {
+      expect([...parseContentCached(content)]).toEqual(parseContent(content))
+    }
+    const text = 'Hello <artifact identifier="z" title="Z">\n<i>z</i>\n</artifact>'
+    expect(parseContentCached(text)).toBe(parseContentCached(['Hello ', '<artifact identifier="z" title="Z">\n<i>z</i>\n</artifact>'].join('')))
+  })
+
+  test('keyed by message, a reply being written replaces its entry and is parsed afresh', () => {
+    const first = parseContentCached('<artifact identifier="k" title="K">\n<b>', 'message-1')
+    expect(first).toEqual([{ type: 'artifact', identifier: 'k', title: 'K', content: '<b>', complete: false }])
+    const next = parseContentCached('<artifact identifier="k" title="K">\n<b>x</b>\n</artifact>', 'message-1')
+    expect(next).toEqual([{ type: 'artifact', identifier: 'k', title: 'K', content: '<b>x</b>', complete: true }])
+    expect(parseContentCached('<artifact identifier="k" title="K">\n<b>x</b>\n</artifact>', 'message-1')).toBe(next)
   })
 })
 
@@ -165,6 +181,12 @@ describe('steps', () => {
     expect(segments.map((s) => s.type)).toEqual(['text', 'steps', 'text'])
     expect(segments[1]).toMatchObject({ steps: [{ label: 'Opened example.com' }, { label: 'Clicked “Buy”' }] })
     expect(summarizeSteps(content)).toBe('Let me look.\n[Used the browser: Opened example.com; Clicked “Buy”]\nDone.')
+  })
+
+  test('text without steps is one segment, and blank text none', () => {
+    expect(splitSteps('Line one\n\nLine two')).toEqual([{ type: 'text', content: 'Line one\n\nLine two' }])
+    expect(splitSteps(' \n ')).toEqual([])
+    expect(splitSteps('')).toEqual([])
   })
 })
 

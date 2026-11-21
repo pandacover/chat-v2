@@ -37,6 +37,8 @@ export type Segment = { type: 'text'; content: string } | { type: 'steps'; steps
 
 /** Splits message content into prose and runs of consecutive steps. */
 export const splitSteps = (content: string): Segment[] => {
+  // Most replies have no steps: no need to split them into lines (this runs on every streamed line).
+  if (!content.includes(PREFIX)) return /\S/.test(content) ? [{ type: 'text', content }] : []
   const out: Segment[] = []
   let text: string[] = []
   const flushText = () => {

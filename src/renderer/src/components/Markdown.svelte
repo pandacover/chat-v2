@@ -1,3 +1,7 @@
+<script module lang="ts">
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)')
+</script>
+
 <script lang="ts">
   import { blockRenderer } from '@/lib/markdown'
   import { highlighter } from '@/lib/highlight.svelte'
@@ -8,7 +12,6 @@
   const blocks = $derived(render(source, streaming, highlighter.hljs !== null))
   let el: HTMLDivElement | undefined = $state()
   let seen = 0
-  const reduce = matchMedia('(prefers-reduced-motion: reduce)')
 
   // The block being written is rebuilt on every line, so CSS animations would replay on
   // it. Instead, ease in only the blocks that did not exist before this line.
@@ -38,5 +41,13 @@
   }
 </script>
 
+<!-- A code block being written comes in pieces, so the finished ones keep their DOM (lib/markdown.ts WritingCode).
+     Each is a block of its own, so a new line lays out only the last piece, not the whole block. -->
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="prose-chat" bind:this={el} {onclick}>{#each blocks as block}{@html block}{/each}</div>
+<div class="prose-chat" bind:this={el} {onclick}>{#each blocks as block}{#if typeof block === 'string'}{@html block}{:else}<div class="code-block"><div class="code-head"><span>{block.lang}</span><button type="button" class="copy-code" data-copy>Copy</button></div><pre><code class="hljs">{#each block.chunks as chunk}<span class="piece">{@html chunk}</span>{/each}</code></pre></div>{/if}{/each}</div>
+
+<style>
+  .piece {
+    display: block;
+  }
+</style>

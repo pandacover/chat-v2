@@ -14,7 +14,7 @@
 
   let ready = $state(false)
   let resizing = $state(false)
-  // Pixel width so the panel can animate open without its contents reflowing.
+  // Pixel width, kept by the panel's contents while it slides in and out.
   let panelWidth = $state(Math.round(window.innerWidth * 0.44))
   // The chat keeps at least 388px beside the sidebar, whatever width the sidebar was dragged to.
   const clampPanel = (px: number) =>
@@ -27,14 +27,29 @@
 
   const reduce = matchMedia('(prefers-reduced-motion: reduce)')
   /**
-   * Opens the panel by growing its width, so the chat column narrows in step
-   * instead of jumping. The contents keep their final width throughout.
+   * Opens the panel by sliding it in from the right edge. The chat column takes its new width at
+   * once, and the panel glides into the room it left. Growing the panel's width instead narrowed
+   * the chat a little every frame, re-laying out and repainting the whole conversation each time
+   * (about 30 ms a frame on a long chat), so the panel stuttered in and out.
    */
   const reveal = (_node: Element, { width }: { width: number }) => ({
     duration: reduce.matches ? 0 : 450,
     easing: ease,
-    css: (t: number) => `width: ${t * width}px; opacity: ${Math.min(1, t * 1.5)}`
+    css: (t: number) => `transform: translateX(${(1 - t) * width}px); opacity: ${Math.min(1, t * 1.5)}`
   })
+  /**
+   * Closing, the panel leaves the layout at once, staying where it sat (main's padding is 8px), so
+   * the chat widens as it slides away rather than all at once after. Position can't be animated,
+   * so it is set as the slide starts.
+   */
+  const leaveLayout = (e: Event) => {
+    const el = e.currentTarget as HTMLElement
+    Object.assign(el.style, { position: 'absolute', top: '8px', bottom: '8px', right: '8px' })
+  }
+  /** Opened again before it finished closing (the same element slides back): it takes its room beside the chat back. */
+  const rejoinLayout = (e: Event) => {
+    Object.assign((e.currentTarget as HTMLElement).style, { position: '', top: '', bottom: '', right: '' })
+  }
 
   onMount(async () => {
     await app.init()
@@ -117,7 +132,13 @@
       <div class="flex min-w-0 flex-1" inert={app.page !== 'chat'}>
         <ChatView />
         {#if app.panelOpen}
-          <div class="relative flex shrink-0 justify-end overflow-hidden" style="width: {panelWidth + 8}px" transition:reveal={{ width: panelWidth + 8 }}>
+          <div
+            class="relative flex shrink-0 justify-end overflow-hidden"
+            style="width: {panelWidth + 8}px"
+            transition:reveal={{ width: panelWidth + 8 }}
+            onoutrostart={leaveLayout}
+            onintrostart={rejoinLayout}
+          >
             <div class="relative flex h-full shrink-0 pl-2" style="width: {panelWidth + 8}px">
               <div
                 role="separator"
