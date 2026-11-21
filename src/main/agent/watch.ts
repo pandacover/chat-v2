@@ -7,8 +7,8 @@
 // stuck.ts's schedule) a judge reads what the reply has done lately, writes a progress note, and
 // says whether it is progressing, unclear (nudge) or stuck (pause, at 90% confidence).
 //
-// Swappable for later phases: the judge (a small model now, the primary bot later), where notes
-// go (a table keyed by chat now, job notes later), and where pauses are recorded.
+// Swappable: the judge (the primary bot, with a small model to fall back on: judge.ts), where
+// notes go (the job's notes: stuckStore.ts), and where pauses are recorded.
 import { CHECKPOINTS, type CheckpointSchedule, type Finding, type Judgement, type Signal, THRESHOLDS, type Thresholds, decide, makeDetector, stableJson } from './stuck'
 
 /** Whether the work is getting closer to done, as a progress note says. */
@@ -28,7 +28,7 @@ export interface ProgressNote {
   createdAt: number
 }
 
-/** Where progress notes are kept. A later phase points this at job notes. */
+/** Where progress notes are kept: the notes of the reply's job. */
 export interface ProgressNotes {
   add(note: ProgressNote): void
   /** The chat's latest notes, oldest first. */
@@ -51,7 +51,7 @@ export interface JudgeReply extends Judgement {
   closer: Closer
 }
 
-/** Reads a checkpoint and judges it. A small model now (judge.ts); a later phase swaps in the primary bot. */
+/** Reads a checkpoint and judges it: the primary bot, or a small model (judge.ts). */
 export interface ProgressJudge {
   judge(input: JudgeInput, signal: AbortSignal): Promise<JudgeReply | null>
 }
