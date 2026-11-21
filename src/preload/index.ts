@@ -23,7 +23,11 @@ const api: Api = {
   },
   bots: {
     list: () => call('bots:list'),
-    update: (id, patch) => call('bots:update', id, patch)
+    update: (id, patch) => call('bots:update', id, patch),
+    create: (patch) => call('bots:create', patch),
+    remove: (id) => call('bots:remove', id),
+    setPrimary: (id) => call('bots:setPrimary', id),
+    presence: () => call('bots:presence')
   },
   jobs: {
     list: () => call('jobs:list'),
@@ -31,6 +35,7 @@ const api: Api = {
     send: (input) => call('jobs:send', input),
     move: (input) => call('jobs:move', input),
     setStatus: (id, status) => call('jobs:setStatus', id, status),
+    detail: (id) => call('jobs:detail', id),
     rename: (id, title) => call('jobs:rename', id, title),
     remove: (id) => call('jobs:remove', id)
   },

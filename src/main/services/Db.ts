@@ -7,6 +7,7 @@ import type {
   Message,
   MessageStatus,
   PathNode,
+  Post,
   Role,
   AudioAnalysis,
   Session,
@@ -14,7 +15,7 @@ import type {
 } from '@shared/types'
 import type { ComputerMode } from '@shared/computer'
 import { DbError, NotFound, errorMessage } from '../errors'
-import { BOTS_AND_JOBS_MIGRATION, BOT_MODULES_MIGRATION, makeJobsDb } from './jobsDb'
+import { BOTS_AND_JOBS_MIGRATION, BOT_MODULES_MIGRATION, type NewMessage, WORKERS_MIGRATION, makeJobsDb } from './jobsDb'
 import { stuckStore } from './stuckStore'
 import { MEMORY_RECORDS_MIGRATION, makeMemoryStore } from './memoryStore'
 import { usageRows } from '../usage/rows'
@@ -187,7 +188,9 @@ export const MIGRATIONS: string[] = [
   // The daily reconciler's runs and the jobs it has read (see reconcilerDb.ts).
   RECONCILER_MIGRATION,
   // Rules (agent/rules.ts): the computer and browser switches of each chat become the primary bot's modules.
-  BOT_MODULES_MIGRATION
+  BOT_MODULES_MIGRATION,
+  // Workers (services/Team.ts): bots' posts in a job's shared thread, and each bot's own threads.
+  WORKERS_MIGRATION
 ]
 
 interface SessionRow {
@@ -220,6 +223,9 @@ interface MessageRow {
   usage: string | null
   created_at: number
   author_bot_id: string | null
+  post_kind: string | null
+  post_to: string | null
+  post_state: string | null
 }
 
 interface AttachmentRow {
@@ -286,13 +292,13 @@ const parseUsageJson = (raw: string | null): Usage | null => {
   }
 }
 
-export interface NewMessage {
-  sessionId: string
-  parentId: string
-  role: Role
-  content: string
-  status: MessageStatus
-  model?: string | null
+export type { NewMessage }
+
+const POST_KINDS = ['task', 'message', 'report'] as const
+const POST_STATES = ['held', 'declined', 'stopped'] as const
+const postOf = (r: MessageRow): Post | null => {
+  const kind = POST_KINDS.find((k) => k === r.post_kind)
+  return kind ? { kind, to: r.post_to, state: POST_STATES.find((s) => s === r.post_state) ?? null } : null
 }
 
 export const makeDb = (file: string) => {
@@ -403,7 +409,8 @@ export const makeDb = (file: string) => {
       createdAt: r.created_at,
       attachments: (atts.get(r.id) ?? []).map(publicAttachment),
       usage: parseUsageJson(r.usage),
-      authorBotId: r.author_bot_id
+      authorBotId: r.author_bot_id,
+      post: postOf(r)
     }))
   }
 
@@ -421,8 +428,8 @@ export const makeDb = (file: string) => {
     const id = randomUUID()
     const now = Date.now()
     run(
-      `insert into messages (id, session_id, parent_id, role, content, status, line_count, model, created_at)
-       values (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      `insert into messages (id, session_id, parent_id, role, content, status, line_count, model, created_at, author_bot_id, post_kind, post_to, post_state)
+       values (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
       id,
       m.sessionId,
       m.parentId,
@@ -430,7 +437,11 @@ export const makeDb = (file: string) => {
       m.content,
       m.status,
       m.model ?? null,
-      now
+      now,
+      m.authorBotId ?? null,
+      m.post?.kind ?? null,
+      m.post?.to ?? null,
+      m.post?.state ?? null
     )
     run('update messages set active_child_id = ? where id = ?', id, m.parentId)
     run('update sessions set updated_at = ? where id = ?', now, m.sessionId)
@@ -547,7 +558,9 @@ export const makeDb = (file: string) => {
           role: m.role,
           content: m.content,
           status: m.status === 'streaming' ? 'interrupted' : m.status,
-          model: m.model
+          model: m.model,
+          authorBotId: m.authorBotId,
+          post: m.post
         })
         run(
           `update messages set line_count = ?, error = ?, usage = ?,
@@ -598,7 +611,7 @@ export const makeDb = (file: string) => {
       }
     })
 
-  const jobs = makeJobsDb({ all, one, run, transaction, getSession, createSession, forkSession, deleteSession, activePath })
+  const jobs = makeJobsDb({ all, one, run, transaction, getSession, createSession, forkSession, deleteSession, activePath, insertMessage, getMessage })
 
   return {
     ...jobs,

@@ -8,7 +8,8 @@
 // thread, marked with `via_session_id`, and the conversation is read back from those turns.
 import { randomUUID } from 'node:crypto'
 import type { SQLInputValue } from 'node:sqlite'
-import type { Bot, BotPatch, Effort, Job, JobStatus, JobUsage, PathNode, Session } from '@shared/types'
+import type { Bot, BotPatch, Effort, Job, JobStatus, JobUsage, Message, MessageStatus, PathNode, Post, Role, Session } from '@shared/types'
+import { AVATAR_TINTS } from '@shared/bots'
 import { cleanModules, cleanRules } from '@shared/rules'
 
 /** The primary bot and its conversation, as the migration makes them. */
@@ -103,6 +104,18 @@ export const BOT_MODULES_MIGRATION = `update bots set modules = (
     )
   ), updated_at = ${NOW} where is_primary = 1;`
 
+/**
+ * Workers (phase 3). Bots talk in a job's shared thread, in posts: assistant rows signed by their
+ * bot (author_bot_id), with what kind of post each is and who it is for (null: everyone on the
+ * job), and whether it is held for the user's OK, was declined, or was stopped from bouncing. A
+ * worker's own thread is a session of kind 'worker'; the turns bots send it are user rows signed by
+ * the bot that sent them. Presence reads each bot's latest reply, hence the index.
+ */
+export const WORKERS_MIGRATION = `alter table messages add column post_kind text;
+  alter table messages add column post_to text;
+  alter table messages add column post_state text;
+  create index messages_author on messages(author_bot_id, seq);`
+
 interface BotRow {
   id: string
   name: string
@@ -170,8 +183,8 @@ const toJob = (r: JobRow): Job => ({
   threadId: r.thread_id
 })
 
-// A job's thread is its first; later phases may give a job more.
-const JOB_SELECT = `select j.*, (select s.id from sessions s where s.job_id = j.id order by s.created_at, s.rowid limit 1) as thread_id from jobs j`
+// A job's thread is its first shared one; its bots' own threads are 'worker' sessions.
+const JOB_SELECT = `select j.*, (select s.id from sessions s where s.job_id = j.id and s.kind = 'shared' order by s.created_at, s.rowid limit 1) as thread_id from jobs j`
 
 /** What makeDb lends the repository. */
 export interface JobsDbDeps {
@@ -184,12 +197,26 @@ export interface JobsDbDeps {
   forkSession: (sessionId: string, messageId: string) => Session
   deleteSession: (id: string) => { files: string[]; agentSessions: string[] }
   activePath: (session: Session) => PathNode[]
+  insertMessage: (m: NewMessage) => Message
+  getMessage: (id: string) => Message | undefined
+}
+
+/** What a new message row may carry (Db.ts insertMessage). */
+export interface NewMessage {
+  sessionId: string
+  parentId: string
+  role: Role
+  content: string
+  status: MessageStatus
+  model?: string | null
+  authorBotId?: string | null
+  post?: Post | null
 }
 
 /** The primary's conversation shows this many of its latest turns. */
 export const PRIMARY_TURNS = 80
 
-export const makeJobsDb = ({ all, one, run, transaction, getSession, createSession, forkSession, deleteSession, activePath }: JobsDbDeps) => {
+export const makeJobsDb = ({ all, one, run, transaction, getSession, createSession, forkSession, deleteSession, activePath, insertMessage, getMessage }: JobsDbDeps) => {
   const primaryBot = (): Bot => {
     const row = one<BotRow>('select * from bots where is_primary = 1')
     if (row) return toBot(row)
@@ -231,11 +258,15 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
     return row?.job_id ? getJob(row.job_id) : undefined
   }
 
-  /** A new job and its thread, owned by `botId`. */
+  /**
+   * A new job and its shared thread, owned by `botId`. The thread is answered by `threadBotId`
+   * (the owner, unless said otherwise: a job handed to a worker keeps the primary on its thread).
+   */
   const createJob = (input: {
     title: string
     botId: string
     parentJobId?: string | null
+    threadBotId?: string
   }): { job: Job; thread: Session } =>
     transaction(() => {
       const id = randomUUID()
@@ -250,9 +281,62 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
         now
       )
       const thread = createSession({ title: input.title, model: null, systemPrompt: null, forkedFromSessionId: null })
-      run(`update sessions set job_id = ?, bot_id = ?, kind = 'shared' where id = ?`, id, input.botId, thread.id)
+      run(`update sessions set job_id = ?, bot_id = ?, kind = 'shared' where id = ?`, id, input.threadBotId ?? input.botId, thread.id)
       return { job: getJob(id)!, thread: getSession(thread.id)! }
     })
+
+  /** A bot's own thread on a job, made when `create` and it has none yet. */
+  const workerThread = (jobId: string, botId: string, create = false): Session | undefined =>
+    transaction(() => {
+      const row = one<{ id: string }>(`select id from sessions where job_id = ? and bot_id = ? and kind = 'worker' order by created_at, rowid limit 1`, jobId, botId)
+      if (row) return getSession(row.id)
+      const job = create ? getJob(jobId) : undefined
+      if (!job) return undefined
+      const s = createSession({ title: job.title, model: null, systemPrompt: null, forkedFromSessionId: null })
+      run(`update sessions set job_id = ?, bot_id = ?, kind = 'worker' where id = ?`, jobId, botId, s.id)
+      return getSession(s.id)
+    })
+
+  /** The message the active path of a thread ends on (its root when empty). */
+  const leafOf = (session: Session) => activePath(session).at(-1)?.message.id ?? session.rootId
+
+  const seqOf = (messageId: string) => one<{ seq: number }>('select seq from messages where id = ?', messageId)?.seq ?? 0
+
+  /**
+   * A bot's post at the end of a job's shared thread. `via` puts it in the primary's conversation
+   * too (a report or a message to the primary shows there as a card).
+   */
+  const appendPost = (input: {
+    threadId: string
+    authorBotId: string
+    text: string
+    post: Post
+    via?: string | null
+  }): { message: Message; seq: number } =>
+    transaction(() => {
+      const thread = getSession(input.threadId)!
+      const message = insertMessage({
+        sessionId: thread.id,
+        parentId: leafOf(thread),
+        role: 'assistant',
+        content: input.text,
+        status: 'complete',
+        authorBotId: input.authorBotId,
+        post: input.post
+      })
+      if (input.via) run('update messages set via_session_id = ? where id = ?', input.via, message.id)
+      return { message, seq: seqOf(message.id) }
+    })
+
+  interface PostRow {
+    id: string
+    seq: number
+    author_bot_id: string | null
+    post_to: string | null
+    post_kind: string
+    content: string
+  }
+
 
   /** Deletes a job and its threads; returns the files and Claude Code sessions nothing else needs. */
   const deleteJob = (id: string): { files: string[]; agentSessions: string[] } =>
@@ -304,11 +388,12 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
 
   /**
    * The primary's conversation: the latest turns the user sent it, each with the reply its thread
-   * shows, oldest first. A turn whose thread switched to another branch since drops out.
+   * shows, and the bots' reports to it, oldest first. A turn whose thread switched to another
+   * branch since drops out.
    */
   const primaryPath = (primaryId: string, limit = PRIMARY_TURNS): PathNode[] => {
     const sent = all<{ id: string; session_id: string; seq: number }>(
-      `select id, session_id, seq from messages where via_session_id = ? and role = 'user' order by seq desc limit ?`,
+      `select id, session_id, seq from messages where via_session_id = ? and (role = 'user' or post_kind is not null) order by seq desc limit ?`,
       primaryId,
       limit
     )
@@ -322,16 +407,123 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
         const seq = order.get(node.message.id)
         if (seq === undefined) return
         const next = path[i + 1]
-        out.push({ seq, nodes: next?.message.role === 'assistant' ? [node, next] : [node] })
+        const answered = node.message.role === 'user' && next?.message.role === 'assistant' && !next.message.post
+        out.push({ seq, nodes: answered ? [node, next] : [node] })
       })
     }
     return out.sort((a, b) => a.seq - b.seq).flatMap((t) => t.nodes)
   }
 
+  const listBots = (): Bot[] => all<BotRow>('select * from bots order by is_primary desc, created_at, rowid').map(toBot)
+
   return {
     primaryBot,
     getBot,
-    listBots: (): Bot[] => all<BotRow>('select * from bots order by is_primary desc, created_at').map(toBot),
+    listBots,
+    /** A new worker: no tool modules and default rules until Settings gives it some; an initial on the next tint. */
+    createBot: (patch: BotPatch): Bot =>
+      transaction(() => {
+        const id = randomUUID()
+        const now = Date.now()
+        const count = one<{ n: number }>('select count(*) as n from bots')?.n ?? 0
+        const avatar = patch.avatar === undefined || patch.avatar === 'mascot' ? `tint:${AVATAR_TINTS[1 + (count % (AVATAR_TINTS.length - 1))]}` : patch.avatar
+        run(
+          `insert into bots (id, name, avatar, instructions, model, effort, modules, rules, is_primary, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+          id,
+          patch.name?.trim() || 'New bot',
+          avatar,
+          patch.instructions ?? null,
+          patch.model ?? null,
+          patch.effort ?? null,
+          JSON.stringify(cleanModules(patch.modules ?? [])),
+          JSON.stringify(cleanRules(patch.rules ?? {})),
+          now,
+          now
+        )
+        return getBot(id)!
+      }),
+    /**
+     * Deletes a worker; the primary stays. Its threads and posts stay too, unsigned: what it did is
+     * still the user's to read. Returns whether it went.
+     */
+    deleteBot: (id: string): boolean => Number(run('delete from bots where id = ? and is_primary = 0', id).changes) > 0,
+    /**
+     * Makes `id` the primary: it hears what is said without picking a job, and answers in the
+     * primary's conversation and every job's shared thread the old primary answered in.
+     */
+    setPrimary: (id: string) =>
+      transaction(() => {
+        const old = primaryBot()
+        if (old.id === id || !getBot(id)) return
+        run('update bots set is_primary = 0, updated_at = ? where id = ?', Date.now(), old.id)
+        run('update bots set is_primary = 1, updated_at = ? where id = ?', Date.now(), id)
+        run(`update sessions set bot_id = ? where kind = 'primary' or (kind = 'shared' and bot_id = ?)`, id, old.id)
+      }),
+    workerThread,
+    /** The bots on a job: its owner, then those with a thread of their own on it, then any that posted there. */
+    botsOnJob: (jobId: string): Array<{ botId: string; threadId: string | null }> => {
+      const job = getJob(jobId)
+      if (!job) return []
+      const out = new Map<string, string | null>()
+      if (job.ownerBotId) out.set(job.ownerBotId, null)
+      for (const r of all<{ id: string; bot_id: string }>(`select id, bot_id from sessions where job_id = ? and kind = 'worker' and bot_id is not null order by created_at, rowid`, jobId))
+        if (!out.get(r.bot_id)) out.set(r.bot_id, r.id)
+      if (job.threadId)
+        for (const r of all<{ a: string }>(`select distinct author_bot_id as a from messages where session_id = ? and post_kind is not null and author_bot_id is not null`, job.threadId))
+          if (!out.has(r.a)) out.set(r.a, null)
+      return [...out].filter(([b]) => getBot(b)).map(([botId, threadId]) => ({ botId, threadId }))
+    },
+    appendPost,
+    setPostState: (messageId: string, state: Post['state']) => {
+      run('update messages set post_state = ? where id = ?', state, messageId)
+    },
+    /** The newest message's place in a thread, for reading what came after it. */
+    lastSeq: (threadId: string): number => one<{ s: number | null }>('select max(seq) as s from messages where session_id = ?', threadId)?.s ?? 0,
+    seqOf,
+    /** Where a bot last posted in a shared thread (0 if it never did). */
+    lastPostSeq: (threadId: string, botId: string): number =>
+      one<{ s: number | null }>('select max(seq) as s from messages where session_id = ? and author_bot_id = ? and post_kind is not null', threadId, botId)?.s ?? 0,
+    /**
+     * Posts in a shared thread after `afterSeq` addressed to `botId` (or to everyone) by another bot,
+     * only `from` when given; held, declined and stopped ones never reached anyone.
+     */
+    postsFor: (threadId: string, botId: string, afterSeq: number, from?: string | null): Array<{ seq: number; message: Message }> =>
+      all<{ id: string; seq: number }>(
+        `select id, seq from messages where session_id = ? and seq > ? and post_kind is not null and post_state is null
+           and author_bot_id is not null and author_bot_id != ? and (post_to = ? or post_to is null) and (? is null or author_bot_id = ?)
+         order by seq`,
+        threadId,
+        afterSeq,
+        botId,
+        botId,
+        from ?? null,
+        from ?? null
+      ).flatMap((r) => {
+        const message = getMessage(r.id)
+        return message ? [{ seq: r.seq, message }] : []
+      }),
+    /**
+     * The latest posts between bots in a shared thread, oldest first, for spotting a request
+     * bouncing: messages and reports that went through or were stopped for bouncing already.
+     */
+    recentPosts: (threadId: string, limit: number): Array<{ from: string; to: string | null; text: string }> =>
+      all<PostRow>(
+        `select id, seq, author_bot_id, post_to, post_kind, content from messages
+          where session_id = ? and post_kind in ('message', 'report') and (post_state is null or post_state = 'stopped')
+            and author_bot_id is not null and author_bot_id != coalesce(post_to, '') order by seq desc limit ?`,
+        threadId,
+        limit
+      )
+        .reverse()
+        .map((r) => ({ from: r.author_bot_id!, to: r.post_to, text: r.content })),
+    /** A bot's latest reply (never a post), for its presence. */
+    latestReply: (botId: string): { status: MessageStatus; createdAt: number; sessionId: string } | null => {
+      const row = one<{ status: string; created_at: number; session_id: string }>(
+        `select status, created_at, session_id from messages where author_bot_id = ? and role = 'assistant' and post_kind is null order by seq desc limit 1`,
+        botId
+      )
+      return row ? { status: row.status as MessageStatus, createdAt: row.created_at, sessionId: row.session_id } : null
+    },
     updateBot: (id: string, patch: BotPatch) => {
       const now = Date.now()
       if (patch.name !== undefined) run('update bots set name = ?, updated_at = ? where id = ?', patch.name, now, id)
@@ -377,7 +569,7 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
     renameJob: (id: string, title: string) =>
       transaction(() => {
         run('update jobs set title = ? where id = ?', title, id)
-        run(`update sessions set title = ? where job_id = ? and kind = 'shared'`, title, id)
+        run(`update sessions set title = ? where job_id = ? and kind != 'primary'`, title, id)
       }),
     /** Adds up what a job's replies used. */
     refreshJobUsage: (id: string): JobUsage => {

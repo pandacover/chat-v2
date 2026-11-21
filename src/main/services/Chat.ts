@@ -4,7 +4,7 @@ import { ARTIFACT_INSTRUCTIONS } from '@shared/artifacts'
 import { makeLineBuffer } from '@shared/lines'
 import { isClaudeModel } from '@shared/models'
 import { stepLine, summarizeSteps } from '@shared/steps'
-import type { Bot, Effort, MemoryRun, Message, MessageStatus, NewAttachmentInput, Session, SessionView, Settings, StreamEvent, Usage } from '@shared/types'
+import type { Bot, Effort, MemoryRun, Message, MessageStatus, NewAttachmentInput, Post, Session, SessionView, Settings, StreamEvent, Usage } from '@shared/types'
 import { type ConfigError, type DbError, InvalidInput, type MissingApiKey, type NotFound, ProviderError, errorMessage } from '../errors'
 import { WRITING_GUIDELINES } from '../guidelines'
 import { jobsBlock, jobsNote } from '../jobs'
@@ -17,7 +17,7 @@ import { type WatchDeps, makeWatch, pauseNote } from '../agent/watch'
 import { SMALL_MODEL } from '@shared/models'
 import { recallModule } from '../agent/recall'
 import { jobNotesBlock, noteModule } from '../agent/notes'
-import { HISTORY_NOTE, type TurnPlan, continueNote, planTurn, transcriptText } from '../agent/history'
+import { HISTORY_NOTE, type NameOf, type TurnPlan, continueNote, fromBotText, planTurn, transcriptText } from '../agent/history'
 import type { ToolModuleFactory } from '../agent/module'
 import { type Gate, decide as decideAccess, ruled } from '../agent/rules'
 import { ComputerUse, type Mode, decideMode, effortFor, handsOver, modeTag, teachAnswer } from '../computer'
@@ -88,6 +88,15 @@ const sumUsage = (a: Usage | null, b: Usage): Usage =>
 
 type ChatError = DbError | NotFound | InvalidInput
 
+/** A reply being written, for presence. */
+export interface RunningReply {
+  messageId: string
+  sessionId: string
+  botId: string
+  /** A tool call is running (working), rather than the model writing (thinking). */
+  working: boolean
+}
+
 export class Chat extends Context.Service<
   Chat,
   {
@@ -97,7 +106,22 @@ export class Chat extends Context.Service<
       parentId: string
       text: string
       attachmentIds: string[]
+      /** The bot sending it (a message to a worker, in its own thread); the user when left out. */
+      from?: string | null
     }) => Effect.Effect<SessionView, ChatError>
+    /**
+     * A bot's message to a thread (a worker's own): added at the end, and answered at once unless a
+     * reply is still running there, in which case `drain` answers it once that ends.
+     */
+    readonly queue: (input: { sessionId: string; text: string; from: string; post?: Post | null }) => Effect.Effect<{ messageId: string; started: boolean }, ChatError>
+    /** Answers the turn a thread ends on if nothing answered it yet (a message queued while a reply ran). */
+    readonly drain: (sessionId: string) => Effect.Effect<boolean, ChatError>
+    /** Adds tool sets to every reply: for each, the factories a reply in `session` by `bot` gets. */
+    readonly provideTools: (provider: (session: Session, bot: Bot) => ToolModuleFactory[]) => void
+    /** The replies running now, each with its bot and whether a tool call is under way. */
+    readonly running: () => RunningReply[]
+    /** Called whenever a reply starts, ends, or starts or stops a tool call. Returns the unsubscribe. */
+    readonly onActivity: (listener: () => void) => () => void
     readonly edit: (input: {
       sessionId: string
       messageId: string
@@ -178,10 +202,13 @@ export class Chat extends Context.Service<
       // Job notes, which the bots on a job write as they work (agent/notes.ts).
       const notes = noteModule((jobId, note, origin) => Effect.runPromise(db.use((d) => d.writeNote(jobId, note, origin))))
 
+      // Tool sets other services add (the team tools, services/Team.ts).
+      const providers: Array<(session: Session, bot: Bot) => ToolModuleFactory[]> = []
       /** The tool sets a reply in `session` gets from `bot`, built afresh for each reply, each call under the bot's rules. */
       const toolSets = (session: Session, bot: Bot, withMemory: boolean): ToolModuleFactory[] => {
         const gate = gateFor(bot)
         return [
+          ...providers.flatMap((p) => p(session, bot)),
           ...(session.jobId ? [ruled(notes, gate)] : []),
           ...(bot.modules.includes('browser') ? [ruled(browserModule(browser), gate)] : []),
           ...(computerOn(bot)
@@ -211,6 +238,10 @@ export class Chat extends Context.Service<
       const memoryLock = yield* Semaphore.make(1)
       let lastMemoryRun: MemoryRun | null = null
       const replyEnds = new Set<(end: { messageId: string; status: MessageStatus }) => void>()
+      // Replies running now, for presence, and who to tell when that changes.
+      const runningReplies = new Map<string, RunningReply>()
+      const activity = new Set<() => void>()
+      const active = () => activity.forEach((l) => l())
       /** Records how a memory check went and tells open windows (a toast when something changed). */
       const reportMemory = (sessionId: string, run: Omit<MemoryRun, 'at' | 'added' | 'removed' | 'dropped'> & Partial<MemoryRun>) => {
         lastMemoryRun = { at: Date.now(), added: [], removed: [], dropped: [], ...run }
@@ -244,17 +275,20 @@ export class Chat extends Context.Service<
         // A computer chat tells the model its mode with each message.
         const tag = (text: string) => (mode ? modeTag(mode, text) : text)
         const stored = yield* db.use((d) => d.storedAttachmentsFor(plan.turns.map((m) => m.id)))
+        // Bots' posts and messages are shown with who wrote them.
+        const names = yield* db.use((d) => new Map(d.listBots().map((b) => [b.id, b.name])))
+        const nameOf: NameOf = (id) => (id ? names.get(id) : undefined) ?? 'a bot'
         const blocks: PromptBlock[] = []
         const last = partial === null ? plan.turns.length - 1 : -1
         for (const [i, m] of plan.turns.entries()) {
           if (m.role === 'user') blocks.push(...(yield* attachments.toBlocks(stored.get(m.id) ?? [])))
-          const text = i === last ? tag(m.content) : transcriptText(m)
+          const text = i === last ? tag(m.role === 'user' && m.authorBotId ? fromBotText(m, nameOf) : m.content) : transcriptText(m, nameOf)
           if (text?.trim()) blocks.push({ type: 'text', text })
         }
         if (partial !== null) {
           // Continued from its own session, the reply is there up to its checkpoint; the end is quoted.
           const own = plan.turns.length === 0
-          if (!own) blocks.push({ type: 'text', text: transcriptText({ role: 'assistant', content: partial } as Message) ?? '' })
+          if (!own) blocks.push({ type: 'text', text: transcriptText({ role: 'assistant', content: partial, post: null } as Message) ?? '' })
           blocks.push({ type: 'text', text: tag(continueNote(own ? partial : null)) })
         }
         // A paused reply, continued: why it was paused, before the last block.
@@ -376,7 +410,8 @@ export class Chat extends Context.Service<
           // User instructions first so they win any conflict; the writing guideline is hidden from Settings.
           const instructions = [
             session.systemPrompt ?? bot.instructions ?? settings.systemPrompt,
-            session.jobId ? jobsNote(bot.name) : '',
+            // A worker's own thread: the team tools' section says what it is (agent/team.ts).
+            session.jobId && session.kind !== 'worker' ? jobsNote(bot.name) : '',
             session.jobId ? yield* db.use((d) => jobNotesBlock(d.jobNotes(session.jobId!))) : '',
             WRITING_GUIDELINES,
             settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : '',
@@ -401,8 +436,16 @@ export class Chat extends Context.Service<
             checkpoint: (uuid) => Effect.runSync(db.use((d) => d.checkpoint(assistant.id, uuid)).pipe(Effect.ignore)),
             rateLimit: (info) => {
               limit = meter?.signal(info) ?? limit
+            },
+            tool: (on) => {
+              const r = runningReplies.get(assistant.id)
+              if (!r || r.working === on) return
+              r.working = on
+              active()
             }
           }
+          runningReplies.set(assistant.id, { messageId: assistant.id, sessionId: session.id, botId: bot.id, working: false })
+          active()
           const result = yield* Effect.tryPromise({
             try: (signal) =>
               agent.reply(
@@ -447,6 +490,7 @@ export class Chat extends Context.Service<
               const partial = tail.length > 0
               const stopped = stopRequested.delete(assistant.id)
               computerReplies.delete(assistant.id)
+              if (runningReplies.delete(assistant.id)) active()
               meter?.replyEnded({ sessionId: assistant.sessionId, messageId: assistant.id, model, startedAt, endedAt: Date.now(), cost: runCost })
               // Paused: kept as a stop keeps it, with why, for Continue.
               // Paused at a tool call, its text had ended; only repeated text is cut off mid-line.
@@ -537,25 +581,33 @@ export class Chat extends Context.Service<
         parentId: string
         text: string
         attachmentIds: string[]
+        from?: string | null
+        /** What a bot's turn was in the job's shared thread (a task, a message, a report). */
+        post?: Post | null
+        /** Leave it unanswered for now (a reply still runs in the thread): `drain` answers it. */
+        hold?: boolean
       }) {
         if (!input.text.trim() && input.attachmentIds.length === 0)
           return yield* new InvalidInput({ message: 'Message is empty' })
         const session = yield* db.require('Session', (d) => d.getSession(input.sessionId))
         const settings = yield* settingsStore.get.pipe(Effect.orElseSucceed(() => null))
         // A new chat is titled with the start of its first message right away, then renamed by the title model.
+        const fromBot = input.from ?? null
         const placeholder =
-          session.title === NEW_SESSION_TITLE && !session.forkedFromSessionId ? titleFrom(input.text || 'Attachment') : null
+          session.title === NEW_SESSION_TITLE && !session.forkedFromSessionId && !fromBot ? titleFrom(input.text || 'Attachment') : null
         const { user, assistant, files, previous } = yield* db.use((d) => {
           const user = d.insertMessage({
             sessionId: input.sessionId,
             parentId: input.parentId,
             role: 'user',
             content: input.text,
-            status: 'complete'
+            status: 'complete',
+            authorBotId: fromBot,
+            post: fromBot ? (input.post ?? null) : null
           })
           d.bindAttachments(input.attachmentIds, user.id)
           if (placeholder) d.updateSession(session.id, { title: placeholder })
-          const assistant = d.insertMessage({
+          const assistant = input.hold ? null : d.insertMessage({
             sessionId: input.sessionId,
             parentId: user.id,
             role: 'assistant',
@@ -572,8 +624,9 @@ export class Chat extends Context.Service<
             previous: parent?.role === 'assistant' ? summarizeSteps(parent.content) : null
           }
         })
-        yield* start(assistant)
-        if (settings?.memoryModel) {
+        if (assistant) yield* start(assistant)
+        // Memory learns from what the user says, not from what bots tell each other.
+        if (settings?.memoryModel && !fromBot) {
           const message = input.text.replace(/\s+/g, ' ').trim().slice(0, 120)
           const source = memorySource(input.text, askedQuestion(previous))
           if (source) {
@@ -587,7 +640,7 @@ export class Chat extends Context.Service<
           const job = nameSession({ sessionId: session.id, placeholder, model: settings.titleModel, text: input.text, files })
           yield* FiberMap.run(titling, session.id, job, { onlyIfMissing: true })
         }
-        return yield* view(input.sessionId)
+        return { view: yield* view(input.sessionId), userId: user.id, started: assistant !== null }
       })
 
       const send = Effect.fn('Chat.send')(function* (input: {
@@ -595,6 +648,7 @@ export class Chat extends Context.Service<
         parentId: string
         text: string
         attachmentIds: string[]
+        from?: string | null
       }) {
         yield* messageIn(input.sessionId, input.parentId)
         // While a Show-me step of this chat waits, a message answers it instead of starting a reply.
@@ -605,7 +659,30 @@ export class Chat extends Context.Service<
           yield* computer.teachDone(waiting.id, teachAnswer(input.text))
           return yield* view(input.sessionId)
         }
-        return yield* insertUserTurn(input)
+        return (yield* insertUserTurn(input)).view
+      })
+
+      const queue = Effect.fn('Chat.queue')(function* (input: { sessionId: string; text: string; from: string; post?: Post | null }) {
+        const session = yield* db.require('Session', (d) => d.getSession(input.sessionId))
+        const { parentId, busy } = yield* db.use((d) => ({
+          parentId: d.activePath(session).at(-1)?.message.id ?? session.rootId,
+          busy: d.streamingIds(session.id).length > 0
+        }))
+        const turn = yield* insertUserTurn({ sessionId: session.id, parentId, text: input.text, attachmentIds: [], from: input.from, post: input.post ?? null, hold: busy })
+        return { messageId: turn.userId, started: turn.started }
+      })
+
+      const drain = Effect.fn('Chat.drain')(function* (sessionId: string) {
+        const session = yield* db.require('Session', (d) => d.getSession(sessionId))
+        const settings = yield* settingsStore.get.pipe(Effect.orElseSucceed(() => null))
+        const assistant = yield* db.use((d) => {
+          const leaf = d.activePath(session).at(-1)?.message
+          if (leaf?.role !== 'user' || d.streamingIds(session.id).length > 0) return null
+          return d.insertMessage({ sessionId, parentId: leaf.id, role: 'assistant', content: '', status: 'streaming', model: chatModel(session, settings, d.botOf(session.id).model) })
+        })
+        if (!assistant) return false
+        yield* start(assistant)
+        return true
       })
 
       // Editing never mutates history: it adds a sibling user turn, creating a branch.
@@ -618,13 +695,15 @@ export class Chat extends Context.Service<
         const original = yield* messageIn(input.sessionId, input.messageId)
         if (original.role !== 'user' || !original.parentId)
           return yield* new InvalidInput({ message: 'Only user messages can be edited' })
-        return yield* insertUserTurn({ ...input, parentId: original.parentId })
+        if (original.authorBotId) return yield* new InvalidInput({ message: 'A bot sent this message, so it can’t be edited.' })
+        return (yield* insertUserTurn({ ...input, parentId: original.parentId })).view
       })
 
       const regenerate = Effect.fn('Chat.regenerate')(function* (input: { sessionId: string; assistantId: string }) {
         const original = yield* messageIn(input.sessionId, input.assistantId)
         if (original.role !== 'assistant' || !original.parentId)
           return yield* new InvalidInput({ message: 'Only assistant replies can be regenerated' })
+        if (original.post) return yield* new InvalidInput({ message: 'A bot’s post can’t be regenerated.' })
         meter?.clearPause(original.id)
         const session = yield* db.require('Session', (d) => d.getSession(input.sessionId))
         const settings = yield* settingsStore.get.pipe(Effect.orElseSucceed(() => null))
@@ -692,6 +771,14 @@ export class Chat extends Context.Service<
       return Chat.of({
         view,
         send,
+        queue,
+        drain,
+        provideTools: (provider) => void providers.push(provider),
+        running: () => [...runningReplies.values()].map((r) => ({ ...r })),
+        onActivity: (listener) => {
+          activity.add(listener)
+          return () => void activity.delete(listener)
+        },
         edit,
         regenerate,
         continue: continueReply,

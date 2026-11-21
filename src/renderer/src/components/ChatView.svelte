@@ -35,7 +35,7 @@
   const pendingNodes = $derived.by<PathNode[]>(() => {
     const p = app.pending
     if (!p || !app.isPrimary) return []
-    const base = { sessionId: '', parentId: null, activeChildId: null, lineCount: 0, model: null, error: null, createdAt: 0, usage: null, attachments: [] }
+    const base = { sessionId: '', parentId: null, activeChildId: null, lineCount: 0, model: null, error: null, createdAt: 0, usage: null, attachments: [], post: null }
     return [
       { message: { ...base, id: 'pending-user', role: 'user', content: p.text, status: 'complete', authorBotId: null, attachments: p.attachments }, siblingIds: [], siblingIndex: 0 },
       { message: { ...base, id: 'pending-reply', role: 'assistant', content: '', status: 'streaming', authorBotId: app.primaryBot?.id ?? null }, siblingIds: [], siblingIndex: 0 }

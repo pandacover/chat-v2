@@ -5,6 +5,7 @@ import { Cause, Effect, type ManagedRuntime } from 'effect'
 import type { AudioAnalysis, BotPatch, IpcResult, JobTarget, MemoryView, NewAttachmentInput, RecordReply, SessionPatch, SettingsPatch } from '@shared/types'
 import { isClaudeModel } from '@shared/models'
 import { cleanModules, cleanRules } from '@shared/rules'
+import { cleanAvatar } from '@shared/bots'
 import { errorMessage } from './errors'
 import { checkForUpdates, downloadUpdate, installUpdate, updateState } from './updater'
 import { publishArtifact } from './protocols'
@@ -20,8 +21,9 @@ import { Jobs } from './services/Jobs'
 import { SettingsStore } from './services/SettingsStore'
 import { Usage } from './usage/Usage'
 import { Reconciler } from './services/Reconciler'
+import { Team } from './services/Team'
 
-export type MainServices = Db | Chat | Jobs | Attachments | SettingsStore | Agent | ElevenLabs | Browser | ComputerUse | Usage | Reconciler
+export type MainServices = Db | Chat | Jobs | Team | Attachments | SettingsStore | Agent | ElevenLabs | Browser | ComputerUse | Usage | Reconciler
 
 /** Where a message to the primary goes, as the renderer sent it. */
 const jobTarget = (v: unknown): JobTarget =>
@@ -37,8 +39,8 @@ const botPatch = (v: unknown): BotPatch => {
     ...(typeof p.instructions === 'string' ? { instructions: p.instructions } : {}),
     ...(typeof p.model === 'string' && isClaudeModel(p.model) ? { model: p.model } : {}),
     ...(EFFORTS.find((e) => e === p.effort) ? { effort: p.effort as BotPatch['effort'] } : {}),
-    // The fox, or the name's initial.
-    ...(p.avatar === 'mascot' || p.avatar === null ? { avatar: p.avatar } : {}),
+    // The fox, the name's initial (on a tint), or a small picture.
+    ...(cleanAvatar(p.avatar) !== undefined ? { avatar: cleanAvatar(p.avatar)! } : {}),
     ...(Array.isArray(p.modules) ? { modules: cleanModules(p.modules) } : {}),
     ...(p.rules && typeof p.rules === 'object' ? { rules: cleanRules(p.rules) } : {})
   }
@@ -161,6 +163,10 @@ const handlers: Record<string, Handler> = {
 
   'bots:list': () => Db.use((db) => db.use((d) => d.listBots())),
   'bots:update': (id, patch) => Db.use((db) => db.use((d) => (d.updateBot(str(id, 'id'), botPatch(patch)), d.listBots()))),
+  'bots:create': (patch) => Team.use((t) => t.createBot(botPatch(patch))),
+  'bots:remove': (id) => Team.use((t) => t.removeBot(str(id, 'id'))),
+  'bots:setPrimary': (id) => Team.use((t) => t.setPrimary(str(id, 'id'))),
+  'bots:presence': () => Team.use((t) => t.presence),
 
   'jobs:list': () => Db.use((db) => db.use((d) => d.listJobs())),
   'jobs:primary': () => Jobs.use((j) => j.primary),
@@ -172,6 +178,7 @@ const handlers: Record<string, Handler> = {
       return j.move({ messageId: str(input.messageId, 'messageId'), target: target === 'auto' ? 'new' : target })
     }),
   'jobs:setStatus': (id, status) => Jobs.use((j) => j.setStatus(str(id, 'id'), status === 'done' ? 'done' : 'open')),
+  'jobs:detail': (id) => Team.use((t) => t.detail(str(id, 'id'))),
   'jobs:rename': (id, title) => Db.use((db) => db.use((d) => d.renameJob(str(id, 'id'), str(title, 'title').trim() || NEW_SESSION_TITLE))),
   'jobs:remove': (id) => Jobs.use((j) => j.remove(str(id, 'id'))),
 

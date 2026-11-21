@@ -8,10 +8,12 @@ import type {
   BotPatch,
   BrowserEvent,
   Job,
+  JobDetail,
   JobStatus,
   JobTarget,
   MemoryView,
   Message,
+  Presence,
   Session,
   SessionPatch,
   SessionView,
@@ -74,6 +76,12 @@ class AppState {
   currentBot = $derived((this.view?.session.botId ? this.bots.find((b) => b.id === this.view!.session.botId) : undefined) ?? this.primaryBot)
   /** The id of the primary bot's conversation, once loaded. */
   primaryId = $state<string | null>(null)
+  /** What each bot is doing (its avatar shows it), by bot id. */
+  presence = $state<Record<string, Presence>>({})
+  /** More than one bot: the roster, owners and the bots on each job show. */
+  team = $derived(this.bots.length > 1)
+  /** The open job's bots, threads and notes, when a job's thread (or a bot's own thread on it) is open. */
+  jobDetail = $state<JobDetail | null>(null)
   /** The primary bot's conversation is open (rather than a job's thread). */
   isPrimary = $derived(this.view?.session.kind === 'primary')
   /** Each job by its thread, for labelling turns and finding a thread's job. */
@@ -379,6 +387,7 @@ class AppState {
     void api.computer.supported().then((on) => (this.computerSupported = on))
     void api.computer.waiting().then((w) => (this.computerWait = w))
     void api.updates.get().then((s) => (this.update = s))
+    void api.bots.presence().then((p) => (this.presence = p)).catch(() => {})
     addEventListener('beforeunload', () => this.saveDrafts())
     const [, , , primary] = await Promise.all([this.refreshSessions(), this.loadSettings(), this.loadBots(), this.attempt(() => api.jobs.primary())])
     // The new chat's unsent draft (from before bots) is now said to the primary.
@@ -733,7 +742,49 @@ class AppState {
     return m !== undefined
   }
 
+  /** Threads a bot changed, reloaded together a moment later. */
+  private touched = new Set<string>()
+  private touchTimer: ReturnType<typeof setTimeout> | undefined
+  private threadChanged(sessionId: string) {
+    this.touched.add(sessionId)
+    clearTimeout(this.touchTimer)
+    this.touchTimer = setTimeout(() => {
+      const ids = [...this.touched]
+      this.touched.clear()
+      const open = this.view?.session
+      if (open?.kind === 'primary') void this.reloadPrimary()
+      else if (open && ids.includes(open.id)) void this.reloadThread(open.id)
+      if (this.jobDetail) void this.loadJobDetail(this.jobDetail.job.id)
+      void this.refreshSessions()
+    }, 80)
+  }
+
+  /** Reloads the open thread if it is still open, keeping replies that stream in it live. */
+  private async reloadThread(id: string) {
+    const view = await this.attempt(() => api.sessions.get(id))
+    if (!view || this.view?.session.id !== id) return
+    for (const n of view.path) if (n.message.status === 'streaming') this.liveIds.add(n.message.id)
+    this.setView(view)
+  }
+
+  async loadJobDetail(jobId: string | null) {
+    if (!jobId) return void (this.jobDetail = null)
+    const detail = await this.attempt(() => api.jobs.detail(jobId))
+    if (detail && (this.currentJob?.id ?? this.workerJobId) === jobId) this.jobDetail = detail
+  }
+
+  /** The job a bot's own thread is on, when one is open. */
+  workerJobId = $derived(this.view?.session.kind === 'worker' ? this.view.session.jobId : null)
+
   private onEvent(e: StreamEvent) {
+    if (e.type === 'presence') {
+      this.presence = e.presence
+      return
+    }
+    if (e.type === 'thread') {
+      this.threadChanged(e.sessionId)
+      return
+    }
     if (e.type === 'jobs') {
       // Summaries and usage land in bursts after each reply: one reload for them all.
       clearTimeout(this.jobsTimer)

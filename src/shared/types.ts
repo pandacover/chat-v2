@@ -81,8 +81,36 @@ export interface Message {
   createdAt: number
   attachments: Attachment[]
   usage: Usage | null
-  /** The bot that wrote an assistant reply; null for the user's turns. */
+  /**
+   * The bot that wrote an assistant reply or a post. On a user turn: null when the user wrote it,
+   * else the bot that sent it (a message to a worker, in the worker's own thread).
+   */
   authorBotId: string | null
+  /** Set on a bot's post in a job's shared thread (a task, a message or a report); null otherwise. */
+  post: Post | null
+}
+
+/**
+ * A post in a job's shared thread, where bots talk in the open: a task handed to a bot, a message
+ * between bots, or a bot's report. `to` is the bot it is addressed to; null is everyone on the job.
+ * held: waiting for the user's OK (a request beyond the asking bot's access); declined: the user
+ * said no; stopped: not passed on, because the same request kept bouncing between two bots.
+ */
+export interface Post {
+  kind: 'task' | 'message' | 'report'
+  to: string | null
+  state: 'held' | 'declined' | 'stopped' | null
+}
+
+/** What a bot is doing, shown on its avatar. */
+export type Presence = 'idle' | 'thinking' | 'working' | 'waiting' | 'stuck' | 'done'
+
+/** A job as its view shows it: the bots on it (with their own threads) and its notes. */
+export interface JobDetail {
+  job: Job
+  /** The owner first, then the others in the order they joined. `threadId` is the bot's own thread on the job (none for the primary). */
+  bots: Array<{ botId: string; threadId: string | null }>
+  notes: MemoryRecord[]
 }
 
 export interface Session {
@@ -108,8 +136,9 @@ export interface Session {
   jobId: string | null
   /**
    * primary: the primary bot's conversation, which never branches, forks or ends (its turns live
-   * in job threads). shared: a job's thread, which the user and its bot both write in. worker: a
-   * worker bot's thread (later phases).
+   * in job threads). shared: a job's thread, which the user, the primary and every bot on the job
+   * write in (bots' posts). worker: one bot's own thread on a job, its own Claude Code session,
+   * which the user can open and write in too.
    */
   kind: SessionKind
 }
@@ -120,7 +149,10 @@ export type SessionKind = 'primary' | 'shared' | 'worker'
 export interface Bot {
   id: string
   name: string
-  /** 'mascot' is Tomo's fox; null shows the name's initial. */
+  /**
+   * 'mascot' is Tomo's fox; null shows the name's initial; 'tint:<name>' the initial on one of
+   * AVATAR_TINTS; 'image:<data URL>' a picture (a small PNG, JPEG or WebP).
+   */
   avatar: string | null
   instructions: string | null
   model: string | null
@@ -370,6 +402,10 @@ export type StreamEvent =
   | { type: 'computerMode'; messageId: string; mode: ComputerMode }
   /** Jobs changed (a new one, a title, a summary, a status): reload the list. */
   | { type: 'jobs' }
+  /** A thread changed outside a reply the window started: a bot posted, or a bot's reply began. */
+  | { type: 'thread'; sessionId: string }
+  /** What every bot is doing now. */
+  | { type: 'presence'; presence: Record<string, Presence> }
   /** Point: the user is marking part of the screen (active), or finished; a finished mark brings its image and note for the next message. */
   | { type: 'point'; active: boolean; attachments: Attachment[]; error?: string }
 
@@ -419,6 +455,13 @@ export interface Api {
   bots: {
     list(): Promise<Bot[]>
     update(id: string, patch: BotPatch): Promise<Bot[]>
+    /** A new worker bot; returns every bot, the new one last. */
+    create(patch: BotPatch): Promise<Bot[]>
+    /** Deletes a worker (never the primary); its threads stay, readable. */
+    remove(id: string): Promise<Bot[]>
+    /** Makes a bot the primary, the one that hears everything said without picking a job. */
+    setPrimary(id: string): Promise<Bot[]>
+    presence(): Promise<Record<string, Presence>>
   }
   jobs: {
     list(): Promise<Job[]>
@@ -429,6 +472,8 @@ export interface Api {
     /** Moves the primary's last turn (a wrong guess) to another job, or a new one. */
     move(input: { messageId: string; target: 'new' | { jobId: string } }): Promise<SessionView>
     setStatus(id: string, status: JobStatus): Promise<void>
+    /** The bots on a job, their threads, and its notes. */
+    detail(id: string): Promise<JobDetail>
     rename(id: string, title: string): Promise<void>
     remove(id: string): Promise<void>
   }

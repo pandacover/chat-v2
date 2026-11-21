@@ -27,6 +27,7 @@ import { Db } from './services/Db'
 import { Usage } from './usage/Usage'
 import { Jobs } from './services/Jobs'
 import { Reconciler } from './services/Reconciler'
+import { Team } from './services/Team'
 import { ElevenLabs } from './services/ElevenLabs'
 import { type SecretCipher, SettingsStore } from './services/SettingsStore'
 
@@ -263,9 +264,11 @@ const makeRuntime = () => {
     Layer.provide(Layer.merge(providers, computer)),
     Layer.provide(Layer.succeed(Broadcaster, broadcaster))
   )
+  // Workers: the team tools, reports and presence (services/Team.ts), over the same Chat.
+  const team = Team.layer.pipe(Layer.provide(Layer.mergeAll(chat, providers, computer)), Layer.provide(Layer.succeed(Broadcaster, broadcaster)))
   // The daily memory review (reconciler.ts), when the app is idle.
   const reconciler = Reconciler.layer.pipe(Layer.provide(providers), Layer.provide(Layer.succeed(Broadcaster, broadcaster)))
-  return ManagedRuntime.make(Layer.mergeAll(jobs, providers, computer, usage, reconciler))
+  return ManagedRuntime.make(Layer.mergeAll(jobs, team, providers, computer, usage, reconciler))
 }
 
 let runtime: ManagedRuntime.ManagedRuntime<MainServices | AppPaths, unknown> | null = null

@@ -81,6 +81,8 @@ export interface ReplyHooks {
   checkpoint(uuid: string): void
   /** A rate-limit event (the SDK's SDKRateLimitInfo; see usage/sdk.ts), or a failure on a rate limit. */
   rateLimit?(info: unknown): void
+  /** A tool call started (true) or the last one running ended (false): the bot is working, or thinking again. */
+  tool?(running: boolean): void
 }
 
 export interface ReplyResult {
@@ -352,6 +354,8 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
       let failure: Failure | null = null
       // Built-in tool calls waiting for their result, with the step line each gets then.
       const builtinCalls = new Map<string, Step>()
+      // Tool calls waiting for their result, for the bot's presence.
+      const pendingCalls = new Set<string>()
       // A failure on a rate limit pauses the reply (services/Chat.ts) when no event said so already.
       let rejected = false
       const limited = (said: string) => {
@@ -389,6 +393,8 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
             if (m.error === 'rate_limit') limited('')
             for (const b of m.message.content) {
               if (b.type !== 'tool_use') continue
+              if (pendingCalls.size === 0) hooks.tool?.(true)
+              pendingCalls.add(b.id)
               watch?.call(b.id, b.name, b.input)
               const owner = modules.find((x) => x.builtins?.includes(b.name))
               const step = owner?.stepFor?.(b.name, (b.input ?? {}) as Record<string, unknown>)
@@ -400,7 +406,10 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
             if (uuid) hooks.checkpoint(uuid)
             const content = m.message.content
             for (const b of Array.isArray(content) ? content : []) {
-              if (b.type === 'tool_result') watch?.result(b.tool_use_id, b.content, b.is_error ?? false)
+              if (b.type === 'tool_result') {
+                watch?.result(b.tool_use_id, b.content, b.is_error ?? false)
+                if (pendingCalls.delete(b.tool_use_id) && pendingCalls.size === 0) hooks.tool?.(false)
+              }
               const step = b.type === 'tool_result' ? builtinCalls.get(b.tool_use_id) : undefined
               if (!step || b.type !== 'tool_result') continue
               builtinCalls.delete(b.tool_use_id)
