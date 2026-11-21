@@ -18,8 +18,9 @@ import { ElevenLabs } from './services/ElevenLabs'
 import { Jobs } from './services/Jobs'
 import { SettingsStore } from './services/SettingsStore'
 import { Usage } from './usage/Usage'
+import { Reconciler } from './services/Reconciler'
 
-export type MainServices = Db | Chat | Jobs | Attachments | SettingsStore | Agent | ElevenLabs | Browser | ComputerUse | Usage
+export type MainServices = Db | Chat | Jobs | Attachments | SettingsStore | Agent | ElevenLabs | Browser | ComputerUse | Usage | Reconciler
 
 /** Where a message to the primary goes, as the renderer sent it. */
 const jobTarget = (v: unknown): JobTarget =>
@@ -77,7 +78,17 @@ const typedFact = (v: unknown): string => {
 
 const memoryView = Effect.gen(function* () {
   const lastRun = yield* (yield* Chat).lastMemoryRun
-  return yield* (yield* Db).use((d): MemoryView => ({ records: d.profile(), revisions: d.memoryHistory(), lastRun }))
+  const running = yield* (yield* Reconciler).running
+  return yield* (yield* Db).use((d): MemoryView => {
+    const playbooks = d.playbooks()
+    return {
+      records: d.profile(),
+      revisions: d.memoryHistory(),
+      lastRun,
+      reconciler: { lastRun: d.lastReconcilerRun(), running, pending: d.pendingReconcileCount() },
+      playbooks: d.playbookBots().map((b) => ({ botId: b.id, botName: b.name, avatar: b.avatar, records: playbooks.get(b.id) ?? [] }))
+    }
+  })
 })
 
 /** Runs a change to memory made in Settings, then returns the new state. */
@@ -169,6 +180,7 @@ const handlers: Record<string, Handler> = {
   'memory:versions': (id) => Db.use((db) => db.use((d) => d.recordVersions(int(id, 'id')))),
   'memory:clear': () => editMemory((d) => d.clearMemory()),
   'memory:restore': (rev) => editMemory((d) => d.restoreMemory(int(rev, 'rev'))),
+  'memory:reconcile': () => Reconciler.use((r) => r.runNow).pipe(Effect.andThen(memoryView)),
 
   'chat:send': (input) =>
     Chat.use((chat) =>

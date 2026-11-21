@@ -667,6 +667,39 @@ describe('memory', () => {
     await t.runtime.dispose()
   })
 
+  test("the bot's playbook reaches its prompt when a thread starts, and stays as it was for the rest of it", async () => {
+    const t = setup(
+      async function* (t) {
+        yield* t.text(isAsk(t.call) ? '{}' : 'ok')
+        yield t.result()
+      },
+      { titleModel: '', memoryModel: 'claude-haiku-5-5' }
+    )
+    const lesson = (body: string) =>
+      t.run(
+        Db.use((db) =>
+          db.use((d) => d.reconcile({ changes: [{ what: 'Added', closes: [], puts: [{ body, scope: 'bot', scopeId: 'tomo', type: 'procedure', jobId: 'j', sessionId: null }] }] }, 'Daily review'))
+        )
+      )
+    await lesson('Never add comments to code.')
+    const s = await t.run(newSession)
+    const first = await t.run(sendTo(s, s.rootId, 'Write a sort function.'))
+    await t.waitForDone(1)
+    expect(systemOf(t.replies().at(-1)!)).toContain('Your playbook: lessons from your earlier jobs')
+    expect(systemOf(t.replies().at(-1)!)).toContain('- Never add comments to code.')
+    const before = systemOf(t.replies().at(-1)!)
+    // A lesson learned meanwhile waits for the next thread: the system prompt (and its cache) stays the same.
+    await lesson('Use tabs for indentation.')
+    await t.run(sendTo(s, first.path.at(-1)!.message.id, 'And a search one.'))
+    await t.waitForDone(2)
+    expect(systemOf(t.replies().at(-1)!)).toBe(before)
+    const next = await t.run(newSession)
+    await t.run(sendTo(next, next.rootId, 'Another function.'))
+    await t.waitForDone(3)
+    expect(systemOf(t.replies().at(-1)!)).toContain('- Use tabs for indentation.')
+    await t.runtime.dispose()
+  })
+
   test('with memory off, nothing is read or sent', async () => {
     const t = setup(reply)
     const s = await t.run(newSession)

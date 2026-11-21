@@ -11,6 +11,7 @@
 // step by triggers, which `recall` searches. Hidden records (no current version) aren't in it.
 import type { SQLInputValue, StatementSync } from 'node:sqlite'
 import type { JobNoteKind, MemoryRecord, MemoryRecordType, MemoryRevision, MemoryScope, MemoryVersion, MemoryWriter } from '@shared/types'
+import type { ReconcilePlan } from '../reconciler'
 
 /** At most this many profile records are live; past it, new ones are dropped until some go. */
 export const MEMORY_LIMIT = 150
@@ -405,11 +406,24 @@ export const makeMemoryStore = ({ all, one, run, transaction, exec }: SqlHelpers
   /** Hides every profile record, as one revision that can be restored from. */
   const clearMemory = () => changeMemory({ add: [], update: [], remove: profile().map((r) => r.id) }, { kind: 'cleared' })
 
-  /** Brings back the profile as it was at `rev`, as a new revision under the same ids, so history is kept. */
+  /** Every bot's playbook as it is now, or was at `rev`: long-term memory's other scope besides the profile. */
+  const playbookRowsAt = (rev: number) =>
+    all<CurrentRow>(
+      `select ${COLUMNS} from memory_records r join memory_versions v on v.record_id = r.id
+        where r.scope = 'bot' and v.added_rev <= ? and (v.removed_rev is null or v.removed_rev > ?)
+        order by r.id`,
+      rev,
+      rev
+    )
+
+  /**
+   * Brings back the profile and the playbooks as they were at `rev`, as a new revision under the
+   * same ids, so history is kept. Purged records are gone, so they never come back.
+   */
   const restoreMemory = (rev: number) =>
     transaction(() => {
-      const target = rowsAt('profile', null, rev)
-      const live = new Map(profile().map((r) => [r.id, r]))
+      const target = [...rowsAt('profile', null, rev), ...playbookRowsAt(rev)]
+      const live = new Map([...profile(), ...toRecords(playbookRowsAt(FOREVER))].map((r) => [r.id, r]))
       const wanted = new Set(target.map((t) => t.id))
       const closes = [...live.keys()].filter((id) => !wanted.has(id))
       const puts: Put[] = target
@@ -450,7 +464,7 @@ export const makeMemoryStore = ({ all, one, run, transaction, exec }: SqlHelpers
       const r = one<{ scope: string }>('select scope from memory_records where id = ?', id)
       if (!r) return false
       run('delete from memory_records where id = ?', id)
-      if (r.scope === 'profile') revision({ kind: 'purged', writer: 'user', note: 'Deleted a record and its history' })
+      if (r.scope === 'profile' || r.scope === 'bot') revision({ kind: 'purged', writer: 'user', note: 'Deleted a record and its history' })
       return true
     })
 
@@ -484,7 +498,10 @@ export const makeMemoryStore = ({ all, one, run, transaction, exec }: SqlHelpers
       createdAt: v.created_at
     }))
 
-  /** Changes to the profile, newest first. Job notes and the archive have their own records. */
+  /**
+   * Changes to the profile and the playbooks, newest first; a playbook's lines say whose it is.
+   * Job notes and the archive have their own records.
+   */
   const memoryHistory = (limit = 100): MemoryRevision[] => {
     const revs = all<{ rev: number; kind: string; writer: string; session_id: string | null; note: string | null; created_at: number }>(
       `select * from memory_revisions where kind not in ('noted', 'archived') order by rev desc limit ?`,
@@ -492,12 +509,13 @@ export const makeMemoryStore = ({ all, one, run, transaction, exec }: SqlHelpers
     )
     if (revs.length === 0) return []
     const oldest = revs.at(-1)!.rev
-    const versions = all<{ body: string; added_rev: number; removed_rev: number | null }>(
-      `select v.body, v.added_rev, v.removed_rev from memory_versions v join memory_records r on r.id = v.record_id
-        where r.scope = 'profile' and (v.added_rev >= ? or v.removed_rev >= ?) order by v.record_id, v.id`,
+    const versions = all<{ body: string; added_rev: number; removed_rev: number | null; scope: string; bot: string | null }>(
+      `select v.body, v.added_rev, v.removed_rev, r.scope, b.name as bot from memory_versions v join memory_records r on r.id = v.record_id
+         left join bots b on r.scope = 'bot' and b.id = r.scope_id
+        where r.scope in ('profile', 'bot') and (v.added_rev >= ? or v.removed_rev >= ?) order by r.scope = 'bot', v.record_id, v.id`,
       oldest,
       oldest
-    )
+    ).map((v) => (v.scope === 'bot' ? { ...v, body: `${v.bot ?? 'A bot'}’s playbook: ${v.body}` } : v))
     return revs.map((r) => ({
       rev: r.rev,
       kind: r.kind as MemoryRevision['kind'],
@@ -618,9 +636,69 @@ export const makeMemoryStore = ({ all, one, run, transaction, exec }: SqlHelpers
     }))
   }
 
+  /**
+   * Saves what the daily reconciler planned (reconciler.ts) as one revision written by
+   * 'reconciler', each version with the job it came from. A change is skipped when its record is no
+   * longer live as the plan saw it: purged, hidden, edited, or outside the profile and playbooks.
+   * New records past the profile's limit are dropped. `rev` is null when nothing was left to change.
+   */
+  const reconcile = (plan: ReconcilePlan, note: string): { rev: number | null; added: string[]; removed: string[]; applied: string[]; skipped: number } =>
+    transaction(() => {
+      const current = (id: number) => one<{ scope: string; body: string }>(`select scope, body from memory_current where id = ?`, id)
+      const unchanged = (id: number, base: string) => {
+        const r = current(id)
+        return !!r && (r.scope === 'profile' || r.scope === 'bot') && r.body === base
+      }
+      let skipped = 0
+      let room = Math.max(0, MEMORY_LIMIT - profile().length)
+      const puts: Put[] = []
+      const closes: number[] = []
+      const removed: string[] = []
+      const applied: string[] = []
+      for (const change of plan.changes) {
+        const adds = change.puts.filter((p) => p.id === undefined && p.scope === 'profile').length
+        const fresh =
+          change.puts.every((p) => p.id === undefined || unchanged(p.id, p.base ?? '')) && change.closes.every((c) => unchanged(c.id, c.base))
+        if (!fresh || adds > room) {
+          skipped++
+          continue
+        }
+        room -= adds
+        applied.push(change.what)
+        for (const p of change.puts) {
+          if (p.base !== undefined) removed.push(p.base)
+          puts.push({
+            ...(p.id !== undefined ? { id: p.id } : { type: p.type ?? 'person', title: p.title ?? '', aliases: [], scope: p.scope, scopeId: p.scopeId }),
+            body: p.body,
+            source: { jobId: p.jobId, sessionId: p.sessionId }
+          })
+        }
+        for (const c of change.closes) {
+          closes.push(c.id)
+          removed.push(c.base)
+        }
+      }
+      if (puts.length === 0 && closes.length === 0) return { rev: null, added: [], removed: [], applied: [], skipped }
+      const saved = apply(puts, closes, { kind: 'reconciled', writer: 'reconciler', note })
+      return { rev: saved.rev, added: puts.map((p) => p.body), removed, applied, skipped }
+    })
+
+  /** Each bot's playbook now, by bot id. */
+  const playbooks = (): Map<string, MemoryRecord[]> => {
+    const out = new Map<string, MemoryRecord[]>()
+    for (const r of toRecords(playbookRowsAt(FOREVER))) {
+      const list = out.get(r.scopeId ?? '') ?? []
+      list.push(r)
+      out.set(r.scopeId ?? '', list)
+    }
+    return out
+  }
+
   return {
     records,
     profile,
+    reconcile,
+    playbooks,
     getRecord,
     memoryRev,
     changeMemory,

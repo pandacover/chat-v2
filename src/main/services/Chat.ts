@@ -9,6 +9,7 @@ import { type ConfigError, type DbError, InvalidInput, type MissingApiKey, type 
 import { WRITING_GUIDELINES } from '../guidelines'
 import { jobsBlock, jobsNote } from '../jobs'
 import { MEMORY_INSTRUCTIONS, askedQuestion, memoryPrompt, memorySource, parseMemoryReply, profileBlock } from '../memory'
+import { playbookBlock } from '../reconciler'
 import { browserModule } from '../agent/browser'
 import { Agent, type Auth, type PromptBlock, type ReplyHooks } from '../agent/driver'
 import { smallModelJudge } from '../agent/judge'
@@ -354,6 +355,8 @@ export class Chat extends Context.Service<
           if (jobs) prompt.unshift({ type: 'text', text: jobs })
           // The profile as it was when this chat first asked, so the system prompt stays the same.
           const facts = settings.memoryModel ? yield* db.use((d) => d.profile(d.sessionMemoryRev(session.id))) : []
+          // And the bot's playbook as it was then: refreshed when a job's thread starts, never mid-thread.
+          const playbook = settings.memoryModel ? yield* db.use((d) => d.records('bot', bot.id, d.sessionMemoryRev(session.id))) : []
           // User instructions first so they win any conflict; the writing guideline is hidden from Settings.
           const instructions = [
             session.systemPrompt ?? bot.instructions ?? settings.systemPrompt,
@@ -395,7 +398,7 @@ export class Chat extends Context.Service<
                   // Computer use makes many short click-and-look calls; Tomo's effort suits them.
                   effort: usesComputer ? effortFor(runOn) : (bot.effort ?? settings.effort),
                   instructions,
-                  profile: profileBlock(facts),
+                  profile: [profileBlock(facts), playbookBlock(playbook)].filter(Boolean).join('\n\n'),
                   prompt,
                   session: { id: sessionId, resume: plan.resume, baseCost: plan.baseCost },
                   modules: [...toolSets(session), ...(settings.memoryModel ? [recall] : [])],

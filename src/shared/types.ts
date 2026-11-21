@@ -234,7 +234,7 @@ export interface MemoryVersion {
 /** One change to memory. Every change is kept, so earlier versions can be restored. */
 export interface MemoryRevision {
   rev: number
-  kind: 'learned' | 'edited' | 'restored' | 'cleared' | 'purged' | 'noted' | 'archived'
+  kind: 'learned' | 'edited' | 'restored' | 'cleared' | 'purged' | 'noted' | 'archived' | 'reconciled'
   writer: MemoryWriter
   /** The chat a learned fact came from. */
   sessionId: string | null
@@ -260,11 +260,44 @@ export interface MemoryRun {
   detail: string | null
 }
 
+/** One run of the daily reconciler (reconciler.ts), kept so Settings can say when it last ran and what it did. */
+export interface ReconcilerRun {
+  id: number
+  startedAt: number
+  finishedAt: number | null
+  /** idle: the daily run; manual: Run now in Settings. */
+  trigger: 'idle' | 'manual'
+  outcome: 'running' | 'changed' | 'nothing' | 'unreadable' | 'error'
+  /** The revision it wrote; null when it changed nothing. */
+  rev: number | null
+  model: string | null
+  /** How many finished jobs it read. */
+  jobs: number
+  /** What each change it made does, in a few words (never the text itself). */
+  changes: string[]
+  /** Changes the model proposed that were left out: not tied to a job it read, or not grounded in one. */
+  dropped: number
+  /** The error, or why the reply couldn't be read. */
+  detail: string | null
+}
+
+/** One bot's playbook: its lessons and the user's corrections, written only by the reconciler. */
+export interface Playbook {
+  botId: string
+  botName: string
+  avatar: string | null
+  records: MemoryRecord[]
+}
+
 export interface MemoryView {
   /** The profile now. */
   records: MemoryRecord[]
   revisions: MemoryRevision[]
   lastRun: MemoryRun | null
+  /** The daily reconciler: its last run, whether one is under way, and the finished jobs it hasn't read. */
+  reconciler: { lastRun: ReconcilerRun | null; running: boolean; pending: number }
+  /** Every bot's playbook, the primary's first. */
+  playbooks: Playbook[]
 }
 
 /** Per-chat settings a chat can change from its composer. */
@@ -412,6 +445,8 @@ export interface Api {
     clear(): Promise<MemoryView>
     /** Brings back the facts as they were after revision `rev` (as a new revision). */
     restore(rev: number): Promise<MemoryView>
+    /** Runs the daily reconciler now, whenever it last ran; resolves once it has finished. */
+    reconcile(): Promise<MemoryView>
   }
   chat: {
     send(input: { sessionId: string; parentId: string; text: string; attachmentIds: string[] }): Promise<SessionView>

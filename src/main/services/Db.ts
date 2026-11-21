@@ -18,6 +18,7 @@ import { BOTS_AND_JOBS_MIGRATION, makeJobsDb } from './jobsDb'
 import { stuckStore } from './stuckStore'
 import { MEMORY_RECORDS_MIGRATION, makeMemoryStore } from './memoryStore'
 import { usageRows } from '../usage/rows'
+import { RECONCILER_MIGRATION, makeReconcilerDb } from './reconcilerDb'
 
 export { MEMORY_LIMIT, type MemoryChange } from './memoryStore'
 
@@ -182,7 +183,9 @@ export const MIGRATIONS: string[] = [
     select session_id, id, model, created_at, created_at, coalesce(json_extract(usage, '$.cost'), 0)
       from messages where role = 'assistant' and usage is not null and json_valid(usage);`,
   // Bots and jobs (see jobsDb.ts): every chat becomes a finished job owned by the primary bot.
-  BOTS_AND_JOBS_MIGRATION
+  BOTS_AND_JOBS_MIGRATION,
+  // The daily reconciler's runs and the jobs it has read (see reconcilerDb.ts).
+  RECONCILER_MIGRATION
 ]
 
 interface SessionRow {
@@ -837,6 +840,7 @@ export const makeDb = (file: string) => {
     ...memory,
     ...stuckStore(run, all),
     ...usageRows({ all, one, run }),
+    ...makeReconcilerDb({ all, one, run, transaction, getSession, activePath }),
     close: () => db.close()
   }
 }
