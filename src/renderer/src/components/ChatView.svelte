@@ -253,13 +253,6 @@
   const mascotState = $derived(voice.phase === 'recording' || voice.phase === 'starting' ? 'listening' : voice.phase === 'transcribing' ? 'thinking' : '')
   const homeVoice = $derived(empty)
 
-  const toggleBrowser = async () => {
-    const next = !app.chat.browserEnabled
-    await app.updateSession({ browserEnabled: next })
-    if (!next) return
-    app.openBrowser()
-  }
-
   const openPrompt = () => {
     promptDraft = app.chat.systemPrompt ?? app.primaryBot?.instructions ?? app.settings?.settings.systemPrompt ?? ''
     promptOpen = true
@@ -377,10 +370,6 @@
       placeholder={empty ? 'Ask anything' : 'Reply'}
       {model}
       onmodel={(id) => app.updateSession({ model: id })}
-      browserEnabled={app.chat.browserEnabled}
-      onbrowser={toggleBrowser}
-      computerEnabled={app.chat.computerEnabled}
-      oncomputer={() => app.updateSession({ computerEnabled: !app.chat.computerEnabled })}
     />
   </div>
 

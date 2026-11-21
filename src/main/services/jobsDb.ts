@@ -9,6 +9,7 @@
 import { randomUUID } from 'node:crypto'
 import type { SQLInputValue } from 'node:sqlite'
 import type { Bot, BotPatch, Effort, Job, JobStatus, JobUsage, PathNode, Session } from '@shared/types'
+import { cleanModules, cleanRules } from '@shared/rules'
 
 /** The primary bot and its conversation, as the migration makes them. */
 export const PRIMARY_BOT_ID = 'tomo'
@@ -89,6 +90,19 @@ export const BOTS_AND_JOBS_MIGRATION = `create table bots (
     when new.role = 'assistant' and new.author_bot_id is null
     begin update messages set author_bot_id = (select bot_id from sessions where id = new.session_id) where id = new.id; end;`
 
+/**
+ * Rules replace each chat's Browser and Computer switches: the primary bot has a module if any
+ * chat had it on (phase 1 gave it both, unused until now); like the switches, both start off.
+ * Its rules start empty, which is every rule's default. The old columns stay.
+ */
+export const BOT_MODULES_MIGRATION = `update bots set modules = (
+    select json_group_array(m) from (
+      select 'computer' as m where exists (select 1 from sessions where computer_enabled = 1)
+      union all
+      select 'browser' where exists (select 1 from sessions where browser_enabled = 1)
+    )
+  ), updated_at = ${NOW} where is_primary = 1;`
+
 interface BotRow {
   id: string
   name: string
@@ -135,8 +149,8 @@ const toBot = (r: BotRow): Bot => ({
   instructions: r.instructions,
   model: r.model,
   effort: EFFORTS.find((e) => e === r.effort) ?? null,
-  modules: json<string[]>(r.modules, []),
-  rules: json<Record<string, unknown>>(r.rules, {}),
+  modules: cleanModules(json<unknown>(r.modules, [])),
+  rules: cleanRules(json<unknown>(r.rules, {})),
   playbook: r.playbook,
   isPrimary: r.is_primary === 1,
   createdAt: r.created_at,
@@ -182,7 +196,7 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
     // Only if someone deleted it by hand: a primary is always there.
     const now = Date.now()
     run(
-      `insert into bots (id, name, avatar, modules, rules, is_primary, created_at, updated_at) values (?, 'Tomo', 'mascot', '["browser","computer"]', '{}', 1, ?, ?)
+      `insert into bots (id, name, avatar, modules, rules, is_primary, created_at, updated_at) values (?, 'Tomo', 'mascot', '[]', '{}', 1, ?, ?)
        on conflict(id) do update set is_primary = 1`,
       PRIMARY_BOT_ID,
       now,
@@ -222,8 +236,6 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
     title: string
     botId: string
     parentJobId?: string | null
-    browserEnabled?: boolean
-    computerEnabled?: boolean
   }): { job: Job; thread: Session } =>
     transaction(() => {
       const id = randomUUID()
@@ -238,14 +250,7 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
         now
       )
       const thread = createSession({ title: input.title, model: null, systemPrompt: null, forkedFromSessionId: null })
-      run(
-        `update sessions set job_id = ?, bot_id = ?, kind = 'shared', browser_enabled = ?, computer_enabled = ? where id = ?`,
-        id,
-        input.botId,
-        input.browserEnabled ? 1 : 0,
-        input.computerEnabled ? 1 : 0,
-        thread.id
-      )
+      run(`update sessions set job_id = ?, bot_id = ?, kind = 'shared' where id = ?`, id, input.botId, thread.id)
       return { job: getJob(id)!, thread: getSession(thread.id)! }
     })
 
@@ -333,6 +338,9 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
       if (patch.instructions !== undefined) run('update bots set instructions = ?, updated_at = ? where id = ?', patch.instructions, now, id)
       if (patch.model !== undefined) run('update bots set model = ?, updated_at = ? where id = ?', patch.model, now, id)
       if (patch.effort !== undefined) run('update bots set effort = ?, updated_at = ? where id = ?', patch.effort, now, id)
+      if (patch.avatar !== undefined) run('update bots set avatar = ?, updated_at = ? where id = ?', patch.avatar, now, id)
+      if (patch.modules !== undefined) run('update bots set modules = ?, updated_at = ? where id = ?', JSON.stringify(cleanModules(patch.modules)), now, id)
+      if (patch.rules !== undefined) run('update bots set rules = ?, updated_at = ? where id = ?', JSON.stringify(cleanRules(patch.rules)), now, id)
     },
     /** Fills in the primary from Settings once: its instructions, model and effort start as today's. */
     seedPrimary: (from: { systemPrompt: string; defaultModel: string; effort: Effort }): boolean => {

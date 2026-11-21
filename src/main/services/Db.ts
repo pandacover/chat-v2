@@ -14,7 +14,7 @@ import type {
 } from '@shared/types'
 import type { ComputerMode } from '@shared/computer'
 import { DbError, NotFound, errorMessage } from '../errors'
-import { BOTS_AND_JOBS_MIGRATION, makeJobsDb } from './jobsDb'
+import { BOTS_AND_JOBS_MIGRATION, BOT_MODULES_MIGRATION, makeJobsDb } from './jobsDb'
 import { stuckStore } from './stuckStore'
 import { MEMORY_RECORDS_MIGRATION, makeMemoryStore } from './memoryStore'
 import { usageRows } from '../usage/rows'
@@ -182,7 +182,9 @@ export const MIGRATIONS: string[] = [
     select session_id, id, model, created_at, created_at, coalesce(json_extract(usage, '$.cost'), 0)
       from messages where role = 'assistant' and usage is not null and json_valid(usage);`,
   // Bots and jobs (see jobsDb.ts): every chat becomes a finished job owned by the primary bot.
-  BOTS_AND_JOBS_MIGRATION
+  BOTS_AND_JOBS_MIGRATION,
+  // Rules (agent/rules.ts): the computer and browser switches of each chat become the primary bot's modules.
+  BOT_MODULES_MIGRATION
 ]
 
 interface SessionRow {
@@ -192,8 +194,6 @@ interface SessionRow {
   system_prompt: string | null
   root_id: string
   forked_from_session_id: string | null
-  browser_enabled: number
-  computer_enabled: number
   computer_mode: string
   pinned_at: number | null
   created_at: number
@@ -242,8 +242,6 @@ const toSession = (r: SessionRow): Session => ({
   systemPrompt: r.system_prompt,
   rootId: r.root_id,
   forkedFromSessionId: r.forked_from_session_id,
-  browserEnabled: r.browser_enabled === 1,
-  computerEnabled: r.computer_enabled === 1,
   computerMode: r.computer_mode === 'teach' ? 'teach' : 'do',
   pinnedAt: r.pinned_at,
   createdAt: r.created_at,
@@ -536,8 +534,6 @@ export const makeDb = (file: string) => {
         systemPrompt: source.systemPrompt,
         forkedFromSessionId: source.id
       })
-      if (source.browserEnabled) run('update sessions set browser_enabled = 1 where id = ?', fork.id)
-      if (source.computerEnabled) run('update sessions set computer_enabled = 1 where id = ?', fork.id)
       run('update sessions set computer_mode = ? where id = ?', source.computerMode, fork.id)
       let parentId = fork.rootId
       const stored = attachmentsFor(path.map((m) => m.id))
@@ -629,8 +625,6 @@ export const makeDb = (file: string) => {
         title?: string
         model?: string | null
         systemPrompt?: string | null
-        browserEnabled?: boolean
-        computerEnabled?: boolean
         computerMode?: ComputerMode
         pinned?: boolean
       }
@@ -638,10 +632,6 @@ export const makeDb = (file: string) => {
       // Neither pinning nor unpinning touches updated_at, so the chat keeps its date group.
       if (patch.pinned === true) run('update sessions set pinned_at = coalesce(pinned_at, ?) where id = ?', Date.now(), id)
       if (patch.pinned === false) run('update sessions set pinned_at = null where id = ?', id)
-      if (patch.browserEnabled !== undefined)
-        run('update sessions set browser_enabled = ? where id = ?', patch.browserEnabled ? 1 : 0, id)
-      if (patch.computerEnabled !== undefined)
-        run('update sessions set computer_enabled = ? where id = ?', patch.computerEnabled ? 1 : 0, id)
       if (patch.computerMode !== undefined) run('update sessions set computer_mode = ? where id = ?', patch.computerMode, id)
       if (patch.title !== undefined) run('update sessions set title = ? where id = ?', patch.title, id)
       if (patch.model !== undefined) run('update sessions set model = ? where id = ?', patch.model, id)

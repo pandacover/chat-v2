@@ -70,6 +70,8 @@ class AppState {
   bots = $state<Bot[]>([])
   jobs = $state<Job[]>([])
   primaryBot = $derived(this.bots.find((b) => b.isPrimary) ?? null)
+  /** The bot of the open conversation (a new chat is the primary's): what it can use comes from it. */
+  currentBot = $derived((this.view?.session.botId ? this.bots.find((b) => b.id === this.view!.session.botId) : undefined) ?? this.primaryBot)
   /** The id of the primary bot's conversation, once loaded. */
   primaryId = $state<string | null>(null)
   /** The primary bot's conversation is open (rather than a job's thread). */
@@ -198,8 +200,9 @@ class AppState {
     // The primary's conversation runs on its bot's model.
     model: this.view ? (this.isPrimary ? (this.primaryBot?.model ?? null) : this.view.session.model) : (this.fresh.model ?? null),
     systemPrompt: this.view ? this.view.session.systemPrompt : (this.fresh.systemPrompt ?? null),
-    browserEnabled: this.view ? this.view.session.browserEnabled : (this.fresh.browserEnabled ?? false),
-    computerEnabled: this.view ? this.view.session.computerEnabled : (this.fresh.computerEnabled ?? false)
+    // What the chat's bot can use (Settings › Bots), not a switch of the chat's own.
+    browserEnabled: this.currentBot?.modules.includes('browser') ?? false,
+    computerEnabled: this.currentBot?.modules.includes('computer') ?? false
   })
 
   hasArtifact = $derived(this.artifact !== null && this.artifactVersions.length > 0)

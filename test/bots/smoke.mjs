@@ -154,10 +154,10 @@ try {
   await until(async () => !/finished/i.test(await chip.innerText()), 'and opens the job again')
   await capture('5-job-thread')
 
-  // Settings: Tomo's card, with the instructions it was given from Settings.
+  // Settings › Bots: Tomo's card, with the instructions it was given from Settings.
   await page.keyboard.press('Control+,')
-  await page.locator('[data-primary-bot]').waitFor()
-  ok((await page.locator('textarea[aria-label="System instructions"]').inputValue()) === 'Old global instructions.', "Tomo's instructions came from Settings")
+  await page.locator('[data-bot="tomo"]').waitFor()
+  ok((await page.locator('textarea[aria-label="Instructions"]').inputValue()) === 'Old global instructions.', "Tomo's instructions came from Settings")
   await capture('6-settings')
   await page.keyboard.press('Escape')
 

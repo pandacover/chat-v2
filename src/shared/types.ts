@@ -1,6 +1,7 @@
 // Types shared by the main process, preload bridge and renderer.
 import type { ComputerDoing, ComputerMode, ComputerWait } from './computer'
 import type { UsageEvent, UsageShare, UsageView } from './usage'
+import type { ModuleId, Rules } from './rules'
 
 export type Role = 'root' | 'system' | 'user' | 'assistant'
 
@@ -92,10 +93,6 @@ export interface Session {
   systemPrompt: string | null
   rootId: string
   forkedFromSessionId: string | null
-  /** When on, the model gets browser tools for this chat. */
-  browserEnabled: boolean
-  /** When on, the model can see the screen and use the user's apps (Windows and macOS). */
-  computerEnabled: boolean
   /**
    * What the chat's last message was read as: operate the computer (do), or show each step for the
    * user to do (teach). Decided from each message; a follow-up like "next" keeps it.
@@ -128,10 +125,10 @@ export interface Bot {
   instructions: string | null
   model: string | null
   effort: Effort | null
-  /** Tool modules it may use ('browser', 'computer'). */
-  modules: string[]
-  /** Permission rules (later phases). */
-  rules: Record<string, unknown>
+  /** Tool modules it may use (see @shared/rules). */
+  modules: ModuleId[]
+  /** Allow, ask or block for each kind of tool call; a rule it hasn't set has its default. */
+  rules: Rules
   playbook: string | null
   isPrimary: boolean
   createdAt: number
@@ -140,9 +137,12 @@ export interface Bot {
 
 export interface BotPatch {
   name?: string
+  avatar?: string | null
   instructions?: string | null
   model?: string | null
   effort?: Effort | null
+  modules?: ModuleId[]
+  rules?: Rules
 }
 
 export type JobStatus = 'open' | 'done'
@@ -271,8 +271,6 @@ export interface MemoryView {
 export interface SessionPatch {
   model?: string | null
   systemPrompt?: string | null
-  browserEnabled?: boolean
-  computerEnabled?: boolean
   pinned?: boolean
 }
 

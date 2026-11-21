@@ -81,9 +81,14 @@ const send = async (text) => {
 const lastReply = () => page.locator('[data-reply-scope]').last()
 
 try {
-  // The switch. There is no mode control: each message is read for doing or showing.
+  // There is no mode control: each message is read for doing or showing.
+  // Computer use is Tomo's (Settings › Bots), not a switch of the chat: the composer's tools open it there.
+  await page.locator('button[data-tools]').click()
+  await page.locator('[data-bot]').waitFor()
   await page.getByRole('switch', { name: 'Computer' }).click()
   await page.getByRole('switch', { name: 'Computer', checked: true }).waitFor()
+  await page.keyboard.press('Escape')
+  await page.locator('button[data-tools~="computer"]').waitFor()
   ok((await page.getByRole('radiogroup', { name: 'Computer mode' }).count()) + (await page.getByRole('radio', { name: 'Show me' }).count()) === 0, 'the composer has no Do it / Show me control')
 
   // Point before any computer reply: the overlay window is made for it, and its page still hears Point.

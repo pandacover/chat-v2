@@ -102,18 +102,9 @@ export class Jobs extends Context.Service<
           const target = yield* db.use((d) => {
             const job = route.kind === 'job' ? d.getJob(route.jobId) : undefined
             const thread = job?.threadId ? d.getSession(job.threadId) : undefined
-            if (thread) {
-              // The toggles of the primary's composer go with what is said there.
-              d.updateSession(thread.id, { browserEnabled: primarySession.browserEnabled, computerEnabled: primarySession.computerEnabled })
-              return { thread, created: null as string | null, title: job!.title }
-            }
+            if (thread) return { thread, created: null as string | null, title: job!.title }
             const title = (route.kind === 'new' && route.title ? cleanTitle(route.title) : null) ?? NEW_SESSION_TITLE
-            const made = d.createJob({
-              title,
-              botId: d.primaryBot().id,
-              browserEnabled: primarySession.browserEnabled,
-              computerEnabled: primarySession.computerEnabled
-            })
+            const made = d.createJob({ title, botId: d.primaryBot().id })
             return { thread: made.thread, created: made.job.id, title }
           })
           const busy = yield* db.use((d) => d.streamingIds(target.thread.id).length > 0)

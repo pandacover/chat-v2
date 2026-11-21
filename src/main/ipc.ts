@@ -4,6 +4,7 @@ import { BrowserWindow, app, dialog, ipcMain, shell, systemPreferences } from 'e
 import { Cause, Effect, type ManagedRuntime } from 'effect'
 import type { AudioAnalysis, BotPatch, IpcResult, JobTarget, MemoryView, NewAttachmentInput, RecordReply, SessionPatch, SettingsPatch } from '@shared/types'
 import { isClaudeModel } from '@shared/models'
+import { cleanModules, cleanRules } from '@shared/rules'
 import { errorMessage } from './errors'
 import { checkForUpdates, downloadUpdate, installUpdate, updateState } from './updater'
 import { publishArtifact } from './protocols'
@@ -34,7 +35,11 @@ const botPatch = (v: unknown): BotPatch => {
     ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name.trim().slice(0, 40) } : {}),
     ...(typeof p.instructions === 'string' ? { instructions: p.instructions } : {}),
     ...(typeof p.model === 'string' && isClaudeModel(p.model) ? { model: p.model } : {}),
-    ...(EFFORTS.find((e) => e === p.effort) ? { effort: p.effort as BotPatch['effort'] } : {})
+    ...(EFFORTS.find((e) => e === p.effort) ? { effort: p.effort as BotPatch['effort'] } : {}),
+    // The fox, or the name's initial.
+    ...(p.avatar === 'mascot' || p.avatar === null ? { avatar: p.avatar } : {}),
+    ...(Array.isArray(p.modules) ? { modules: cleanModules(p.modules) } : {}),
+    ...(p.rules && typeof p.rules === 'object' ? { rules: cleanRules(p.rules) } : {})
   }
 }
 
@@ -122,8 +127,6 @@ const handlers: Record<string, Handler> = {
         d.updateSession(str(id, 'id'), {
           ...(patch.model !== undefined ? { model: patch.model || null } : {}),
           ...(patch.systemPrompt !== undefined ? { systemPrompt: patch.systemPrompt?.trim() ? patch.systemPrompt : null } : {}),
-          ...(typeof patch.browserEnabled === 'boolean' ? { browserEnabled: patch.browserEnabled } : {}),
-          ...(typeof patch.computerEnabled === 'boolean' ? { computerEnabled: patch.computerEnabled } : {}),
           ...(typeof patch.pinned === 'boolean' ? { pinned: patch.pinned } : {})
         })
       )
