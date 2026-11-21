@@ -61,10 +61,11 @@ export const currentWindows = (latest: readonly Sample[], now: number, at = new 
  * told before it moves there.
  */
 export const overageWarning = (windows: readonly UsageWindow[], extra: ExtraUsage | null, signal: LimitSignal | null): OverageWarning | null => {
-  if (!extra?.enabled || signal?.usingOverage) return null
+  // Already on extra usage, or already stopped at a limit it didn't cover: past the point of warning.
+  if (!extra?.enabled || signal?.usingOverage || signal?.status === 'rejected') return null
   if (extra.monthlyLimit !== null && extra.usedCredits !== null && extra.usedCredits >= extra.monthlyLimit) return null
   const near = windows
-    .filter((w) => w.id !== 'overage' && w.percent !== null && w.percent >= OVERAGE_WARN_PERCENT && w.percent < 100.5)
+    .filter((w) => w.id !== 'overage' && w.percent !== null && w.percent >= OVERAGE_WARN_PERCENT && w.percent < 100)
     .sort((a, b) => (b.percent ?? 0) - (a.percent ?? 0))[0]
   // The event says so too: a warning on a window, with extra usage allowed past it.
   const warned =
@@ -82,8 +83,8 @@ export const noticeFor = (signal: LimitSignal | null, warning: OverageWarning | 
     seen.add(key)
     return n
   }
-  // The reset in the key, rounded, so each period of a window warns once.
-  const period = (t: number | null) => (t === null ? 'x' : String(Math.round(t / 600_000)))
+  // The reset in the key, to the hour (the meter's and the events' reset times differ a little), so each period of a window warns once.
+  const period = (t: number | null) => (t === null ? 'x' : String(Math.round(t / 3_600_000)))
   if (warning) return once(`overage:${warning.window}:${period(warning.resetsAt)}`, { kind: 'overage', window: warning.window, percent: warning.percent, resetsAt: warning.resetsAt, extra: warning.extra })
   if (signal?.status === 'allowed_warning')
     return once(`warning:${signal.window}:${period(signal.resetsAt)}`, { kind: 'warning', window: signal.window, percent: signal.percent, resetsAt: signal.resetsAt, extra: null })

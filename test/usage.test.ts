@@ -82,6 +82,17 @@ describe('share estimate', () => {
     expect(splitWindow('five_hour', samples, runs, next + 1).byKey.size).toBe(0)
   })
 
+  test('a reset seen only as a drop starts the period after the last reading before it', () => {
+    // Reset times that don't agree with the drop: the drop decides, and the old period's run is out.
+    const samples = [sample('five_hour', T0 + H, 80, T0 + 5 * H), sample('five_hour', T0 + 2 * H, 10, T0 + 5 * H), sample('five_hour', T0 + 3 * H, 16, T0 + 5 * H)]
+    const runs = [run('old', T0 + 0.5 * H, T0 + 0.9 * H, 5), run('new', T0 + 1.5 * H, T0 + 1.6 * H, 1), run('later', T0 + 2.5 * H, T0 + 2.6 * H, 1)]
+    const s = splitWindow('five_hour', samples, runs)
+    expect(s.periodStart).toBe(T0 + H)
+    expect(s.byKey.has('old')).toBe(false)
+    expect(s.byKey.get('new')).toBeCloseTo(10)
+    expect(s.byKey.get('later')).toBeCloseTo(6)
+  })
+
   test('without reset times, the first reading is the base', () => {
     const samples = [sample('five_hour', T0, 30, null), sample('five_hour', T0 + H, 36, null)]
     const s = splitWindow('five_hour', samples, [run('a', T0 + 10 * 60_000, T0 + 20 * 60_000, 1)])
@@ -158,6 +169,9 @@ describe('warnings', () => {
     expect(overageWarning([win('five_hour', 70)], extra, quiet)).toBeNull()
     expect(overageWarning([win('five_hour', 95)], { ...extra, enabled: false }, quiet)).toBeNull()
     expect(overageWarning([win('five_hour', 95)], null, quiet)).toBeNull()
+    // A limit already hit, and extra usage didn't take over: too late to warn.
+    expect(overageWarning([win('five_hour', 100)], extra, quiet)).toBeNull()
+    expect(overageWarning([win('five_hour', 95)], extra, { ...quiet, status: 'rejected' })).toBeNull()
     // Extra usage already spent to its limit: nothing would move onto it.
     expect(overageWarning([win('five_hour', 95)], { ...extra, usedCredits: 50 }, quiet)).toBeNull()
     // A warning event with extra usage allowed past it says so before the meter does.
@@ -187,6 +201,7 @@ describe('warnings', () => {
     expect(limitName(null)).toBe('usage limit')
     expect(shareLabel({ window: 'seven_day', percent: 12.3 })).toBe('about 12% of this week')
     expect(shareLabel({ window: 'five_hour', percent: 0.2 })).toBe('under 1% of this 5-hour window')
+    expect(shareLabel({ window: 'seven_day', percent: 0 })).toBe('none of this week yet')
     expect(resetPhrase(now + 5 * 60_000, now)).toBe('resets in 5 min')
     expect(resetPhrase(now - 1, now)).toBe('reset')
     expect(whenPhrase(now + 3 * 86_400_000, now)).toMatch(/^[A-Z][a-z]{2} /)

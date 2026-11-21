@@ -81,9 +81,13 @@ export const splitWindow = (window: string, samples: readonly Sample[], runs: re
   while (first > 0 && !newPeriod(all[first - 1]!, all[first]!)) first--
   const period = all.slice(first)
   const length = windowLength(window)
-  const periodStart = last.resetsAt !== null && length !== null ? last.resetsAt - length : null
-  // The window was empty when the period began, if that is known; else the first reading is the base.
-  const points: Sample[] = periodStart !== null && periodStart <= period[0]!.at ? [{ window, at: periodStart, percent: 0, resetsAt: last.resetsAt }, ...period] : period
+  const fromReset = last.resetsAt !== null && length !== null ? last.resetsAt - length : null
+  // The window was empty when the period began. That is when its reset says, but never before a
+  // reading of the period before (a reset seen only as a drop); with neither, the first reading is the base.
+  const before = first > 0 ? all[first - 1]!.at : null
+  const periodStart = before === null ? fromReset : Math.max(before, fromReset ?? before)
+  const points: Sample[] =
+    periodStart !== null && periodStart <= period[0]!.at ? [{ window, at: periodStart, percent: 0, resetsAt: last.resetsAt }, ...period] : period
   const counted = runs.filter((r) => countsToward(window, r.model))
   const byKey = new Map<string, number>()
   let unattributed = points === period ? period[0]!.percent : 0

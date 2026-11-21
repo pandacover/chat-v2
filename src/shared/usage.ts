@@ -141,7 +141,9 @@ export const formatPercent = (p: number | null) => (p === null ? '–' : p > 0 &
 
 /** "about 12% of this week", for a job's estimated share. */
 export const shareLabel = (s: Pick<UsageShare, 'window' | 'percent'>) =>
-  `${s.percent > 0 && s.percent < 1 ? 'under 1' : `about ${Math.round(s.percent)}`}% of ${windowPhrase(s.window)}`
+  s.percent <= 0
+    ? `none of ${windowPhrase(s.window)} yet`
+    : `${s.percent < 1 ? 'under 1' : `about ${Math.round(s.percent)}`}% of ${windowPhrase(s.window)}`
 
 export const formatMoney = (amount: number, currency = 'USD') => {
   try {

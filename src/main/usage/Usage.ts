@@ -169,9 +169,12 @@ export class Usage extends Context.Service<Usage, UsageApi>()('chat-v2/Usage') {
               if (what === 'gone') return
               if (what === 'wait') return schedule(now!)
               sync((d) => d.deleteUsagePause(p.messageId), false)
-              const view = build()
-              send({ type: 'resumed', sessionId: p.sessionId, messageId: p.messageId, view })
-              void resume?.(p).catch((e: unknown) => Effect.runFork(Effect.logWarning(`Couldn't continue a paused reply: ${errorMessage(e)}`)))
+              // Told once the reply runs again, so a window that reloads its chat sees it streaming.
+              void (resume?.(p) ?? Promise.resolve())
+                .catch((e: unknown) => void Effect.runFork(Effect.logWarning(`Couldn't continue a paused reply: ${errorMessage(e)}`)))
+                .finally(() => {
+                  if (!closed) send({ type: 'resumed', sessionId: p.sessionId, messageId: p.messageId, view: build() })
+                })
             }, delay)
           )
         }

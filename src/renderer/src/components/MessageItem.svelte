@@ -7,6 +7,8 @@
   import { stopShortcutLabel } from '@shared/computer'
   import { isMac } from '@/lib/keys'
   import ComputerWaitCard from './ComputerWaitCard.svelte'
+  import LimitPause from './LimitPause.svelte'
+  import { meter } from '@/lib/meter.svelte'
   import StepList from './StepList.svelte'
   import type { Attachment, PathNode } from '@shared/types'
   import { collapse, fade, fly } from '@/lib/motion'
@@ -32,6 +34,8 @@
 
   const message = $derived(node.message)
   const streaming = $derived(message.status === 'streaming')
+  /** Paused at a usage limit: goes on by itself once it resets (lib/meter.svelte.ts). */
+  const paused = $derived(message.status === 'stopped' ? meter.pauseFor(message.id) : null)
   // Lines animate only when they arrive while you watch, never on history or a backfill.
   const live = $derived(streaming && app.liveIds.has(message.id))
   // Browser steps are their own blocks; artifacts are parsed out of the prose between them.
@@ -345,7 +349,9 @@
       </div>
     {/if}
 
-    {#if message.status === 'interrupted' || message.status === 'stopped' || message.status === 'error'}
+    {#if paused}
+      <LimitPause pause={paused} />
+    {:else if message.status === 'interrupted' || message.status === 'stopped' || message.status === 'error'}
       <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] {message.status === 'error' ? 'text-danger' : 'text-fg-3'}" in:fade>
         <span class="flex items-center gap-1.5">
           {#if message.status === 'error'}<Icon name="alert" size={14} />{/if}

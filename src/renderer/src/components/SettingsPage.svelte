@@ -11,6 +11,8 @@
   import Icon, { type IconName } from './Icon.svelte'
   import logo from '@/assets/logo.png'
   import ModelPicker from './ModelPicker.svelte'
+  import UsageSettings from './UsageSettings.svelte'
+  import { meter } from '@/lib/meter.svelte'
 
   let form = $state<Settings>({ ...app.settings!.settings })
   let keys = $state({ anthropicKey: '', elevenLabsKey: '' })
@@ -18,16 +20,17 @@
   let scroller: HTMLDivElement | undefined = $state()
 
   // One tab at a time, picked from the list on the left. Missing the API key it needs, the account comes first.
-  type Tab = 'model' | 'memory' | 'voice' | 'account' | 'appearance' | 'about'
+  type Tab = 'model' | 'memory' | 'voice' | 'account' | 'usage' | 'appearance' | 'about'
   const tabs: Array<{ id: Tab; label: string; icon: IconName }> = [
     { id: 'account', label: 'Account', icon: 'key' },
+    { id: 'usage', label: 'Usage', icon: 'gauge' },
     { id: 'model', label: 'Model', icon: 'sparkle' },
     { id: 'memory', label: 'Memory', icon: 'brain' },
     { id: 'voice', label: 'Voice', icon: 'mic' },
     { id: 'appearance', label: 'Appearance', icon: 'type' },
     { id: 'about', label: 'About', icon: 'info' }
   ]
-  let tab = $state<Tab>(app.settings!.settings.auth === 'apiKey' && !app.settings!.hasAnthropicKey ? 'account' : 'model')
+  let tab = $state<Tab>(meter.takeTab() ? 'usage' : app.settings!.settings.auth === 'apiKey' && !app.settings!.hasAnthropicKey ? 'account' : 'model')
   const show = (id: Tab) => {
     tab = id
     scroller?.scrollTo({ top: 0 })
@@ -298,6 +301,10 @@
             {/each}
           </div>
         </section>
+      {/if}
+
+      {#if tab === 'usage'}
+        <UsageSettings />
       {/if}
 
       {#if tab === 'model'}
