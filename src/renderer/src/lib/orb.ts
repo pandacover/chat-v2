@@ -209,38 +209,64 @@ interface Orb {
 const TARGET = [hexToLinear(COLORS[0]!), hexToLinear(COLORS[1]!)] as const
 const orbs = new Set<Orb>()
 
-let gl: WebGL2RenderingContext | null | undefined
+let gl: WebGL2RenderingContext | null = null
 let glCanvas: HTMLCanvasElement
 let loc: Record<string, WebGLUniformLocation | null> = {}
-let ready = false
 let image: HTMLImageElement | null = null
+let prog: WebGLProgram | null = null
+let parallel: { COMPLETION_STATUS_KHR: number } | null = null
 let raf = 0
 let last = 0
 
-const compile = (g: WebGL2RenderingContext, type: number, src: string) => {
-  const s = g.createShader(type)!
-  g.shaderSource(s, src)
-  g.compileShader(s)
-  if (!g.getShaderParameter(s, g.COMPILE_STATUS)) throw new Error(g.getShaderInfoLog(s) ?? 'shader')
-  return s
+/**
+ * The GL work never blocks the page: the context is made once the page is idle (an orb on Home
+ * would otherwise compete with startup), the shaders compile in the background
+ * (KHR_parallel_shader_compile) and are checked only once they are done. Blocking on a link status
+ * at startup stalled the window for seconds on a Mac without a GPU, and with it quitting.
+ * Until it is ready an orb shows nothing; without WebGL2 it keeps its CSS gradient.
+ */
+let phase: 'idle' | 'waiting' | 'compiling' | 'ready' | 'failed' = 'idle'
+const supported = typeof WebGL2RenderingContext !== 'undefined'
+
+const fail = (why: unknown) => {
+  phase = 'failed'
+  console.warn('orb: no WebGL orb', why)
+  for (const o of orbs) o.el.classList.remove('gl')
 }
 
-const init = () => {
+const shader = (g: WebGL2RenderingContext, type: number, src: string) => {
+  const sh = g.createShader(type)!
+  g.shaderSource(sh, src)
+  g.compileShader(sh)
+  return sh
+}
+
+/** Starts compiling; `finish` checks the result once the driver says it is done. */
+const compile = () => {
   const g = gl
-  if (!g || !image) return
-  const prog = g.createProgram()
-  g.attachShader(prog, compile(g, g.VERTEX_SHADER, vertexShader))
-  g.attachShader(prog, compile(g, g.FRAGMENT_SHADER, fragmentShader))
+  if (!g) return
+  prog = g.createProgram()
+  g.attachShader(prog, shader(g, g.VERTEX_SHADER, vertexShader))
+  g.attachShader(prog, shader(g, g.FRAGMENT_SHADER, fragmentShader))
   g.linkProgram(prog)
-  if (!g.getProgramParameter(prog, g.LINK_STATUS)) throw new Error(g.getProgramInfoLog(prog) ?? 'program')
-  g.useProgram(prog)
+  phase = 'compiling'
+}
+
+const finish = () => {
+  const g = gl!
+  const p = prog!
+  if (!g.getProgramParameter(p, g.LINK_STATUS)) {
+    const shaders = g.getAttachedShaders(p) ?? []
+    throw new Error(shaders.map((sh) => g.getShaderInfoLog(sh)).join('\n') || g.getProgramInfoLog(p) || 'link failed')
+  }
+  g.useProgram(p)
   loc = {}
   for (const n of ['uTime', 'uAnimation', 'uInverted', 'uOffsets', 'uColor1', 'uColor2', 'uInputVolume', 'uOutputVolume', 'uOpacity', 'uPx', 'uPerlinTexture'])
-    loc[n] = g.getUniformLocation(prog, n)
+    loc[n] = g.getUniformLocation(p, n)
   const buf = g.createBuffer()
   g.bindBuffer(g.ARRAY_BUFFER, buf)
   g.bufferData(g.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), g.STATIC_DRAW)
-  const pos = g.getAttribLocation(prog, 'position')
+  const pos = g.getAttribLocation(p, 'position')
   g.enableVertexAttribArray(pos)
   g.vertexAttribPointer(pos, 2, g.FLOAT, false, 0, 0)
   // As three.js loads it: flipped, repeating, mipmapped.
@@ -248,7 +274,7 @@ const init = () => {
   g.activeTexture(g.TEXTURE0)
   g.bindTexture(g.TEXTURE_2D, texture)
   g.pixelStorei(g.UNPACK_FLIP_Y_WEBGL, true)
-  g.texImage2D(g.TEXTURE_2D, 0, g.RGBA, g.RGBA, g.UNSIGNED_BYTE, image)
+  g.texImage2D(g.TEXTURE_2D, 0, g.RGBA, g.RGBA, g.UNSIGNED_BYTE, image!)
   g.generateMipmap(g.TEXTURE_2D)
   g.texParameteri(g.TEXTURE_2D, g.TEXTURE_WRAP_S, g.REPEAT)
   g.texParameteri(g.TEXTURE_2D, g.TEXTURE_WRAP_T, g.REPEAT)
@@ -257,30 +283,31 @@ const init = () => {
   g.uniform1i(loc.uPerlinTexture!, 0)
   g.disable(g.BLEND)
   g.clearColor(0, 0, 0, 0)
-  ready = true
+  phase = 'ready'
 }
 
-/** Sets up the shared context once; false without WebGL2. */
-const setup = () => {
-  if (gl !== undefined) return gl !== null
-  glCanvas = document.createElement('canvas')
-  gl = glCanvas.getContext('webgl2', { alpha: true, antialias: false, premultipliedAlpha: true })
-  if (!gl) return false
-  glCanvas.addEventListener('webglcontextlost', (e) => {
-    e.preventDefault()
-    ready = false
-  })
-  glCanvas.addEventListener('webglcontextrestored', () => init())
-  image = new Image()
-  image.onload = () => {
-    try {
-      init()
-    } catch (e) {
-      console.warn('orb: shader failed', e)
-    }
-  }
-  image.src = noiseUrl
-  return true
+/** The first orb asks for the context; it is made once the page is idle. */
+const start = () => {
+  if (phase !== 'idle') return
+  phase = 'waiting'
+  requestIdleCallback(
+    () => {
+      glCanvas = document.createElement('canvas')
+      gl = glCanvas.getContext('webgl2', { alpha: true, antialias: false, premultipliedAlpha: true })
+      if (!gl) return fail('no WebGL2 context')
+      parallel = gl.getExtension('KHR_parallel_shader_compile')
+      glCanvas.addEventListener('webglcontextlost', (e) => {
+        e.preventDefault()
+        phase = 'waiting'
+      })
+      glCanvas.addEventListener('webglcontextrestored', () => compile())
+      image = new Image()
+      image.onload = () => compile()
+      image.onerror = () => fail('noise texture did not load')
+      image.src = noiseUrl
+    },
+    { timeout: 2000 }
+  )
 }
 
 /** One step of the component's useFrame, for one orb. */
@@ -345,7 +372,14 @@ const frame = (now: number) => {
   if (orbs.size === 0) return
   const delta = Math.max(0, (now - last) / 1000)
   last = now
-  if (ready && !document.hidden) {
+  if (phase === 'compiling' && gl && prog && (!parallel || gl.getProgramParameter(prog, parallel.COMPLETION_STATUS_KHR))) {
+    try {
+      finish()
+    } catch (e) {
+      fail(e)
+    }
+  }
+  if (phase === 'ready' && !document.hidden) {
     const inverted = document.documentElement.dataset.theme === 'dark' ? 1 : 0
     const dpr = Math.min(2, window.devicePixelRatio || 1)
     for (const o of orbs) {
@@ -362,7 +396,8 @@ const frame = (now: number) => {
 
 /** Svelte action: draws the orb into `el` (which keeps its CSS gradient as the fallback). */
 export const orb = (el: HTMLElement, params: OrbParams = {}) => {
-  if (!setup()) return {}
+  if (!supported || phase === 'failed') return {}
+  start()
   const random = splitmix32(params.seed ?? Math.floor(Math.random() * 2 ** 32))
   const cvs = document.createElement('canvas')
   el.prepend(cvs)
