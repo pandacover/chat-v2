@@ -24,6 +24,7 @@ import { makeElectronOverlay } from './computer/overlay'
 import { type Bitmap, type Pointer, makePointer } from './computer/point'
 import { isSensitive } from './memory'
 import { Db } from './services/Db'
+import { Jobs } from './services/Jobs'
 import { ElevenLabs } from './services/ElevenLabs'
 import { type SecretCipher, SettingsStore } from './services/SettingsStore'
 
@@ -249,7 +250,13 @@ const makeRuntime = () => {
     Layer.provide(Layer.merge(providers, computer)),
     Layer.provide(Layer.succeed(Broadcaster, broadcaster))
   )
-  return ManagedRuntime.make(Layer.mergeAll(chat, providers, computer))
+  // The primary bot's conversation and its jobs, over Chat.
+  const jobs = Jobs.layer.pipe(
+    Layer.provideMerge(chat),
+    Layer.provide(Layer.merge(providers, computer)),
+    Layer.provide(Layer.succeed(Broadcaster, broadcaster))
+  )
+  return ManagedRuntime.make(Layer.mergeAll(jobs, providers, computer))
 }
 
 let runtime: ManagedRuntime.ManagedRuntime<MainServices | AppPaths, unknown> | null = null

@@ -1,6 +1,6 @@
 <script lang="ts">
   // Search: a modal over everything, opened from the sidebar or Ctrl K (Cmd K). Empty, it lists the
-  // latest chats; typed, the chats whose title matches, best first, with the match in bold.
+  // latest jobs; typed, the jobs whose title matches, best first, with the match in bold.
   import { entries, groupOf, openEntry, type Entry } from '@/lib/chats.svelte'
   import { fade, pop } from '@/lib/motion'
   import { shortcut } from '@/lib/keys'
@@ -63,7 +63,7 @@
   const focus = (el: HTMLInputElement) => el.focus()
 </script>
 
-<div class="fixed inset-0 z-[55] flex items-start justify-center pt-[14vh]" role="dialog" aria-modal="true" aria-label="Search chats">
+<div class="fixed inset-0 z-[55] flex items-start justify-center pt-[14vh]" role="dialog" aria-modal="true" aria-label="Search jobs">
   <button class="absolute inset-0 bg-scrim backdrop-blur-[4px]" aria-label="Close search" tabindex="-1" transition:fade={{ duration: 200 }} onclick={close}></button>
   <div class="glass-strong relative w-[min(620px,90vw)] overflow-hidden rounded-[20px]" transition:pop={{ duration: 220 }}>
     <div class="flex h-14 items-center gap-3 border-b border-line pr-4 pl-[18px] text-fg-3">
@@ -72,18 +72,18 @@
         use:focus
         bind:value={query}
         {onkeydown}
-        placeholder="Search chats"
+        placeholder="Search jobs"
         autocomplete="off"
-        aria-label="Search chats"
+        aria-label="Search jobs"
         class="min-w-0 flex-1 bg-transparent text-[16px] text-fg outline-none placeholder:text-fg-4"
       />
       <kbd class="studio-kbd inline-flex h-[22px] items-center rounded-md px-[7px] shadow-[inset_0_0_0_1px_var(--line)]">Esc</kbd>
     </div>
-    <div bind:this={list} class="max-h-[min(400px,56vh)] overflow-y-auto p-1.5" role="listbox" aria-label="Chats">
+    <div bind:this={list} class="max-h-[min(400px,56vh)] overflow-y-auto p-1.5" role="listbox" aria-label="Jobs">
       {#if hits.length > 0}
-        <span class="mono-label block px-2.5 pt-3 pb-1.5">{q ? 'Chats' : 'Recent'}</span>
+        <span class="mono-label block px-2.5 pt-3 pb-1.5">{q ? 'Jobs' : 'Recent'}</span>
       {:else}
-        <div class="px-4 py-7 text-center text-[13.5px] text-fg-3">{q ? 'No chat matches.' : 'Your chats will show up here.'}</div>
+        <div class="px-4 py-7 text-center text-[13.5px] text-fg-3">{q ? 'No job matches.' : 'Your jobs will show up here.'}</div>
       {/if}
       {#each hits as e, i (e.key)}
         {@const [a, m, b] = parts(e.title)}

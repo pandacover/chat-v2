@@ -8,7 +8,8 @@
   import { isMac } from '@/lib/keys'
   import ComputerWaitCard from './ComputerWaitCard.svelte'
   import StepList from './StepList.svelte'
-  import type { Attachment, PathNode } from '@shared/types'
+  import type { Attachment, Job, PathNode } from '@shared/types'
+  import BotAvatar from './BotAvatar.svelte'
   import { collapse, fade, fly } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
   import AttachmentChip from './AttachmentChip.svelte'
@@ -22,13 +23,23 @@
   let {
     node,
     last = false,
-    far = false
+    far = false,
+    primary = false,
+    job = null
   }: {
     node: PathNode
     last?: boolean
     /** Well before the end of the chat: skips layout and paint while off-screen (app.css .far). */
     far?: boolean
+    /**
+     * In the primary bot's conversation, which never branches or forks: no edits, regenerations,
+     * forks or branch switcher (a job's own thread has them). Replies carry their author and job.
+     */
+    primary?: boolean
+    /** The job a turn of the primary's conversation went to. */
+    job?: Job | null
   } = $props()
+  const author = $derived(primary ? (app.bots.find((b) => b.id === node.message.authorBotId) ?? app.primaryBot) : null)
 
   const message = $derived(node.message)
   const streaming = $derived(message.status === 'streaming')
@@ -230,10 +241,10 @@
             onclick={() => {
               // Selecting text to copy should not flip the message into edit mode.
               if (!getSelection()?.isCollapsed) return
-              if (!busy) startEdit()
+              if (!busy && !primary) startEdit()
             }}
             onkeydown={(e) => {
-              if ((e.key === 'Enter' || e.key === ' ') && !busy) {
+              if ((e.key === 'Enter' || e.key === ' ') && !busy && !primary) {
                 e.preventDefault()
                 startEdit()
               }
@@ -247,8 +258,10 @@
 
     {#if !editing}
       <div class="flex h-[26px] shrink-0 items-center opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
-        <BranchSwitcher {node} disabled={busy} />
-        <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Edit · makes a branch'} disabled={busy} onclick={startEdit}><Icon name="edit" size={14} /></button>
+        {#if !primary}
+          <BranchSwitcher {node} disabled={busy} />
+          <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Edit · makes a branch'} disabled={busy} onclick={startEdit}><Icon name="edit" size={14} /></button>
+        {/if}
         <button class="icon-btn size-[26px] !rounded-lg" use:tip={copied ? 'Copied' : 'Copy'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={14} /></button>
       </div>
     {/if}
@@ -265,6 +278,17 @@
 {:else if message.role === 'assistant'}
   <!-- data-reply-scope: text selected in here can be quoted in a reply (SelectionReply). -->
   <div class="msg group flex flex-col gap-3 {far ? 'far' : ''}" data-reply-scope in:fade={{ duration: fresh ? 200 : 0 }}>
+    {#if author}
+      <!-- Who answered, and in which job: the primary's conversation runs across jobs. -->
+      <div class="-mb-1 flex h-6 min-w-0 items-center gap-2 text-[13px]" data-reply-author>
+        <BotAvatar bot={author} size={22} />
+        <span class="shrink-0 font-medium text-fg">{author.name}</span>
+        {#if job}
+          <span class="text-fg-4">·</span>
+          <button class="min-w-0 truncate text-fg-3 transition-colors hover:text-fg" use:tip={job.summary ?? 'Open this job'} onclick={() => app.openJob(job)}>{job.title}</button>
+        {/if}
+      </div>
+    {/if}
     {#each blocks as block, i (i)}
       {#if block.type === 'text'}
         <Markdown source={block.content} streaming={streaming && i === blocks.length - 1} live={live && i === blocks.length - 1} />
@@ -367,14 +391,16 @@
           ? 'opacity-100'
           : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}"
       >
-        <BranchSwitcher {node} disabled={busy} />
+        {#if !primary}<BranchSwitcher {node} disabled={busy} />{/if}
         <button class="icon-btn size-[26px] !rounded-lg" use:tip={copied ? 'Copied' : 'Copy'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={14} /></button>
-        <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Regenerate · makes a branch'} disabled={busy} onclick={() => app.regenerate(message.id)}>
-          <Icon name="refresh" size={14} />
-        </button>
-        <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Fork into a new chat from here'} onclick={() => app.fork(message.id)}>
-          <Icon name="fork" size={14} />
-        </button>
+        {#if !primary}
+          <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Regenerate · makes a branch'} disabled={busy} onclick={() => app.regenerate(message.id)}>
+            <Icon name="refresh" size={14} />
+          </button>
+          <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Fork into a new job from here'} onclick={() => app.fork(message.id)}>
+            <Icon name="fork" size={14} />
+          </button>
+        {/if}
         {#if message.model || message.usage}
           <span class="mono-stat ml-2 min-w-0 truncate" use:tip={message.usage ? usageDetail(message.usage) : null} in:fade={{ duration: 200 }}
             >{[message.model ? modelName(message.model) : '', message.usage ? usageShort(message.usage) : ''].filter(Boolean).join(' · ')}</span

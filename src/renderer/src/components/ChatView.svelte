@@ -7,7 +7,10 @@
   import { shortcut } from '@/lib/keys'
   import { app } from '@/lib/store.svelte'
   import { clock, voice } from '@/lib/voice.svelte'
+  import type { PathNode } from '@shared/types'
+  import BotAvatar from './BotAvatar.svelte'
   import Composer from './Composer.svelte'
+  import JobChip from './JobChip.svelte'
   import Icon from './Icon.svelte'
   import MessageItem from './MessageItem.svelte'
   import SelectionReply from './SelectionReply.svelte'
@@ -26,7 +29,18 @@
   let promptDraft = $state('')
 
   const view = $derived(app.view)
-  const empty = $derived(!view || view.path.length === 0)
+  // A message to Tomo still being routed shows at once, so the conversation isn't empty meanwhile.
+  const empty = $derived((!view || view.path.length === 0) && !app.pending)
+  /** The routed message, and Tomo thinking, until the turn lands in its job. */
+  const pendingNodes = $derived.by<PathNode[]>(() => {
+    const p = app.pending
+    if (!p || !app.isPrimary) return []
+    const base = { sessionId: '', parentId: null, activeChildId: null, lineCount: 0, model: null, error: null, createdAt: 0, usage: null, attachments: [] }
+    return [
+      { message: { ...base, id: 'pending-user', role: 'user', content: p.text, status: 'complete', authorBotId: null, attachments: p.attachments }, siblingIds: [], siblingIndex: 0 },
+      { message: { ...base, id: 'pending-reply', role: 'assistant', content: '', status: 'streaming', authorBotId: app.primaryBot?.id ?? null }, siblingIds: [], siblingIndex: 0 }
+    ]
+  })
   /** Voice on a new chat: the composer docks, the rest fades, and the orb takes the centre. */
   const stage = $derived(empty && voice.home !== 'off')
   // A chat from before Claude keeps its old model id; it now runs on the default.
@@ -251,7 +265,7 @@
   }
 
   const openPrompt = () => {
-    promptDraft = app.chat.systemPrompt ?? app.settings?.settings.systemPrompt ?? ''
+    promptDraft = app.chat.systemPrompt ?? app.primaryBot?.instructions ?? app.settings?.settings.systemPrompt ?? ''
     promptOpen = true
   }
 
@@ -273,12 +287,16 @@
     class="topbar flex h-[52px] shrink-0 items-center gap-1 transition-[opacity,padding] duration-300 ease-out"
     style="padding-left: {app.sidebarOpen ? 16 : 86}px; padding-right: {app.panelToggle && !app.panelOpen ? 46 : 12}px"
   >
-    <span class="min-w-0 truncate pl-1 font-medium" data-chat-title>{view?.session.title ?? ''}</span>
+    {#if app.isPrimary}<BotAvatar bot={app.primaryBot} size={22} class="ml-1" />{/if}
+    <span class="min-w-0 truncate pl-1 font-medium" data-chat-title>{app.isPrimary ? (app.primaryBot?.name ?? 'Tomo') : (view?.session.title ?? '')}</span>
     <span class="flex-1"></span>
-    <button class="icon-btn relative size-8 {hasOverride ? '!text-fg' : ''}" use:tip={'Instructions for this chat'} onclick={openPrompt}>
-      <Icon name="settings" size={16} />
-      {#if hasOverride}<span class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-fg"></span>{/if}
-    </button>
+    <!-- The primary's instructions are its bot's, in Settings; a job's thread can have its own. -->
+    {#if !app.isPrimary}
+      <button class="icon-btn relative size-8 {hasOverride ? '!text-fg' : ''}" use:tip={'Instructions for this job'} onclick={openPrompt}>
+        <Icon name="settings" size={16} />
+        {#if hasOverride}<span class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-fg"></span>{/if}
+      </button>
+    {/if}
     {#if app.settings}
       {@const onTop = app.settings.settings.alwaysOnTop}
       <button
@@ -324,7 +342,16 @@
         <div bind:this={thread} class="mx-auto flex max-w-[760px] flex-col gap-6 px-8 pt-4" style="padding-bottom: {dockH + 24}px">
           {#each shown as node, i (node.message.id)}
             <!-- The last few always render, so a chat opens at its true end. -->
-            <MessageItem {node} last={from + i === view.path.length - 1} far={from + i < view.path.length - 4} />
+            <MessageItem
+              {node}
+              last={from + i === view.path.length - 1 && pendingNodes.length === 0}
+              far={from + i < view.path.length - 4}
+              primary={app.isPrimary}
+              job={app.isPrimary ? (app.jobByThread.get(node.message.sessionId) ?? null) : null}
+            />
+          {/each}
+          {#each pendingNodes as node (node.message.id)}
+            <MessageItem {node} primary />
           {/each}
         </div>
       </div>
@@ -346,6 +373,7 @@
     bind:clientHeight={dockH}
     class="z-[3] mx-auto w-full max-w-[824px] shrink-0 px-8 {empty ? 'relative' : 'absolute inset-x-0 bottom-0'} {empty && !stage ? '' : 'pb-[18px]'}"
   >
+    <div class="mb-2 flex min-h-7 items-center px-1 empty:hidden"><JobChip /></div>
     <Composer
       bind:this={composer}
       tall={empty && !stage}
@@ -410,8 +438,8 @@
   <div class="fixed inset-0 z-50 grid place-items-center p-6" role="dialog" aria-modal="true" aria-label="Chat instructions">
     <button class="absolute inset-0 bg-scrim backdrop-blur-[4px]" aria-label="Close" transition:fade={{ duration: 150 }} onclick={() => (promptOpen = false)}></button>
     <div class="glass-strong relative w-full max-w-lg rounded-[20px] p-6" transition:pop>
-      <h2 class="font-display text-[22px] leading-tight font-normal tracking-[-0.02em]">Instructions for this chat</h2>
-      <p class="mt-1 text-[13.5px] text-fg-3">Replaces the global instructions for this chat only.</p>
+      <h2 class="font-display text-[22px] leading-tight font-normal tracking-[-0.02em]">Instructions for this job</h2>
+      <p class="mt-1 text-[13.5px] text-fg-3">Replace {app.primaryBot?.name ?? 'Tomo'}'s instructions in this job only.</p>
       <!-- svelte-ignore a11y_autofocus -->
       <textarea
         autofocus
@@ -422,7 +450,7 @@
       ></textarea>
       <div class="mt-4 flex items-center gap-2">
         {#if hasOverride}
-          <button class="btn quiet" onclick={() => savePrompt(null)}>Use global</button>
+          <button class="btn quiet" onclick={() => savePrompt(null)}>Use {app.primaryBot?.name ?? 'Tomo'}'s</button>
         {/if}
         <button class="btn ml-auto" onclick={() => (promptOpen = false)}>Cancel</button>
         <button class="btn solid" onclick={() => savePrompt(promptDraft)}>Save</button>

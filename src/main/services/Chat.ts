@@ -7,6 +7,7 @@ import { stepLine, summarizeSteps } from '@shared/steps'
 import type { MemoryRun, Message, MessageStatus, NewAttachmentInput, Session, SessionView, Settings, StreamEvent, Usage } from '@shared/types'
 import { type ConfigError, type DbError, InvalidInput, type MissingApiKey, type NotFound, ProviderError, errorMessage } from '../errors'
 import { WRITING_GUIDELINES } from '../guidelines'
+import { jobsBlock, jobsNote } from '../jobs'
 import { MEMORY_INSTRUCTIONS, askedQuestion, memoryPrompt, memorySource, parseMemoryReply, profileBlock } from '../memory'
 import { browserModule } from '../agent/browser'
 import { Agent, type Auth, MAX_TURNS, type PromptBlock, type ReplyHooks } from '../agent/driver'
@@ -49,9 +50,9 @@ export const cleanTitle = (reply: string): string | null => {
   return title.trim() ? titleFrom(title) : null
 }
 
-/** The model a chat's new reply runs on: the chat's, unless that is one from before Claude. */
-const chatModel = (session: Session, settings: Settings | null) =>
-  isClaudeModel(session.model) ? session.model : (settings?.defaultModel ?? null)
+/** The model a chat's new reply runs on: the chat's, unless that is one from before Claude; else its bot's. */
+const chatModel = (session: Session, settings: Settings | null, botModel: string | null) =>
+  isClaudeModel(session.model) ? session.model : isClaudeModel(botModel) ? botModel : (settings?.defaultModel ?? null)
 
 /** Added to the system prompt when a chat has both the browser and computer use on. */
 export const BROWSER_AND_COMPUTER_NOTE =
@@ -104,6 +105,8 @@ export class Chat extends Context.Service<
     ) => Effect.Effect<{ lines: string[]; status: MessageStatus }, ChatError>
     /** What happened to the last message memory looked at (this run of the app only). */
     readonly lastMemoryRun: Effect.Effect<MemoryRun | null>
+    /** Calls `listener` whenever a reply ends, however it ended. Returns the unsubscribe. */
+    readonly onReplyEnd: (listener: (end: { messageId: string; status: MessageStatus }) => void) => () => void
   }
 >()('chat-v2/Chat') {
   static readonly layer = Layer.effect(
@@ -170,6 +173,7 @@ export class Chat extends Context.Service<
       const remembering = yield* FiberMap.make<string>()
       const memoryLock = yield* Semaphore.make(1)
       let lastMemoryRun: MemoryRun | null = null
+      const replyEnds = new Set<(end: { messageId: string; status: MessageStatus }) => void>()
       /** Records how a memory check went and tells open windows (a toast when something changed). */
       const reportMemory = (sessionId: string, run: Omit<MemoryRun, 'at' | 'added' | 'removed' | 'dropped'> & Partial<MemoryRun>) => {
         lastMemoryRun = { at: Date.now(), added: [], removed: [], dropped: [], ...run }
@@ -235,6 +239,7 @@ export class Chat extends Context.Service<
           })
           .pipe(
             Effect.andThen(Effect.sync(() => broadcaster.send({ type: 'done', messageId, status, error, usage, model }))),
+            Effect.andThen(Effect.sync(() => replyEnds.forEach((l) => l({ messageId, status })))),
             Effect.ignore
           )
 
@@ -278,7 +283,8 @@ export class Chat extends Context.Service<
         return Effect.gen(function* () {
           const settings = yield* settingsStore.get
           const session = yield* db.require('Session', (d) => d.getSession(assistant.sessionId))
-          const runOn = isClaudeModel(assistant.model) ? assistant.model : settings.defaultModel
+          const bot = yield* db.use((d) => d.botOf(session.id))
+          const runOn = isClaudeModel(assistant.model) ? assistant.model : isClaudeModel(bot.model) ? bot.model : settings.defaultModel
           model = runOn
           const auth = yield* authFor(settings)
           const lineage = yield* db.use((d) => d.lineage(assistant.parentId!))
@@ -299,11 +305,15 @@ export class Chat extends Context.Service<
             saveMode(session.id, mode)
           }
           const prompt = yield* promptFor(plan, partial, mode)
+          // A job's thread: the bot sees where this job stands and what else the user has going.
+          const jobs = session.jobId && partial === null ? yield* db.use((d) => jobsBlock(d.jobOfSession(session.id) ?? null, d.listJobs())) : ''
+          if (jobs) prompt.unshift({ type: 'text', text: jobs })
           // The profile as it was when this chat first asked, so the system prompt stays the same.
           const facts = settings.memoryModel ? yield* db.use((d) => d.liveFacts(d.sessionMemoryRev(session.id))) : []
           // User instructions first so they win any conflict; the writing guideline is hidden from Settings.
           const instructions = [
-            session.systemPrompt ?? settings.systemPrompt,
+            session.systemPrompt ?? bot.instructions ?? settings.systemPrompt,
+            session.jobId ? jobsNote(bot.name) : '',
             WRITING_GUIDELINES,
             settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : '',
             HISTORY_NOTE,
@@ -334,7 +344,7 @@ export class Chat extends Context.Service<
                   messageId: assistant.id,
                   model: runOn,
                   // Computer use makes many short click-and-look calls; Tomo's effort suits them.
-                  effort: usesComputer ? effortFor(runOn) : settings.effort,
+                  effort: usesComputer ? effortFor(runOn) : (bot.effort ?? settings.effort),
                   instructions,
                   profile: profileBlock(facts),
                   prompt,
@@ -467,7 +477,7 @@ export class Chat extends Context.Service<
             role: 'assistant',
             content: '',
             status: 'streaming',
-            model: chatModel(session, settings)
+            model: chatModel(session, settings, d.botOf(session.id).model)
           })
           const parent = d.getMessage(input.parentId)
           return {
@@ -540,7 +550,7 @@ export class Chat extends Context.Service<
             role: 'assistant',
             content: '',
             status: 'streaming',
-            model: chatModel(session, settings)
+            model: chatModel(session, settings, d.botOf(session.id).model)
           })
         )
         yield* start(assistant)
@@ -598,7 +608,11 @@ export class Chat extends Context.Service<
         setComputerMode,
         switchBranch,
         linesSince,
-        lastMemoryRun: Effect.sync(() => lastMemoryRun)
+        lastMemoryRun: Effect.sync(() => lastMemoryRun),
+        onReplyEnd: (listener) => {
+          replyEnds.add(listener)
+          return () => void replyEnds.delete(listener)
+        }
       })
     })
   )

@@ -8,6 +8,7 @@
   import { shortcut } from '@/lib/keys'
   import { app } from '@/lib/store.svelte'
   import { theme, type ThemePref } from '@/lib/theme.svelte'
+  import BotAvatar from './BotAvatar.svelte'
   import Icon, { type IconName } from './Icon.svelte'
   import UpdateButton from './UpdateButton.svelte'
 
@@ -15,7 +16,7 @@
   let confirming = $state<string | null>(null)
   let draft = $state('')
 
-  // Drafts first, then pinned chats, then the rest by day.
+  // Drafts first, then pinned jobs, then open ones, then finished ones by day.
   const groups = $derived(grouped(entries()))
 
   // Collapsed groups, by label, kept across launches.
@@ -40,6 +41,8 @@
           ? b.entry.session === null
           : b.entry.session !== null &&
             a.entry.title === b.entry.title &&
+            a.entry.job.status === b.entry.job.status &&
+            a.entry.job.summary === b.entry.job.summary &&
             a.entry.session.pinnedAt === b.entry.session.pinnedAt &&
             a.entry.session.forkedFromSessionId === b.entry.session.forkedFromSessionId)
       : !a.entry && !b.entry && a.open === b.open
@@ -178,8 +181,8 @@
     <Icon name="sidebar" size={16} />
   </button>
   {#if !app.sidebarOpen}
-    <button class="icon-btn size-8" use:tip={{ text: 'Home', kbd: shortcut('N') }} onclick={() => app.newSession()} in:fade={{ duration: 160 }}>
-      <Icon name="home" size={16} />
+    <button class="icon-btn size-8" use:tip={{ text: 'New topic', kbd: shortcut('N') }} onclick={() => app.newSession()} in:fade={{ duration: 160 }}>
+      <Icon name="compose" size={16} />
     </button>
   {/if}
 </div>
@@ -208,9 +211,17 @@
       <span class="font-display text-[17px] leading-none font-medium tracking-[-0.02em] select-none">tomo</span>
     </div>
 
-    <button class="nav-item {app.view ? '' : 'on'}" onclick={() => app.newSession()}>
-      <Icon name="home" size={16} />Home<kbd class="studio-kbd ml-auto">{shortcut('N')}</kbd>
-    </button>
+    <!-- The primary bot's conversation: everything said without picking a job goes here. -->
+    <div class="chat-row group relative">
+      <button class="nav-item !gap-2.5 {app.isPrimary ? 'on' : ''}" data-primary-entry onclick={() => app.openPrimary()}>
+        <BotAvatar bot={app.primaryBot} size={20} />
+        <span class="min-w-0 flex-1 truncate font-medium">{app.primaryBot?.name ?? 'Tomo'}</span>
+        {#if app.isPrimary ? app.hasDraft(app.view?.session.id ?? '') : false}<span class="grid shrink-0 place-items-center text-blue" use:tip={'Unsent draft'}><Icon name="pen" size={13} /></span>{/if}
+      </button>
+      <div class="acts pointer-events-none absolute top-1 right-1 flex rounded-r-lg pl-4 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100 {app.isPrimary ? 'on' : ''}">
+        <button class="icon-btn size-[26px] !rounded-lg" use:tip={{ text: 'New topic', kbd: shortcut('N') }} onclick={() => app.newSession()}><Icon name="compose" size={14} /></button>
+      </div>
+    </div>
     <button class="nav-item" onclick={() => (app.findOpen = true)}>
       <Icon name="search" size={16} />Search<kbd class="studio-kbd ml-auto">{shortcut('K')}</kbd>
     </button>
@@ -258,24 +269,31 @@
                 </div>
               {:else if s && confirming === s.id}
                 <div class="nav-item on !pr-1" in:fade={{ duration: 120 }}>
-                  <span class="min-w-0 flex-1 truncate text-fg">Delete this chat?</span>
+                  <span class="min-w-0 flex-1 truncate text-fg">Delete this job?</span>
                   <button class="btn quiet sm !h-6 !px-2" onclick={() => (confirming = null)}>Keep</button>
-                  <button class="btn quiet sm !h-6 !px-2 !text-danger" onclick={() => app.remove(s.id)}>Delete</button>
+                  <button class="btn quiet sm !h-6 !px-2 !text-danger" onclick={() => app.removeJob(e.job.id)}>Delete</button>
                 </div>
               {:else}
-                <button class="nav-item !gap-2 {active ? 'on' : ''}" onclick={() => openEntry(e)} ondblclick={() => s && startRename(s)}>
+                <button class="nav-item !gap-2 {active ? 'on' : ''}" use:tip={e.job.summary ?? null} onclick={() => openEntry(e)} ondblclick={() => s && startRename(s)}>
                   {#if e.draft}<span class="grid shrink-0 place-items-center text-blue" use:tip={'Unsent draft'}><Icon name="pen" size={13} /></span>{/if}
-                  {#if s?.forkedFromSessionId}
-                    {@const parent = app.sessions.find((x) => x.id === s.forkedFromSessionId)}
-                    <span class="grid shrink-0 place-items-center text-fg-3" use:tip={parent ? `Forked from “${parent.title}”` : 'Forked chat'}><Icon name="branch" size={13} /></span>
+                  {#if e.job.parentJobId || s?.forkedFromSessionId}
+                    {@const parent = app.jobs.find((x) => x.id === e.job.parentJobId)}
+                    <span class="grid shrink-0 place-items-center text-fg-3" use:tip={parent ? `Forked from “${parent.title}”` : 'Forked job'}><Icon name="branch" size={13} /></span>
                   {/if}
                   <span class="min-w-0 flex-1 truncate text-left {s ? '' : 'italic'}">{s ? e.title : draftTitle(app.draftText(''))}</span>
                 </button>
                 <!-- Over the title rather than beside it, so the title runs to the row's edge; it fades out under the actions. -->
-                <div class="acts pointer-events-none absolute top-1 right-1 flex rounded-r-lg pl-4 opacity-0 transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100 {active ? 'on' : ''}">
+                <div class="acts pointer-events-none absolute top-1 right-1 flex rounded-r-lg pl-4 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100 {active ? 'on' : ''}">
                   {#if s}
-                    <button class="icon-btn size-[26px] !rounded-lg" use:tip={s.pinnedAt != null ? 'Unpin chat' : 'Pin chat'} onclick={() => app.pin(s.id, s.pinnedAt == null)}>
+                    <button class="icon-btn size-[26px] !rounded-lg" use:tip={s.pinnedAt != null ? 'Unpin job' : 'Pin job'} onclick={() => app.pin(s.id, s.pinnedAt == null)}>
                       <Icon name="pin" size={14} class={s.pinnedAt != null ? '' : 'rotate-45'} />
+                    </button>
+                    <button
+                      class="icon-btn size-[26px] !rounded-lg"
+                      use:tip={e.job.status === 'open' ? 'Mark finished' : 'Reopen'}
+                      onclick={() => app.setJobStatus(e.job.id, e.job.status === 'open' ? 'done' : 'open')}
+                    >
+                      <Icon name={e.job.status === 'open' ? 'check' : 'undo'} size={14} />
                     </button>
                     <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Rename'} onclick={() => startRename(s)}><Icon name="edit" size={14} /></button>
                     <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Delete'} onclick={() => (confirming = s.id)}><Icon name="trash" size={14} /></button>
@@ -288,7 +306,7 @@
           {/if}
         </div>
       {:else}
-        <p class="px-2.5 py-6 text-[13px] text-fg-3" in:fade>Your chats will show up here.</p>
+        <p class="px-2.5 py-6 text-[13px] text-fg-3" in:fade>Your jobs will show up here. Tell {app.primaryBot?.name ?? 'Tomo'} what you're working on.</p>
       {/each}
     </nav>
 
@@ -379,6 +397,11 @@
   }
   .acts.on {
     background: linear-gradient(90deg, transparent, var(--glass-on-side) 16px);
+  }
+  /* Only the buttons take clicks: the fade before them is still the row, which opens the job. */
+  .chat-row:hover .acts > button,
+  .acts:focus-within > button {
+    pointer-events: auto;
   }
   .avatar {
     background: conic-gradient(from 200deg, #ffd29a, #f7a8b8, #a8c5ff, #ffd29a);

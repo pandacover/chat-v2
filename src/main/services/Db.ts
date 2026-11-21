@@ -16,8 +16,9 @@ import type {
 } from '@shared/types'
 import type { ComputerMode } from '@shared/computer'
 import { DbError, NotFound, errorMessage } from '../errors'
+import { BOTS_AND_JOBS_MIGRATION, makeJobsDb } from './jobsDb'
 
-const MIGRATIONS: string[] = [
+export const MIGRATIONS: string[] = [
   `create table sessions (
     id text primary key,
     title text not null,
@@ -112,7 +113,9 @@ const MIGRATIONS: string[] = [
   alter table messages add column agent_cost real;
   create index messages_agent_session on messages(agent_session);`,
   // What a computer chat's last message was read as: 'do' (operate the computer) or 'teach' (show me how).
-  `alter table sessions add column computer_mode text not null default 'do';`
+  `alter table sessions add column computer_mode text not null default 'do';`,
+  // Bots and jobs (see jobsDb.ts): every chat becomes a finished job owned by the primary bot.
+  BOTS_AND_JOBS_MIGRATION
 ]
 
 /** At most this many facts are kept; past it, new ones are dropped until some are removed. */
@@ -131,6 +134,9 @@ interface SessionRow {
   pinned_at: number | null
   created_at: number
   updated_at: number
+  bot_id: string | null
+  job_id: string | null
+  kind: string
 }
 
 interface MessageRow {
@@ -146,6 +152,7 @@ interface MessageRow {
   error: string | null
   usage: string | null
   created_at: number
+  author_bot_id: string | null
 }
 
 interface AttachmentRow {
@@ -176,7 +183,10 @@ const toSession = (r: SessionRow): Session => ({
   computerMode: r.computer_mode === 'teach' ? 'teach' : 'do',
   pinnedAt: r.pinned_at,
   createdAt: r.created_at,
-  updatedAt: r.updated_at
+  updatedAt: r.updated_at,
+  botId: r.bot_id,
+  jobId: r.job_id,
+  kind: r.kind === 'primary' || r.kind === 'worker' ? r.kind : 'shared'
 })
 
 const toAttachment = (r: AttachmentRow): StoredAttachment => ({
@@ -335,7 +345,8 @@ export const makeDb = (file: string) => {
       error: r.error,
       createdAt: r.created_at,
       attachments: (atts.get(r.id) ?? []).map(publicAttachment),
-      usage: parseUsageJson(r.usage)
+      usage: parseUsageJson(r.usage),
+      authorBotId: r.author_bot_id
     }))
   }
 
@@ -632,19 +643,28 @@ export const makeDb = (file: string) => {
       }
     })
 
+  const jobs = makeJobsDb({ all, one, run, transaction, getSession, createSession, forkSession, deleteSession, activePath })
+
   return {
-    listSessions: () => all<SessionRow>('select * from sessions order by updated_at desc').map(toSession),
+    ...jobs,
+    /** Threads; the primary's conversation is primarySession(). */
+    listSessions: () => all<SessionRow>(`select * from sessions where kind != 'primary' order by updated_at desc`).map(toSession),
     /**
      * Deletes chats that never got a message (left over from when "New chat" saved a row
-     * straight away). Returns how many went.
+     * straight away), and jobs left with no thread. Returns how many chats went.
      */
     pruneEmptySessions: (): number =>
-      Number(
-        run(
-          `delete from sessions where not exists (
-             select 1 from messages m where m.session_id = sessions.id and m.role != 'root')`
-        ).changes
-      ),
+      transaction(() => {
+        // The primary's conversation holds no messages of its own (its turns are in job threads).
+        const gone = Number(
+          run(
+            `delete from sessions where kind != 'primary' and not exists (
+               select 1 from messages m where m.session_id = sessions.id and m.role != 'root')`
+          ).changes
+        )
+        jobs.pruneOrphanJobs()
+        return gone
+      }),
     getSession,
     createSession,
     updateSession: (
