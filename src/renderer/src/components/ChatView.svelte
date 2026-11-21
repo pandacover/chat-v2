@@ -92,7 +92,8 @@
     const idle = requestIdleCallback(
       async (deadline) => {
         const el = scroller
-        // As many as fit in the idle time left (about a millisecond each), so a frame stays short.
+        // As many as fit in the idle time left, at about a millisecond each, so a frame stays short.
+        // Replies heavy with code or tables cost more; the cap of CHUNK is what bounds those.
         const count = deadline.didTimeout ? MIN_CHUNK : Math.max(MIN_CHUNK, Math.min(CHUNK, Math.floor(deadline.timeRemaining())))
         // Scrolled up: the message that was first stays where it was on screen. The browser's own
         // scroll anchoring does this, but not at the very top, where what you read would be pushed
@@ -132,8 +133,13 @@
       if (pinned) toBottom()
     })
     observer.observe(el)
-    // The user scrolls (a wheel, the scrollbar, a key): Scroll to end stops chasing the end.
-    const takeOver = () => (chasing = false)
+    // The user scrolls (a wheel, the scrollbar, a key): Scroll to end stops chasing the end, and its
+    // glide stops where it is (Chromium would carry a script's smooth scroll on through a wheel).
+    const takeOver = () => {
+      if (!chasing) return
+      chasing = false
+      el.scrollTo({ top: el.scrollTop })
+    }
     // The glide ended short of an end that moved meanwhile: finish the chase there.
     const ended = () => {
       if (chasing && el.scrollHeight - el.scrollTop - el.clientHeight >= 80) toBottom()

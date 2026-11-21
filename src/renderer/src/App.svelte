@@ -46,6 +46,10 @@
     const el = e.currentTarget as HTMLElement
     Object.assign(el.style, { position: 'absolute', top: '8px', bottom: '8px', right: '8px' })
   }
+  /** Opened again before it finished closing (the same element slides back): it takes its room beside the chat back. */
+  const rejoinLayout = (e: Event) => {
+    Object.assign((e.currentTarget as HTMLElement).style, { position: '', top: '', bottom: '', right: '' })
+  }
 
   onMount(async () => {
     await app.init()
@@ -133,6 +137,7 @@
             style="width: {panelWidth + 8}px"
             transition:reveal={{ width: panelWidth + 8 }}
             onoutrostart={leaveLayout}
+            onintrostart={rejoinLayout}
           >
             <div class="relative flex h-full shrink-0 pl-2" style="width: {panelWidth + 8}px">
               <div
