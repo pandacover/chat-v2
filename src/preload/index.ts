@@ -92,6 +92,7 @@ const api: Api = {
     refresh: () => call('usage:refresh'),
     cancelPause: (messageId) => call('usage:cancelPause', messageId),
     share: (keys, window) => call('usage:share', keys, window),
+    jobShare: (jobId) => call('usage:jobShare', jobId),
     onEvent: (listener) => {
       const handler = (_event: unknown, payload: UsageEvent) => listener(payload)
       ipcRenderer.on('usage:event', handler)

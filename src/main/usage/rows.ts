@@ -49,6 +49,8 @@ export const usageRows = ({ all, one, run }: Queries) => ({
       'select session_id, started_at, ended_at, cost, model from usage_runs where ended_at >= ? order by started_at',
       since
     ).map((r) => ({ key: r.session_id, start: r.started_at, end: r.ended_at, cost: r.cost, model: r.model })),
+  /** A job's threads: the sessions its replies ran in, which its usage runs are keyed by. */
+  jobThreadIds: (jobId: string): string[] => all<{ id: string }>('select id from sessions where job_id = ?', jobId).map((r) => r.id),
   /** Dollars of runs since `since`, leaving out runs with `notAuth` (a plan's replies aren't billed by the dollar). */
   usageCost: (since: number, notAuth: string): number =>
     one<{ c: number | null }>("select sum(cost) as c from usage_runs where ended_at >= ? and coalesce(auth, '') != ?", since, notAuth)?.c ?? 0,

@@ -48,6 +48,11 @@ export interface UsageApi {
    * ids for now; a later phase keys runs by job.
    */
   readonly share: (input: { keys: readonly string[]; window?: string }) => Effect.Effect<UsageShare>
+  /**
+   * A job's estimated share of the 5-hour window and of the week: the runs of its threads (every
+   * reply to it, whether said in its thread or in Tomo's conversation). Windows with no reading are left out.
+   */
+  readonly jobShare: (jobId: string) => Effect.Effect<UsageShare[]>
 }
 
 export class Usage extends Context.Service<Usage, UsageApi>()('chat-v2/Usage') {
@@ -185,6 +190,13 @@ export class Usage extends Context.Service<Usage, UsageApi>()('chat-v2/Usage') {
           if (sync((d) => d.deleteUsagePause(messageId), false)) broadcast()
         }
 
+        const shareOf_ = (keys: readonly string[], window: string): UsageShare => {
+          const now = Date.now()
+          const since = now - (windowLength(window) ?? 7 * 86_400_000) - 86_400_000
+          const split = splitWindow(window, sync((d) => d.usageSamples(since), []), sync((d) => d.usageRuns(since), []), now)
+          return { window, label: windowLabel(window), percent: shareOf(split, keys), total: split.total, resetsAt: split.resetsAt, estimate: true as const }
+        }
+
         return Usage.of({
           view: Effect.sync(() => build()),
           refresh: (opened) => Effect.promise(() => refreshNow(opened)).pipe(Effect.map(() => build())),
@@ -223,12 +235,12 @@ export class Usage extends Context.Service<Usage, UsageApi>()('chat-v2/Usage') {
             resume = f
             for (const p of sync((d) => d.usagePauses(), [])) schedule(p)
           },
-          share: ({ keys, window = 'seven_day' }) =>
+          share: ({ keys, window = 'seven_day' }) => Effect.sync(() => shareOf_(keys, window)),
+          jobShare: (jobId) =>
             Effect.sync(() => {
-              const now = Date.now()
-              const since = now - (windowLength(window) ?? 7 * 86_400_000) - 86_400_000
-              const split = splitWindow(window, sync((d) => d.usageSamples(since), []), sync((d) => d.usageRuns(since), []), now)
-              return { window, label: windowLabel(window), percent: shareOf(split, keys), total: split.total, resetsAt: split.resetsAt, estimate: true as const }
+              if (authNow() !== 'login') return []
+              const keys = sync((d) => d.jobThreadIds(jobId), [])
+              return ['five_hour', 'seven_day'].map((w) => shareOf_(keys, w)).filter((s) => s.total !== null)
             })
         })
       })

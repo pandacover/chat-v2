@@ -1,10 +1,9 @@
 <script lang="ts">
   // Settings › Usage: what Anthropic reports for the account (a Claude plan's windows and extra
-  // usage, or an API key's dollars), replies paused at a limit, and the open chat's estimated share.
+  // usage, or an API key's dollars), replies paused at a limit, and the current job's use and estimated share.
   // Opening it reads the meter again; nothing is polled.
   import { onDestroy, onMount } from 'svelte'
-  import type { UsageShare } from '@shared/usage'
-  import { extraLine, formatMoney, formatPercent, limitName, noticeText, resetPhrase, shareLabel, tone, whenPhrase } from '@shared/usage'
+  import { extraLine, formatMoney, formatPercent, jobUsageLine, limitName, noticeText, resetPhrase, shareLabel, tone, whenPhrase } from '@shared/usage'
   import { fade } from '@/lib/motion'
   import { meter } from '@/lib/meter.svelte'
   import { app } from '@/lib/store.svelte'
@@ -16,27 +15,17 @@
   const ticker = setInterval(() => (now = Date.now()), 30_000)
   onDestroy(() => clearInterval(ticker))
 
-  let shares = $state<UsageShare[]>([])
-  const chat = $derived(app.view?.session ?? null)
-  /** The open chat's estimated share of the 5-hour window and of the week (usage.share, a later phase's per-job call). */
-  const loadShare = async () => {
-    const id = app.view?.session.id
-    const read = (w: string) => (id ? window.api.usage.share([id], w).catch(() => null) : Promise.resolve(null))
-    shares = (await Promise.all([read('five_hour'), read('seven_day')])).filter((s): s is UsageShare => s !== null && s.total !== null)
-  }
+  /** The job the open conversation is on: a job's thread, or in Tomo's conversation the current one (or none). */
+  const job = $derived(app.currentJob)
+  const shares = $derived(job ? (meter.shares.get(job.id) ?? []) : [])
+  const loadShare = () => (job ? meter.loadJob(job.id) : Promise.resolve())
   onMount(() => {
     meter.start()
     void meter.refresh().then(loadShare)
   })
 
-  const titleOf = (sessionId: string) => app.sessions.find((s) => s.id === sessionId)?.title ?? 'A chat'
-  const continueNow = async (sessionId: string, messageId: string) => {
-    const view = await app.attempt(() => window.api.chat.continue({ sessionId, assistantId: messageId }))
-    if (view && app.view?.session.id === sessionId) {
-      app.liveIds.add(messageId)
-      app.setView(view)
-    }
-  }
+  /** A paused reply's job, by its thread. */
+  const titleOf = (sessionId: string) => app.jobByThread.get(sessionId)?.title ?? app.sessions.find((s) => s.id === sessionId)?.title ?? 'A job'
   const ago = (at: number) => {
     const s = Math.round((now - at) / 1000)
     return s < 60 ? 'just now' : s < 3600 ? `${Math.round(s / 60)} min ago` : new Date(at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
@@ -121,20 +110,26 @@
       </div>
     {/if}
 
-    {#if chat && shares.length > 0}
-      <div class="mono-label mx-0.5 mt-[22px] mb-2.5">This chat</div>
-      <div class="group-card">
-        <div class="srow">
-          <div class="l">
-            <b class="truncate">{chat.title}</b>
-            <span>An estimate: Anthropic reports usage per account, so each rise is split across the replies that ran then, by what they'd cost.</span>
-          </div>
+  {/if}
+
+  {#if v && job}
+    <div class="mono-label mx-0.5 mt-[22px] mb-2.5">This job</div>
+    <div class="group-card">
+      <div class="srow" data-usage-job={job.id}>
+        <div class="l">
+          <b class="truncate">{job.title}</b>
+          <span>
+            {job.usage && job.usage.replies > 0 ? `${jobUsageLine(job.usage)} over ${job.usage.replies} ${job.usage.replies === 1 ? 'reply' : 'replies'}, at API prices.` : 'Nothing used yet.'}
+            {#if shares.length > 0}Its share is an estimate: Anthropic reports usage per account, so each rise is split across the replies that ran then, by what they'd cost.{/if}
+          </span>
+        </div>
+        {#if shares.length > 0}
           <span class="flex shrink-0 flex-col items-end text-[13px] text-fg-2">
             {#each shares as s (s.window)}<span data-usage-share={s.window}>{shareLabel(s)}</span>{/each}
           </span>
-        </div>
+        {/if}
       </div>
-    {/if}
+    </div>
   {/if}
 
   {#if v && v.pauses.length > 0}
@@ -147,7 +142,7 @@
             <span>Paused at your {limitName(p.window)}. Continues {whenPhrase(p.resumeAt, now)}.</span>
           </div>
           <div class="flex shrink-0 gap-1">
-            <button class="btn solid sm" onclick={() => continueNow(p.sessionId, p.messageId)}>Continue now</button>
+            <button class="btn solid sm" onclick={() => meter.continueNow(p)}>Continue now</button>
             <button class="btn sm" onclick={() => meter.cancel(p.messageId)}>Cancel</button>
           </div>
         </li>

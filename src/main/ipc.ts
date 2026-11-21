@@ -290,6 +290,7 @@ const handlers: Record<string, Handler> = {
   'usage:get': () => Usage.use((u) => u.view.pipe(Effect.tap(() => Effect.forkDetach(u.refresh(false))))),
   'usage:refresh': () => Usage.use((u) => u.refresh(true)),
   'usage:cancelPause': (messageId) => Usage.use((u) => u.cancelPause(str(messageId, 'messageId'))),
+  'usage:jobShare': (jobId) => Usage.use((u) => u.jobShare(str(jobId, 'jobId'))),
   'usage:share': (keys, window) => Usage.use((u) => u.share({ keys: ids(keys), ...(typeof window === 'string' ? { window } : {}) })),
 
   'computer:supported': () => ComputerUse.use((c) => Effect.succeed(c.supported)),
