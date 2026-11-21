@@ -7,9 +7,13 @@
 //   2. A model (Settings → memoryModel) reads what is left, with the facts so far and the
 //      assistant's previous message for context, and replies with facts to add, update or
 //      remove. Facts naming things the message never mentioned are dropped.
-// The profile is sent to the chat model once per chat (see Db.sessionMemoryRev).
-import type { MemoryFact } from '@shared/types'
-import type { MemoryChange } from './services/Db'
+// The profile is sent to the chat model once per chat (see Db.sessionMemoryRev). Facts are profile
+// records (services/memoryStore.ts): an update is a new version of the same record.
+import type { MemoryRecord, MemoryRecordType } from '@shared/types'
+import type { MemoryChange, NewFact } from './services/memoryStore'
+
+/** What the extractor sees of a profile record. */
+export type ProfileFact = Pick<MemoryRecord, 'id' | 'body'>
 
 /** Characters of a message the extractor reads; personal details come early, pastes later. */
 const SOURCE_CHARS = 2000
@@ -62,12 +66,12 @@ Don't record: the request itself (what they ask you to do or answer in this mess
 Only record what the user's message says. The assistant's message is context: never record something only the assistant said. Never guess, fill in likely details, or repeat anything from these instructions.
 
 Reply with JSON only, in this shape (every part optional):
-{"add": ["<new fact>"], "update": [{"id": <number of a fact above>, "fact": "<corrected fact>"}], "remove": [<number of a fact above>]}
-Write each fact as one short sentence about the user that starts with a verb ("Is", "Works", "Has", "Prefers", and so on), never with "The user" or their name. Use "update" when the message changes a fact you already have, "remove" when it says a fact is no longer true, and leave out anything already in the profile. Most messages contain nothing worth keeping; then reply {}.`
+{"add": [{"fact": "<new fact>", "type": "<type>", "title": "<name>"}], "update": [{"id": <number of a fact above>, "fact": "<corrected fact>"}], "remove": [<number of a fact above>]}
+Write each fact as one short sentence about the user that starts with a verb ("Is", "Works", "Has", "Prefers", and so on), never with "The user" or their name. Its type is "person" for who the user is and the people and pets in their life, "preference" for tastes and how they like answers, "project" for what they are working on or pursuing, and "procedure" for how they do things and the tools they use. Give a title only when the fact is about someone or something with a name (a person, a pet, a project), and then just the name, as the message writes it. Use "update" when the message changes a fact you already have, "remove" when it says a fact is no longer true, and leave out anything already in the profile. Most messages contain nothing worth keeping; then reply {}.`
 
 /** The extractor's user turn: the profile so far, what the assistant last said, then the message. */
-export const memoryPrompt = (facts: readonly MemoryFact[], source: string, previous: string | null = null) => {
-  const profile = facts.length ? facts.map((f) => `${f.id}. ${f.fact}`).join('\n') : '(empty)'
+export const memoryPrompt = (facts: readonly ProfileFact[], source: string, previous: string | null = null) => {
+  const profile = facts.length ? facts.map((f) => `${f.id}. ${f.body}`).join('\n') : '(empty)'
   const context = previous?.trim() ? `<assistant>\n…${previous.trim().slice(-CONTEXT_CHARS)}\n</assistant>\n\n` : ''
   return `Profile so far:\n${profile}\n\n${context}<message>\n${source}\n</message>`
 }
@@ -123,7 +127,18 @@ export interface MemoryReading {
  * get field shapes slightly wrong. Ids that aren't in `facts` are dropped, and so are facts
  * not grounded in `source` (the message). Returns null when the reply has no JSON in it.
  */
-export const parseMemoryReply = (reply: string, facts: readonly MemoryFact[], source: string): MemoryReading | null => {
+const TYPES: readonly MemoryRecordType[] = ['preference', 'person', 'project', 'procedure']
+const NAME_CHARS = 60
+
+/** A title or alias the extractor gave, kept only when the message says it; else null. */
+const cleanName = (raw: unknown, source: string): string | null => {
+  if (typeof raw !== 'string') return null
+  const name = raw.replace(/\s+/g, ' ').trim().replace(/[.!?]+$/, '')
+  if (!name || name.length > NAME_CHARS || isSensitive(name)) return null
+  return source.toLowerCase().includes(name.toLowerCase()) ? name : null
+}
+
+export const parseMemoryReply = (reply: string, facts: readonly ProfileFact[], source: string): MemoryReading | null => {
   const start = reply.indexOf('{')
   const end = reply.lastIndexOf('}')
   if (start < 0 || end <= start) return null
@@ -148,8 +163,19 @@ export const parseMemoryReply = (reply: string, facts: readonly MemoryFact[], so
     return fact && grounded(fact, source) ? fact : null
   }
   const add = list(data.add)
-    .map((x) => keep(typeof x === 'object' && x ? (x as { fact?: unknown }).fact : x))
-    .filter((f): f is string => f !== null)
+    .map((x): NewFact | null => {
+      if (!x || typeof x !== 'object') return keep(x)
+      const item = x as { fact?: unknown; type?: unknown; title?: unknown; aliases?: unknown }
+      const fact = keep(item.fact)
+      if (!fact) return null
+      const type = TYPES.find((t) => t === item.type)
+      const title = cleanName(item.title, source)
+      const aliases = list(item.aliases).flatMap((a) => cleanName(a, source) ?? [])
+      // Without a type or a name it is a plain fact, as a reply of bare strings gives.
+      if (!type && !title && aliases.length === 0) return fact
+      return { fact, type: type ?? 'person', ...(title ? { title } : {}), ...(aliases.length ? { aliases } : {}) }
+    })
+    .filter((f): f is NewFact => f !== null)
     .slice(0, MAX_ADDS)
   const update = list(data.update).flatMap((x) => {
     const u = (x && typeof x === 'object' ? x : {}) as { id?: unknown; fact?: unknown }
@@ -165,7 +191,10 @@ export const parseMemoryReply = (reply: string, facts: readonly MemoryFact[], so
 }
 
 /** The profile as the chat model sees it, at the end of the system prompt. */
-export const profileBlock = (facts: readonly MemoryFact[]) =>
+export const profileBlock = (facts: readonly Pick<MemoryRecord, 'body'>[]) =>
   facts.length === 0
     ? ''
-    : `What you know about the user from earlier conversations (it may be out of date; use it where it helps, and don't mention it for its own sake):\n${facts.map((f) => `- ${f.fact}`).join('\n')}`
+    : `What you know about the user from earlier conversations (it may be out of date; use it where it helps, and don't mention it for its own sake):\n${facts.map((f) => `- ${plainBody(f.body)}`).join('\n')}`
+
+/** A record's text for a prompt: [[links]] read as the names they are. */
+export const plainBody = (body: string) => body.replace(/\[\[([^[\]\n]{1,80})\]\]/g, '$1')
