@@ -139,6 +139,8 @@
       if (!chasing) return
       chasing = false
       el.scrollTo({ top: el.scrollTop })
+      // Stopped short of the end: no longer following it, and Scroll to end is on offer again.
+      pinned = el.scrollHeight - el.scrollTop - el.clientHeight < 80
     }
     // The glide ended short of an end that moved meanwhile: finish the chase there.
     const ended = () => {
