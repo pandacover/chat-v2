@@ -94,8 +94,13 @@ try {
   await capture('resumed')
 
   // 2. A computer look run for real: its PostToolUse hook pauses the reply.
+  // Computer use is Tomo's (Settings › Bots), not a switch of the chat: the composer's tools open it there.
+  await page.locator('button[data-tools]').click()
+  await page.locator('[data-bot]').waitFor()
   await page.getByRole('switch', { name: 'Computer' }).click()
   await page.getByRole('switch', { name: 'Computer', checked: true }).waitFor()
+  await page.keyboard.press('Escape')
+  await page.locator('button[data-tools~="computer"]').waitFor()
   await send('Keep looking at the screen')
   await until(async () => (await card().count()) === 1, 'a computer reply looping on its look pauses too', 15_000)
   const why = await card().locator('[data-pause-reason]').innerText()

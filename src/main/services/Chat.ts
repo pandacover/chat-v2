@@ -4,7 +4,7 @@ import { ARTIFACT_INSTRUCTIONS } from '@shared/artifacts'
 import { makeLineBuffer } from '@shared/lines'
 import { isClaudeModel } from '@shared/models'
 import { stepLine, summarizeSteps } from '@shared/steps'
-import type { MemoryRun, Message, MessageStatus, NewAttachmentInput, Session, SessionView, Settings, StreamEvent, Usage } from '@shared/types'
+import type { Bot, Effort, MemoryRun, Message, MessageStatus, NewAttachmentInput, Session, SessionView, Settings, StreamEvent, Usage } from '@shared/types'
 import { type ConfigError, type DbError, InvalidInput, type MissingApiKey, type NotFound, ProviderError, errorMessage } from '../errors'
 import { WRITING_GUIDELINES } from '../guidelines'
 import { jobsBlock, jobsNote } from '../jobs'
@@ -19,6 +19,7 @@ import { recallModule } from '../agent/recall'
 import { jobNotesBlock, noteModule } from '../agent/notes'
 import { HISTORY_NOTE, type TurnPlan, continueNote, planTurn, transcriptText } from '../agent/history'
 import type { ToolModuleFactory } from '../agent/module'
+import { type Gate, decide as decideAccess, ruled } from '../agent/rules'
 import { ComputerUse, type Mode, decideMode, effortFor, handsOver, modeTag, teachAnswer } from '../computer'
 import { Attachments } from './Attachments'
 import { Browser } from './Browser'
@@ -63,7 +64,11 @@ export const cleanTitle = (reply: string): string | null => {
 const chatModel = (session: Session, settings: Settings | null, botModel: string | null) =>
   isClaudeModel(session.model) ? session.model : isClaudeModel(botModel) ? botModel : (settings?.defaultModel ?? null)
 
-/** Added to the system prompt when a chat has both the browser and computer use on. */
+const EFFORT_ORDER: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
+/** The lower of two efforts. */
+export const lowerEffort = (a: Effort, b: Effort): Effort => (EFFORT_ORDER.indexOf(a) <= EFFORT_ORDER.indexOf(b) ? a : b)
+
+/** Added to the system prompt when a bot has both the browser and computer use on. */
 export const BROWSER_AND_COMPUTER_NOTE =
   "Both the browser panel and computer use are on. Use the browser panel's tools for web pages, so the user can watch in the chat window, and the computer tools for their own apps, files and settings. Open a page in the user's own browser only when they ask for that."
 
@@ -138,7 +143,13 @@ export class Chat extends Context.Service<
       const undoing = computer.onDoing((e) => broadcaster.send({ type: 'computerDoing', messageId: e.messageId, doing: e.doing }))
       yield* Effect.addFinalizer(() => Effect.sync(undoing))
 
-      const computerOn = (session: Session) => session.computerEnabled && computer.supported
+      // What a reply may use is its bot's: its modules, and its rules for each call (agent/rules.ts).
+      const computerOn = (bot: Bot) => bot.modules.includes('computer') && computer.supported
+      /** Decides a reply's calls by its bot's rules, and asks on the approval card computer use shows. */
+      const gateFor = (bot: Bot): Gate => ({
+        decide: (tool, input) => decideAccess(bot, tool, input),
+        ask: (ctx, title, detail, signal) => Effect.runPromise(computer.ask({ sessionId: ctx.sessionId, messageId: ctx.messageId }, title, detail), { signal })
+      })
       /** What the chat's last message was read as (do it, or show me how); a follow-up like "next" keeps it. */
       const lastMode = (sessionId: string): Mode =>
         Effect.runSync(db.use((d) => d.getSession(sessionId)?.computerMode ?? 'do').pipe(Effect.orElseSucceed(() => 'do' as const)))
@@ -167,21 +178,26 @@ export class Chat extends Context.Service<
       // Job notes, which the bots on a job write as they work (agent/notes.ts).
       const notes = noteModule((jobId, note, origin) => Effect.runPromise(db.use((d) => d.writeNote(jobId, note, origin))))
 
-      /** The tool sets a reply in `session` gets, built afresh for each reply. */
-      const toolSets = (session: Session): ToolModuleFactory[] => [
-        ...(session.jobId ? [notes] : []),
-        ...(session.browserEnabled ? [browserModule(browser)] : []),
-        ...(computerOn(session)
-          ? [
-              (ctx: Parameters<ToolModuleFactory>[0]) =>
-                computer.module(ctx, {
-                  mode: () => computerReplies.get(ctx.messageId) ?? 'do',
-                  setMode: (mode) => void switchMode(ctx.sessionId, ctx.messageId, mode),
-                  stop: () => void Effect.runFork(stop(ctx.messageId))
-                })
-            ]
-          : [])
-      ]
+      /** The tool sets a reply in `session` gets from `bot`, built afresh for each reply, each call under the bot's rules. */
+      const toolSets = (session: Session, bot: Bot, withMemory: boolean): ToolModuleFactory[] => {
+        const gate = gateFor(bot)
+        return [
+          ...(session.jobId ? [ruled(notes, gate)] : []),
+          ...(bot.modules.includes('browser') ? [ruled(browserModule(browser), gate)] : []),
+          ...(computerOn(bot)
+            ? [
+                (ctx: Parameters<ToolModuleFactory>[0]) =>
+                  computer.module(ctx, {
+                    mode: () => computerReplies.get(ctx.messageId) ?? 'do',
+                    setMode: (mode) => void switchMode(ctx.sessionId, ctx.messageId, mode),
+                    stop: () => void Effect.runFork(stop(ctx.messageId)),
+                    decide: gate.decide
+                  })
+              ]
+            : []),
+          ...(withMemory ? [ruled(recall, gate)] : [])
+        ]
+      }
 
       // One fiber per streaming assistant message. Closing the layer (app quit)
       // interrupts them all, which marks their messages `interrupted`.
@@ -341,7 +357,7 @@ export class Chat extends Context.Service<
               exists: agent.hasSession
             })
           )
-          const usesComputer = computerOn(session)
+          const usesComputer = computerOn(bot)
           let mode: Mode | null = null
           if (usesComputer) {
             // A new reply reads its message for what the user wants; continuing keeps the mode.
@@ -365,7 +381,7 @@ export class Chat extends Context.Service<
             WRITING_GUIDELINES,
             settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : '',
             HISTORY_NOTE,
-            session.browserEnabled && usesComputer ? BROWSER_AND_COMPUTER_NOTE : ''
+            bot.modules.includes('browser') && usesComputer ? BROWSER_AND_COMPUTER_NOTE : ''
           ]
             .map((s) => s.trim())
             .filter(Boolean)
@@ -395,13 +411,13 @@ export class Chat extends Context.Service<
                   jobId: session.jobId,
                   messageId: assistant.id,
                   model: runOn,
-                  // Computer use makes many short click-and-look calls; Tomo's effort suits them.
-                  effort: usesComputer ? effortFor(runOn) : (bot.effort ?? settings.effort),
+                  // Computer use makes many short click-and-look calls: the bot thinks at most what suits them.
+                  effort: usesComputer ? lowerEffort(bot.effort ?? settings.effort, effortFor(runOn)) : (bot.effort ?? settings.effort),
                   instructions,
                   profile: [profileBlock(facts), playbookBlock(playbook)].filter(Boolean).join('\n\n'),
                   prompt,
                   session: { id: sessionId, resume: plan.resume, baseCost: plan.baseCost },
-                  modules: [...toolSets(session), ...(settings.memoryModel ? [recall] : [])],
+                  modules: toolSets(session, bot, !!settings.memoryModel),
                   auth,
                   watch: (control) =>
                     makeWatch(

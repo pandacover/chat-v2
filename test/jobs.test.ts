@@ -84,7 +84,7 @@ describe('the migration to bots and jobs', () => {
 
     const bots = db.listBots()
     expect(bots).toHaveLength(1)
-    expect(bots[0]).toMatchObject({ id: 'tomo', name: 'Tomo', avatar: 'mascot', isPrimary: true, instructions: null, modules: ['browser', 'computer'] })
+    expect(bots[0]).toMatchObject({ id: 'tomo', name: 'Tomo', avatar: 'mascot', isPrimary: true, instructions: null, modules: [] })
 
     const jobs = db.listJobs()
     expect(jobs.map((j) => [j.id, j.title, j.status, j.threadId, j.ownerBotId])).toEqual([

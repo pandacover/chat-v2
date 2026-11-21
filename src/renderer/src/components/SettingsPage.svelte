@@ -12,7 +12,9 @@
   import ModelPicker from './ModelPicker.svelte'
   import UsageSettings from './UsageSettings.svelte'
   import { meter } from '@/lib/meter.svelte'
+  import BotsSettings from './BotsSettings.svelte'
   import BotAvatar from './BotAvatar.svelte'
+  import { takeSettingsTab } from '@/lib/settingsNav'
   import { mascotUrl } from './Mascot.svelte'
 
   let form = $state<Settings>({ ...app.settings!.settings })
@@ -21,17 +23,21 @@
   let scroller: HTMLDivElement | undefined = $state()
 
   // One tab at a time, picked from the list on the left. Missing the API key it needs, the account comes first.
-  type Tab = 'model' | 'memory' | 'voice' | 'account' | 'usage' | 'appearance' | 'about'
+  type Tab = 'bots' | 'model' | 'memory' | 'voice' | 'account' | 'usage' | 'appearance' | 'about'
   const tabs: Array<{ id: Tab; label: string; icon: IconName }> = [
     { id: 'account', label: 'Account', icon: 'key' },
     { id: 'usage', label: 'Usage', icon: 'gauge' },
+    { id: 'bots', label: 'Bots', icon: 'sliders' },
     { id: 'model', label: 'Model', icon: 'sparkle' },
     { id: 'memory', label: 'Memory', icon: 'brain' },
     { id: 'voice', label: 'Voice', icon: 'mic' },
     { id: 'appearance', label: 'Appearance', icon: 'type' },
     { id: 'about', label: 'About', icon: 'info' }
   ]
-  let tab = $state<Tab>(meter.takeTab() ? 'usage' : app.settings!.settings.auth === 'apiKey' && !app.settings!.hasAnthropicKey ? 'account' : 'model')
+  const asked = takeSettingsTab()
+  let tab = $state<Tab>(
+    tabs.find((t) => t.id === asked)?.id ?? (meter.takeTab() ? 'usage' : app.settings!.settings.auth === 'apiKey' && !app.settings!.hasAnthropicKey ? 'account' : 'bots')
+  )
   const show = (id: Tab) => {
     tab = id
     scroller?.scrollTo({ top: 0 })
@@ -61,44 +67,11 @@
     savedTimer = setTimeout(() => (status = 'idle'), 1600)
   }
 
-  // The primary bot's model, thinking and instructions: what Tomo answers with. They started as
-  // Settings' own, and are the bot's now (each job can still pick its own model or instructions).
-  const primary = app.primaryBot
-  let bot = $state({
-    model: primary?.model ?? form.defaultModel,
-    effort: primary?.effort ?? form.effort,
-    instructions: primary?.instructions ?? form.systemPrompt
-  })
-  let botTimer: ReturnType<typeof setTimeout> | undefined
-  let firstBot = true
-  $effect(() => {
-    const snapshot = $state.snapshot(bot)
-    if (firstBot) {
-      firstBot = false
-      return
-    }
-    clearTimeout(botTimer)
-    botTimer = setTimeout(() => void persistBot(snapshot), 450)
-  })
-  const persistBot = async (patch: typeof bot) => {
-    botTimer = undefined
-    if (!primary) return
-    status = 'saving'
-    if (!(await app.updateBot(primary.id, patch))) return void (status = 'idle')
-    status = 'saved'
-    clearTimeout(savedTimer)
-    savedTimer = setTimeout(() => (status = 'idle'), 1600)
-  }
-
   onDestroy(() => {
     // Leaving mid-debounce still saves.
     if (timer) {
       clearTimeout(timer)
       void persist($state.snapshot(form))
-    }
-    if (botTimer) {
-      clearTimeout(botTimer)
-      void persistBot($state.snapshot(bot))
     }
   })
 
@@ -258,13 +231,6 @@
   const auths = [
     { id: 'login', label: 'Claude sign-in', hint: '' },
     { id: 'apiKey', label: 'API key', hint: '' }
-  ]
-  const efforts = [
-    { id: 'low', label: 'Low', hint: 'Answers quickly and thinks little. Cheapest.' },
-    { id: 'medium', label: 'Medium', hint: 'Thinks where it helps. The default.' },
-    { id: 'high', label: 'High', hint: 'Thinks longer before it answers, for harder questions.' },
-    { id: 'xhigh', label: 'Higher', hint: 'Thinks much longer. Slower and costs more.' },
-    { id: 'max', label: 'Max', hint: 'Thinks as long as it needs. The slowest and most expensive.' }
   ]
   const themes = [
     { id: 'light', label: 'Light' },
@@ -462,27 +428,14 @@
         <UsageSettings />
       {/if}
 
+      {#if tab === 'bots'}
+        <BotsSettings onstatus={(s) => (status = s)} />
+      {/if}
+
       {#if tab === 'model'}
         <section id="settings-model">
           <h3 class="mt-1.5 mb-1 font-display text-[22px] leading-[1.2] font-normal tracking-[-0.02em]">Model</h3>
-          <p class="mb-5 text-fg-3">How {primary?.name ?? 'Tomo'} answers. Each job can pick its own model in the composer.</p>
-          <div class="group-card" data-primary-bot>
-            <div class="srow !justify-start !gap-3.5">
-              <BotAvatar bot={primary} size={44} />
-              <div class="l">
-                <b>{primary?.name ?? 'Tomo'}</b>
-                <span>Your primary bot. It hears everything you say without picking a job (typed, or with <span class="whitespace-nowrap">{shortcut('M')}</span>), and opens a job for each topic.</span>
-              </div>
-            </div>
-            <div class="srow">
-              <div class="l"><b>Model</b><span>Replies run on this unless a job picks its own</span></div>
-              <div class="w-[200px] shrink-0"><ModelPicker block value={bot.model} onchange={(id) => (bot.model = id)} /></div>
-            </div>
-            <div class="srow !flex-col !items-stretch !gap-2.5">
-              <div class="l"><b>Thinking</b><span>{efforts.find((e) => e.id === bot.effort)?.hint} Models that don't think ignore this.</span></div>
-              <div>{@render segmented(efforts, bot.effort, (v) => (bot.effort = v as Settings['effort']))}</div>
-            </div>
-          </div>
+          <p class="mb-5 text-fg-3">The small model and what replies can make. Each bot's own model is in Bots, and each job can pick its own in the composer.</p>
           <div class="group-card">
             <div class="srow">
               <div class="l"><b>Small model</b><span>Names jobs, picks the job each message belongs to, and keeps each job's one-line summary. Haiku is enough, at a fraction of a cent a call. With none, a message stays in the current job.</span></div>
@@ -491,25 +444,6 @@
             <div class="srow">
               <div class="l"><b>Interactive artifacts</b><span>The model can build small HTML apps that run in the side panel</span></div>
               {@render toggle(form.artifactsEnabled, 'Interactive artifacts', () => (form.artifactsEnabled = !form.artifactsEnabled))}
-            </div>
-          </div>
-          <div class="group-card" id="settings-instructions">
-            <div class="srow">
-              <div class="l">
-                <div class="flex items-baseline gap-2">
-                  <b>System instructions</b>
-                  <button class="ml-auto inline-flex items-center gap-1 text-[12px] text-fg-3 hover:text-fg" use:tip={app.settings!.configPath} onclick={() => window.api.settings.openConfigFile()}>
-                    Open config.json <Icon name="external" size={11} />
-                  </button>
-                </div>
-                <span>{primary?.name ?? 'Tomo'}'s instructions, sent with every reply. A job can replace them with its own from the button at its top right.</span>
-                <textarea
-                  bind:value={bot.instructions}
-                  rows="5"
-                  aria-label="System instructions"
-                  class="mt-2.5 block min-h-[84px] w-full resize-y rounded-[10px] bg-transparent px-3 py-2.5 text-[13.5px] shadow-[inset_0_0_0_1px_var(--line)] outline-none focus:shadow-[inset_0_0_0_1px_var(--line-2)]"
-                ></textarea>
-              </div>
             </div>
           </div>
         </section>
