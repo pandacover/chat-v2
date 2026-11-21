@@ -337,7 +337,7 @@
     overflow-clip-margin: 6px;
   }
   .row.head {
-    contain-intrinsic-block-size: auto 44px;
+    contain-intrinsic-block-size: auto 40px;
   }
   .nav-item {
     display: flex;

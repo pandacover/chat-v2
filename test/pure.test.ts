@@ -60,6 +60,22 @@ describe('artifacts', () => {
     const fenced = parseContent('<artifact title="B">\n```html\n<b>x</b>\n```\n</artifact>')
     expect(fenced[0]).toMatchObject({ content: '<b>x</b>', identifier: 'artifact-1', complete: true })
   })
+
+  test('the cached parse gives what parseContent does, and the same blocks for the same text', () => {
+    for (const content of ['', '  \n ', 'Just prose.', 'Before <artifact identifier="x" title="X">\n<p>hi</p>\n</artifact> after', '<ARTIFACT id="y">\n<b>', 'a\n\nb']) {
+      expect([...parseContentCached(content)]).toEqual(parseContent(content))
+    }
+    const text = 'Hello <artifact identifier="z" title="Z">\n<i>z</i>\n</artifact>'
+    expect(parseContentCached(text)).toBe(parseContentCached(['Hello ', '<artifact identifier="z" title="Z">\n<i>z</i>\n</artifact>'].join('')))
+  })
+
+  test('keyed by message, a reply being written replaces its entry and is parsed afresh', () => {
+    const first = parseContentCached('<artifact identifier="k" title="K">\n<b>', 'message-1')
+    expect(first).toEqual([{ type: 'artifact', identifier: 'k', title: 'K', content: '<b>', complete: false }])
+    const next = parseContentCached('<artifact identifier="k" title="K">\n<b>x</b>\n</artifact>', 'message-1')
+    expect(next).toEqual([{ type: 'artifact', identifier: 'k', title: 'K', content: '<b>x</b>', complete: true }])
+    expect(parseContentCached('<artifact identifier="k" title="K">\n<b>x</b>\n</artifact>', 'message-1')).toBe(next)
+  })
 })
 
 describe('ad and tracker blocklist', () => {

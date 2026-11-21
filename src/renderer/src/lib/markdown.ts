@@ -85,8 +85,9 @@ const useCache = (highlighted: boolean) => {
   rendered.clear()
   renderedChars = 0
 }
-/** Whole messages are keyed apart from blocks (a message can be a single block). */
-const WHOLE = '\u0000'
+/** Whole messages and blocks are kept under keys that can't meet (a message can be one block). */
+const WHOLE = 'w'
+const BLOCK = 'b'
 
 export const renderMarkdown = (md: string, streaming = false): string => {
   const source = streaming ? closeOpenFence(md) : md
@@ -183,13 +184,13 @@ export const blockRenderer = () => {
         blocks.push(writingCode(token as Tokens.Code))
         continue
       }
-      let html = cache.get(token.raw) ?? next.get(token.raw) ?? (i === writing ? undefined : recall<string>(token.raw))
+      let html = cache.get(token.raw) ?? next.get(token.raw) ?? (i === writing ? undefined : recall<string>(BLOCK + token.raw))
       if (html === undefined) {
         // A code block's HTML is all made here, its code escaped by highlight.js or escapeHtml:
         // nothing in it to sanitize, and sanitizing a long highlighted block was most of its cost.
         const made = marked.parser([token])
         html = token.type === 'code' ? made : sanitize(made)
-        if (i !== writing) keep(token.raw, html)
+        if (i !== writing) keep(BLOCK + token.raw, html)
       }
       next.set(token.raw, html)
       if (html) blocks.push(html)

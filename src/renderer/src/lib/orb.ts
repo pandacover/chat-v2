@@ -374,17 +374,21 @@ const draw = (o: Orb, px: number, inverted: number) => {
  */
 const ACTIVE_GAP = 1000 / 60
 const IDLE_GAP = 1000 / 30
+/** When the next drawing is due. It moves on by the gap, so frames skipped round up and down and average out. */
+let due = 0
 
 const frame = (now: number) => {
   raf = 0
   if (orbs.size === 0) return
   let active = false
   for (const o of orbs) if (o.params.state || typeof o.params.level === 'number') active = true
-  // A millisecond of slack, so a 60 Hz display isn't held to every other frame.
-  if (now - last < (active ? ACTIVE_GAP : IDLE_GAP) - 1 && phase === 'ready') {
+  const gap = active ? ACTIVE_GAP : IDLE_GAP
+  // A millisecond of slack for the display's own jitter, so a 60 Hz one draws every frame.
+  if (now + 1 < due && phase === 'ready') {
     raf = requestAnimationFrame(frame)
     return
   }
+  due = Math.max(due, now - gap) + gap
   const delta = Math.max(0, (now - last) / 1000)
   last = now
   if (phase === 'compiling' && gl && prog && (!parallel || gl.getProgramParameter(prog, parallel.COMPLETION_STATUS_KHR))) {

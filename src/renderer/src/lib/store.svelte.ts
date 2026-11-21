@@ -47,7 +47,8 @@ const loadDrafts = (): Array<[string, Draft]> => {
 
 /** The new chat has no title yet; its draft's first line stands in. */
 export const draftTitle = (text: string) => {
-  // The start is enough for 60 characters: a pasted draft can be megabytes.
+  // The start is enough for 60 characters: a pasted draft can be megabytes. (Only a start that is
+  // mostly whitespace inside the text could make the title shorter than the whole would.)
   const line = text.trimStart().slice(0, 400).replace(/\s+/g, ' ').trim()
   return line.length > 60 ? `${line.slice(0, 57).trimEnd()}…` : line || 'New chat'
 }
@@ -144,7 +145,7 @@ class AppState {
     const out: Array<{ messageId: string; block: ArtifactBlock }> = []
     for (const { message } of this.view.path) {
       if (message.role !== 'assistant') continue
-      for (const b of parseContentCached(message.content)) {
+      for (const b of parseContentCached(message.content, message.id)) {
         if (b.type === 'artifact' && b.complete && b.identifier === open.identifier) out.push({ messageId: message.id, block: b })
       }
     }
@@ -180,7 +181,7 @@ class AppState {
     for (let i = path.length - 1; i >= 0; i--) {
       const m = path[i]!.message
       if (m.role !== 'assistant' || !/<artifact/i.test(m.content)) continue
-      const found = parseContentCached(m.content).findLast((b) => b.type === 'artifact' && b.complete)
+      const found = parseContentCached(m.content, m.id).findLast((b) => b.type === 'artifact' && b.complete)
       if (found && found.type === 'artifact') return { identifier: found.identifier, messageId: m.id }
     }
     return null

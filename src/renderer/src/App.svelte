@@ -14,7 +14,7 @@
 
   let ready = $state(false)
   let resizing = $state(false)
-  // Pixel width so the panel can animate open without its contents reflowing.
+  // Pixel width, kept by the panel's contents while it slides in and out.
   let panelWidth = $state(Math.round(window.innerWidth * 0.44))
   // The chat keeps at least 388px beside the sidebar, whatever width the sidebar was dragged to.
   const clampPanel = (px: number) =>
@@ -37,6 +37,15 @@
     easing: ease,
     css: (t: number) => `transform: translateX(${(1 - t) * width}px); opacity: ${Math.min(1, t * 1.5)}`
   })
+  /**
+   * Closing, the panel leaves the layout at once, staying where it sat (main's padding is 8px), so
+   * the chat widens as it slides away rather than all at once after. Position can't be animated,
+   * so it is set as the slide starts.
+   */
+  const leaveLayout = (e: Event) => {
+    const el = e.currentTarget as HTMLElement
+    Object.assign(el.style, { position: 'absolute', top: '8px', bottom: '8px', right: '8px' })
+  }
 
   onMount(async () => {
     await app.init()
@@ -119,7 +128,12 @@
       <div class="flex min-w-0 flex-1" inert={app.page !== 'chat'}>
         <ChatView />
         {#if app.panelOpen}
-          <div class="relative flex shrink-0 justify-end overflow-hidden" style="width: {panelWidth + 8}px" transition:reveal={{ width: panelWidth + 8 }}>
+          <div
+            class="relative flex shrink-0 justify-end overflow-hidden"
+            style="width: {panelWidth + 8}px"
+            transition:reveal={{ width: panelWidth + 8 }}
+            onoutrostart={leaveLayout}
+          >
             <div class="relative flex h-full shrink-0 pl-2" style="width: {panelWidth + 8}px">
               <div
                 role="separator"

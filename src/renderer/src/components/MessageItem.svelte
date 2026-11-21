@@ -38,7 +38,10 @@
   type Block = ContentBlock | { type: 'steps'; steps: Step[] }
   const blocks = $derived<Block[]>(
     message.role === 'assistant'
-      ? splitSteps(message.content).flatMap((seg): readonly Block[] => (seg.type === 'steps' ? [seg] : parseContentCached(seg.content)))
+      ? splitSteps(message.content).flatMap((seg, i): readonly Block[] =>
+          // Keyed by where the text is, so the reply being written replaces its cached parse.
+          seg.type === 'steps' ? [seg] : parseContentCached(seg.content, seg.content === message.content ? message.id : `${message.id}:${i}`)
+        )
       : []
   )
   const busy = $derived(app.streaming)

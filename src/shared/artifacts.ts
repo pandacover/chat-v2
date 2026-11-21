@@ -60,31 +60,36 @@ export const parseContent = (content: string): ContentBlock[] => {
   return blocks.filter((b) => b.type === 'artifact' || b.content.trim() !== '')
 }
 
-const parsed = new Map<string, readonly ContentBlock[]>()
-/** At most this many messages' blocks are kept, and at most about this many characters of them. */
+const parsed = new Map<string, { content: string; blocks: readonly ContentBlock[] }>()
+/** At most this many texts' blocks are kept, and at most about this many characters of them. */
 const PARSED_MAX = 300
 const PARSED_CHARS = 4_000_000
 let parsedChars = 0
 
 /**
- * parseContent, remembered by content: the chat view, the artifact panel and its toggle each
- * parse the same messages, and did again for every message on every streamed line.
- * The blocks are shared, so don't change them.
+ * parseContent, remembered: the chat view, the artifact panel and its toggle each parse the same
+ * messages, and did again for every message on every streamed line. `key` names where the text
+ * comes from (a message), so a reply being written replaces its own entry on each line rather
+ * than adding one. The blocks are shared, so don't change them.
  */
-export const parseContentCached = (content: string): readonly ContentBlock[] => {
-  let blocks = parsed.get(content)
-  if (blocks) {
-    parsed.delete(content)
-  } else {
-    blocks = /<artifact/i.test(content) ? parseContent(content) : /\S/.test(content) ? [{ type: 'text', content }] : []
-    parsedChars += content.length
-    for (const key of parsed.keys()) {
-      if (parsed.size < PARSED_MAX && parsedChars <= PARSED_CHARS) break
-      parsed.delete(key)
-      parsedChars -= key.length
+export const parseContentCached = (content: string, key: string = content): readonly ContentBlock[] => {
+  const known = parsed.get(key)
+  if (known) {
+    parsed.delete(key)
+    if (known.content === content) {
+      parsed.set(key, known)
+      return known.blocks
     }
+    parsedChars -= known.content.length
   }
-  parsed.set(content, blocks)
+  const blocks = /<artifact/i.test(content) ? parseContent(content) : /\S/.test(content) ? [{ type: 'text' as const, content }] : []
+  parsedChars += content.length
+  for (const [old, entry] of parsed) {
+    if (parsed.size < PARSED_MAX && parsedChars <= PARSED_CHARS) break
+    parsed.delete(old)
+    parsedChars -= entry.content.length
+  }
+  parsed.set(key, { content, blocks })
   return blocks
 }
 

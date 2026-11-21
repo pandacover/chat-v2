@@ -74,12 +74,14 @@
    */
   const FIRST = 24
   const CHUNK = 40
+  const MIN_CHUNK = 6
   let mounted = $state<{ id: string; from: number } | null>(null)
   /** Index of the first message on screen. */
   const from = $derived.by(() => {
     if (!view) return 0
-    if (mounted?.id === view.session.id) return mounted.from
-    return Math.max(0, view.path.length - FIRST)
+    const opening = Math.max(0, view.path.length - FIRST)
+    // Never past the last few: a branch switched while it mounts can make the chat shorter.
+    return mounted?.id === view.session.id ? Math.min(mounted.from, opening) : opening
   })
   $effect(() => {
     const id = view?.session.id
@@ -88,14 +90,16 @@
     if (untrack(() => mounted?.id) !== id) mounted = { id, from: start }
     if (start === 0) return
     const idle = requestIdleCallback(
-      async () => {
+      async (deadline) => {
         const el = scroller
+        // As many as fit in the idle time left (about a millisecond each), so a frame stays short.
+        const count = deadline.didTimeout ? MIN_CHUNK : Math.max(MIN_CHUNK, Math.min(CHUNK, Math.floor(deadline.timeRemaining())))
         // Scrolled up: the message that was first stays where it was on screen. The browser's own
         // scroll anchoring does this, but not at the very top, where what you read would be pushed
         // down by all that was added; whatever it already moved is counted.
         const first = !pinned ? (thread?.firstElementChild as HTMLElement | null | undefined) : null
         const was = first?.getBoundingClientRect().top
-        mounted = { id, from: Math.max(0, start - CHUNK) }
+        mounted = { id, from: Math.max(0, start - count) }
         if (!el || !first || was === undefined) return
         await tick()
         if (first.isConnected) el.scrollTop += first.getBoundingClientRect().top - was
@@ -128,14 +132,22 @@
       if (pinned) toBottom()
     })
     observer.observe(el)
-    // The user scrolls (a wheel, the scrollbar): Scroll to end stops chasing the end.
+    // The user scrolls (a wheel, the scrollbar, a key): Scroll to end stops chasing the end.
     const takeOver = () => (chasing = false)
+    // The glide ended short of an end that moved meanwhile: finish the chase there.
+    const ended = () => {
+      if (chasing && el.scrollHeight - el.scrollTop - el.clientHeight >= 80) toBottom()
+    }
     el.addEventListener('wheel', takeOver, { passive: true })
     el.addEventListener('pointerdown', takeOver)
+    el.addEventListener('keydown', takeOver)
+    el.addEventListener('scrollend', ended)
     return () => {
       observer.disconnect()
       el.removeEventListener('wheel', takeOver)
       el.removeEventListener('pointerdown', takeOver)
+      el.removeEventListener('keydown', takeOver)
+      el.removeEventListener('scrollend', ended)
     }
   })
 
@@ -143,6 +155,9 @@
     void view?.session.id
     pinned = true
     seenTop = seenHeight = 0
+    // A chat opens at its end, also when its thread is as tall as the last one's (a fork of its
+    // last message), which the thread's size observer doesn't see.
+    void tick().then(() => toBottom())
     untrack(() => voice.leaveHome())
     composer?.focus()
   })
