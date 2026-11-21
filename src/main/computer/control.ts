@@ -71,7 +71,7 @@ export const makeControl = (p: Platform) => {
     const fg = yield* lift(() => p.restoreFocus())
     if (fg.blocked) {
       return yield* new ControlError({
-        message: `"${fg.title || fg.process}" is running as administrator, so Windows blocks chat-v2's input to it. Tell the user; they can run chat-v2 as administrator to allow it.`
+        message: `"${fg.title || fg.process}" is running as administrator, so Windows blocks Tomo's input to it. Tell the user; they can run Tomo as administrator to allow it.`
       })
     }
     // Input now would land on Point's layer: the user has the screen, as after a takeover.
@@ -236,7 +236,7 @@ export const makeControl = (p: Platform) => {
     search: (q: SearchQuery): Ctl<ReadonlyArray<FileHit>> => lift(() => p.search(q)),
     open: (target: string): Ctl<void> => lift(() => p.open(target)),
     reveal: (path: string): Ctl<void> => lift(() => p.reveal(path)),
-    /** If a chat-v2 window has focus, hand it back to the app the user was in. */
+    /** If a Tomo window has focus, hand it back to the app the user was in. */
     restoreFocus: (): Ctl<WindowInfo> => lift(() => p.restoreFocus()),
     /** Forget where we left the cursor (a new user turn, or the user just acted). */
     resetTakeover: () => {

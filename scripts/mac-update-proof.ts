@@ -2,7 +2,7 @@
 // self-signed build to the next in place: the check the whole Mac update path rests on, since
 // Squirrel only installs an update that satisfies the running app's designated requirement.
 //
-//   bun scripts/mac-update-proof.ts <old chat-v2.app> <new version's zip> <new version>
+//   bun scripts/mac-update-proof.ts <old Tomo.app> <new version's zip> <new version>
 //
 // Copies the old app into /Applications (where users run it, and where macOS's App Management
 // protection applies to replacing it), serves the new zip with a latest-mac.yml from a local
@@ -18,7 +18,7 @@ import { basename, join } from 'node:path'
 
 const [oldApp, newZip, newVersion] = process.argv.slice(2)
 if (!oldApp || !newZip || !newVersion) {
-  console.error('Usage: bun scripts/mac-update-proof.ts <old chat-v2.app> <new zip> <new version>')
+  console.error('Usage: bun scripts/mac-update-proof.ts <old Tomo.app> <new zip> <new version>')
   process.exit(2)
 }
 
@@ -77,7 +77,7 @@ const env: Record<string, string | undefined> = {
 }
 delete env.ELECTRON_RUN_AS_NODE
 const data = mkdtempSync(join(tmpdir(), 'chat-v2-update-proof-data-'))
-const child = spawn(join(app, 'Contents/MacOS/chat-v2'), [`--user-data-dir=${data}`], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+const child = spawn(join(app, 'Contents/MacOS/Tomo'), [`--user-data-dir=${data}`], { env, stdio: ['ignore', 'pipe', 'pipe'] })
 child.stdout.on('data', (c: Buffer) => process.stdout.write(`[app] ${c}`))
 child.stderr.on('data', (c: Buffer) => process.stdout.write(`[app] ${c}`))
 

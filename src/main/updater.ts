@@ -46,8 +46,8 @@ export const offerMoveToApplications = async () => {
   if (!mac || !app.isPackaged || app.isInApplicationsFolder() || process.env.CHAT_V2_HEADLESS === '1') return
   const { response } = await dialog.showMessageBox({
     type: 'question',
-    message: 'Move chat-v2 to Applications?',
-    detail: 'chat-v2 can only update itself from the Applications folder.',
+    message: 'Move Tomo to Applications?',
+    detail: 'Tomo can only update itself from the Applications folder.',
     buttons: ['Move to Applications', 'Not Now'],
     defaultId: 0,
     cancelId: 1
@@ -57,7 +57,7 @@ export const offerMoveToApplications = async () => {
     // Moves the app, quits and relaunches the moved copy.
     app.moveToApplicationsFolder()
   } catch (e) {
-    await dialog.showMessageBox({ type: 'warning', message: "Couldn't move chat-v2", detail: errorMessage(e) })
+    await dialog.showMessageBox({ type: 'warning', message: "Couldn't move Tomo", detail: errorMessage(e) })
   }
 }
 

@@ -27,6 +27,16 @@ import { Db } from './services/Db'
 import { ElevenLabs } from './services/ElevenLabs'
 import { type SecretCipher, SettingsStore } from './services/SettingsStore'
 
+// The app was called chat-v2, and its data (chats, settings, keys) lives in a folder of that name.
+// Renamed Tomo, Electron would default to a new, empty "Tomo" folder: keep the old one. Not when
+// --user-data-dir is passed (tests pass a temp folder and must never touch real data).
+if (!app.commandLine.hasSwitch('user-data-dir')) app.setPath('userData', join(app.getPath('appData'), 'chat-v2'))
+// On macOS and Linux the key that encrypts saved API keys (safeStorage) is kept in the OS keychain
+// under the app's name ("chat-v2 Safe Storage"), read at startup: renamed, the app could no longer
+// decrypt them. So the name stays chat-v2 there, and the Mac menu says Tomo itself (menu.ts).
+// On Windows the key lives in the userData folder, so the name can follow the brand.
+app.setName(process.platform === 'win32' ? 'Tomo' : 'chat-v2')
+
 registerSchemes()
 
 const cipher: SecretCipher = {
@@ -156,7 +166,7 @@ const agentDeps = (root: string): AgentDeps => {
     query: process.env.CHAT_V2_FAKE_QUERY ? (load(process.env.CHAT_V2_FAKE_QUERY) as { query: QueryFn }).query : query,
     configDir,
     cwd: root,
-    clientApp: `chat-v2/${app.getVersion()}`,
+    clientApp: `tomo/${app.getVersion()}`,
     ...(app.isPackaged ? { executable: claudeBinary() } : {}),
     // Started as the SDK would, but tracked, so quitting ends every Claude Code process.
     spawn: (o) => {
@@ -257,8 +267,9 @@ const createWindow = async () => {
     minWidth: 760,
     minHeight: 520,
     show: false,
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#171614' : '#f7f5f0',
-    title: 'chat-v2',
+    // The sidebar's colour (app.css --side), so the window never flashes another before it paints.
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#09090a' : '#f5f3f1',
+    title: 'Tomo',
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),

@@ -243,7 +243,7 @@ describe.skipIf(!live)('linux platform on a live display', () => {
     xterm('cu-test-a')
     xterm('cu-test-b')
     xterm('cu-café — ✓')
-    // Stands in for chat-v2's own window: its pid is the owner pid.
+    // Stands in for Tomo's own window: its pid is the owner pid.
     owner = xterm('cu-owner')
     await waitFor(async () => (await p().windows()).filter((w) => w.title.startsWith('cu-')).length === 3)
     await waitFor(() => spawnSync('wmctrl', ['-l']).stdout.toString().includes('cu-owner'))
@@ -254,7 +254,7 @@ describe.skipIf(!live)('linux platform on a live display', () => {
     if (dir) rmSync(dir, { recursive: true, force: true })
   })
 
-  test('lists app windows but not chat-v2 own, with non-ASCII titles intact', async () => {
+  test("lists app windows but not Tomo's own, with non-ASCII titles intact", async () => {
     const ws = await p().windows()
     const titles = ws.map((w) => w.title)
     expect(titles).toContain('cu-test-a')
@@ -273,12 +273,12 @@ describe.skipIf(!live)('linux platform on a live display', () => {
     await expect(plat.focusWindow('  ')).rejects.toThrow('Give the window title')
   })
 
-  test('remember skips chat-v2 and restoreFocus brings the app back', async () => {
+  test('remember skips Tomo and restoreFocus brings the app back', async () => {
     const plat = p()
     await plat.focusWindow('cu-test-b')
-    await raise('cu-owner') // chat-v2 comes to the front
+    await raise('cu-owner') // Tomo comes to the front
     expect((await plat.remember()).title).toBe('cu-test-b')
-    // While chat-v2 is in front, the target is still the remembered app.
+    // While Tomo is in front, the target is still the remembered app.
     expect((await plat.foreground()).title).toBe('cu-test-b')
     expect((await plat.restoreFocus()).title).toBe('cu-test-b')
     expect(activeTitle()).toBe('cu-test-b')
@@ -300,7 +300,7 @@ describe.skipIf(!live)('linux platform on a live display', () => {
     expect(activeTitle()).toBe(back.title)
   })
 
-  test('a screenshot taken while chat-v2 is in front shows the app instead', async () => {
+  test('a screenshot taken while Tomo is in front shows the app instead', async () => {
     const plat = p()
     await plat.focusWindow('cu-test-a')
     await raise('cu-owner')

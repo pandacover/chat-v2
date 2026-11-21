@@ -573,7 +573,10 @@ describe('what the driver gets', () => {
     expect(r.mod.instructions).toContain('[mode: do] or [mode: teach]')
     expect(r.mod.instructions).toContain('ask_approval')
     expect(r.mod.instructions).toContain('ms-settings:')
-    expect(r.mod.instructions).not.toMatch(/spoken|aloud|voice|Tomo/i)
+    // Nothing left over from the voice assistant this was ported from. The app is now named Tomo
+    // too, and the prompt names it only for its own windows.
+    expect(r.mod.instructions).toContain("Tomo's own windows")
+    expect(r.mod.instructions.replaceAll("Tomo's own windows", '')).not.toMatch(/spoken|aloud|voice|Tomo/i)
     expect(modeTag('teach', 'show me dark mode')).toBe('[mode: teach] show me dark mode')
   })
 

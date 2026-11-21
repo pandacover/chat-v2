@@ -1,5 +1,5 @@
 {
-  "name": "chat-v2",
+  "name": "tomo",
   "version": "0.1.0",
   "description": "Desktop chat app for Claude, built on the Claude Agent SDK, with voice input, branching chats, artifacts, and a built-in browser",
   "main": "./out/main/index.js",

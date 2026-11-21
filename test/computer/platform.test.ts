@@ -235,7 +235,7 @@ describe.skipIf(process.platform !== 'win32')('windows host process', () => {
         expect(Array.isArray(tree.v.elements)).toBe(true)
         const at = await timed(host.call<ScreenRect | null>('elementAt', { x: shot.v.screen.x + 40, y: shot.v.screen.y + 40 }))
         expect(at.v === null || typeof at.v.width === 'number').toBe(true)
-        // The user's Point: the window under a point (past chat-v2's own), and its control if any.
+        // The user's Point: the window under a point (past Tomo's own), and its control if any.
         const centre = { x: shot.v.screen.x + Math.round(shot.v.screen.width / 2), y: shot.v.screen.y + Math.round(shot.v.screen.height / 2) }
         const pick = await timed(host.call<{ window: { title: string; process: string }; control: (ScreenRect & { type: string; name: string }) | null } | null>('pointAt', { ...centre, budgetMs: 600 }))
         expect(pick.v === null || typeof pick.v.window.process === 'string').toBe(true)

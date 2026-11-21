@@ -5,11 +5,11 @@ import { handsOver } from './intent'
 export const instructions = (platform: 'windows' | 'macos' | 'linux', home = homedir()) => {
   const os = platform === 'windows' ? 'Windows' : platform === 'linux' ? 'Linux' : 'macOS'
   const mod = platform === 'macos' ? 'cmd' : 'ctrl'
-  // Linux can't hide windows from screen capture, so chat-v2's own windows can show up there.
+  // Linux can't hide windows from screen capture, so Tomo's own windows can show up there.
   const ownWindows =
     platform === 'linux'
-      ? "chat-v2's own windows can appear in screenshots; ignore them, they aren't the user's apps"
-      : "chat-v2's own windows never appear in screenshots"
+      ? "Tomo's own windows can appear in screenshots; ignore them, they aren't the user's apps"
+      : "Tomo's own windows never appear in screenshots"
   // Linux can't read controls yet, so the model works from screenshots and pixels.
   const controls =
     platform === 'linux'

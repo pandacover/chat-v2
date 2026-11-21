@@ -213,7 +213,7 @@ describe('update state machine', () => {
     }
     failing.m.install()
     failing.runLater()
-    expect(failing.m.state()).toMatchObject({ status: 'downloaded', error: 'Move chat-v2 into Applications to update it.' })
+    expect(failing.m.state()).toMatchObject({ status: 'downloaded', error: 'Move Tomo into Applications to update it.' })
 
     const held = setup({ noInstall: true })
     available(held.fake)
@@ -242,6 +242,6 @@ describe('release notes', () => {
   test('errors read as one line', () => {
     expect(describeUpdateError(new Error('first line\nsecond'), 'win32')).toBe('first line')
     expect(describeUpdateError(new Error('EROFS: read-only file system'), 'win32')).toBe('EROFS: read-only file system')
-    expect(describeUpdateError(new Error('EROFS: read-only file system'), 'darwin')).toBe('Move chat-v2 into Applications to update it.')
+    expect(describeUpdateError(new Error('EROFS: read-only file system'), 'darwin')).toBe('Move Tomo into Applications to update it.')
   })
 })

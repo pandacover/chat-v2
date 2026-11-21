@@ -324,7 +324,7 @@ const allToolDefs = (d: ToolDeps) => {
   return [
     tool(
       'look_at_screen',
-      "Take a screenshot of the screen the user is working on (chat-v2's own windows are left out on Windows and macOS). Call this first in any task that involves the screen. The acting tools (click, type_text, press_keys, scroll, drag, move_mouse) already answer with a fresh screenshot, so you don't need this after them. Coordinates you pass to the computer tools are pixels in the latest full screenshot, from this tool or an action." +
+      "Take a screenshot of the screen the user is working on (Tomo's own windows are left out on Windows and macOS). Call this first in any task that involves the screen. The acting tools (click, type_text, press_keys, scroll, drag, move_mouse) already answer with a fresh screenshot, so you don't need this after them. Coordinates you pass to the computer tools are pixels in the latest full screenshot, from this tool or an action." +
         (pointerDrawn ? ' The mouse pointer is drawn in.' : '') +
         ' To read small text or icons, pass region (a rect in the latest full screenshot\'s pixels): you get that part at up to the screen\'s full resolution. A zoom is only for looking and never changes the frame: keep giving coordinates in the full screenshot (the answer says how its pixels map back).',
       { region: zoomArea.optional() },
@@ -672,7 +672,7 @@ const allToolDefs = (d: ToolDeps) => {
                   : null
             if (!target) return text('Give an element id or x/y.', true)
             const { rect } = target
-            // After the user typed or pressed Done in the chat, chat-v2 is in front: bring the
+            // After the user typed or pressed Done in the chat, Tomo is in front: bring the
             // target app back so the spotlit control isn't under the chat window.
             yield* Effect.ignore(d.control.restoreFocus())
             const element = a.element

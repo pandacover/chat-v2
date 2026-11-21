@@ -24,11 +24,11 @@ export type OverlayAnswer =
 export interface OverlayPort {
   /**
    * Draw the acting frame, the Show-me spotlight (rect in input space), and the notch: what a
-   * running computer reply is doing (`activity`, null when none runs), shown while no chat-v2
+   * running computer reply is doing (`activity`, null when none runs), shown while no Tomo
    * window has focus. Hidden when all are off.
    */
   readonly show: (acting: boolean, teach: TeachTarget | null, activity: Activity | null) => void
-  /** Content protection on every chat-v2 window, so none of them appears in screenshots. */
+  /** Content protection on every Tomo window, so none of them appears in screenshots. */
   readonly protect: (on: boolean) => void
   /** Called when the user answers a wait on the overlay (the callout's buttons, the notch's Approve / Deny). */
   readonly onAnswer: (listener: (answer: OverlayAnswer) => void) => void

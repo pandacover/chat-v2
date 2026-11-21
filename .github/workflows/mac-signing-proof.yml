@@ -45,14 +45,14 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: false
       - name: Check the signatures
         run: |
-          bash scripts/ci-mac-verify.sh dist-0.0.1/mac-arm64/chat-v2.app self-signed arm64
-          bash scripts/ci-mac-verify.sh dist-0.0.2/mac-arm64/chat-v2.app self-signed arm64
-          bash scripts/ci-mac-verify.sh dist-adhoc/mac-arm64/chat-v2.app adhoc arm64
+          bash scripts/ci-mac-verify.sh dist-0.0.1/mac-arm64/Tomo.app self-signed arm64
+          bash scripts/ci-mac-verify.sh dist-0.0.2/mac-arm64/Tomo.app self-signed arm64
+          bash scripts/ci-mac-verify.sh dist-adhoc/mac-arm64/Tomo.app adhoc arm64
       - name: 0.0.2 satisfies 0.0.1's designated requirement; the ad-hoc build doesn't
         run: |
-          v1=dist-0.0.1/mac-arm64/chat-v2.app
-          v2=dist-0.0.2/mac-arm64/chat-v2.app
-          adhoc=dist-adhoc/mac-arm64/chat-v2.app
+          v1=dist-0.0.1/mac-arm64/Tomo.app
+          v2=dist-0.0.2/mac-arm64/Tomo.app
+          adhoc=dist-adhoc/mac-arm64/Tomo.app
           dr=$(codesign -d -r- "$v1" 2>&1 | sed -n 's/^designated => //p')
           echo "0.0.1's designated requirement: $dr"
           # Different builds, different code hashes: the requirement doesn't pin the build.
@@ -69,4 +69,4 @@ jobs:
           echo "0.0.2 satisfies it; the ad-hoc build doesn't."
       - name: Squirrel.Mac updates 0.0.1 to 0.0.2 in place
         timeout-minutes: 6
-        run: bun scripts/mac-update-proof.ts dist-0.0.1/mac-arm64/chat-v2.app dist-0.0.2/chat-v2-0.0.2-arm64.zip 0.0.2
+        run: bun scripts/mac-update-proof.ts dist-0.0.1/mac-arm64/Tomo.app dist-0.0.2/chat-v2-0.0.2-arm64.zip 0.0.2

@@ -6,8 +6,8 @@
 // Reading controls isn't implemented yet (`controls: false`), so ui_elements isn't offered; the
 // element calls fail with a message that tells the model to use pixel clicks instead.
 //
-// Linux can't hide windows from screen capture, so chat-v2's windows can appear in screenshots.
-// When chat-v2 is in front, a screenshot first brings the app the user was in back to the front.
+// Linux can't hide windows from screen capture, so Tomo's windows can appear in screenshots.
+// When Tomo is in front, a screenshot first brings the app the user was in back to the front.
 //
 // Debian/Ubuntu packages: xdotool x11-utils wmctrl imagemagick xdg-utils
 import { type ChildProcess, spawn } from 'node:child_process'
@@ -432,7 +432,7 @@ interface RunOpts {
   killable?: boolean
 }
 
-/** `ownerPid` is chat-v2's main process: its windows are never targets. */
+/** `ownerPid` is Tomo's main process: its windows are never targets. */
 export const makeLinuxPlatform = (opts: { ownerPid: number; track?: (p: ChildProcess) => void }): Platform => {
   const track = opts.track ?? (() => {})
   const env = toolEnv()
@@ -532,7 +532,7 @@ export const makeLinuxPlatform = (opts: { ownerPid: number; track?: (p: ChildPro
     return id ? describe(id).catch(soft) : null
   }
 
-  /** App windows that aren't chat-v2's, topmost first. */
+  /** App windows that aren't Tomo's, topmost first. */
   const appWindows = async () => {
     const ws: XWindow[] = []
     for (const id of (await stacking()).reverse()) {
@@ -542,7 +542,7 @@ export const makeLinuxPlatform = (opts: { ownerPid: number; track?: (p: ChildPro
     return ws
   }
 
-  /** The topmost visible app window that isn't chat-v2's: the app the user was in before. */
+  /** The topmost visible app window that isn't Tomo's: the app the user was in before. */
   const appBelow = async () => (await appWindows()).find((w) => !w.hidden) ?? null
 
   let remembered: XWindow | null = null
@@ -564,7 +564,7 @@ export const makeLinuxPlatform = (opts: { ownerPid: number; track?: (p: ChildPro
     return false
   }
 
-  /** If chat-v2 (or nothing) is in front, bring the app the user was in back. */
+  /** If Tomo (or nothing) is in front, bring the app the user was in back. */
   const bringBack = async (): Promise<XWindow | null> => {
     const w = await active()
     if (w && !own(w)) return w
@@ -682,7 +682,7 @@ export const makeLinuxPlatform = (opts: { ownerPid: number; track?: (p: ChildPro
       throw new Error(`No open window matches ${title}`)
     },
     screenshot: async (maxWidth, o = {}) => {
-      // chat-v2 can't be hidden from capture on Linux: show the app the user was in instead of the chat.
+      // Tomo can't be hidden from capture on Linux: show the app the user was in instead of the chat.
       const front = await active()
       if (front && own(front) && (await rememberedOrBelow())) {
         // If the app won't come forward, still take the screenshot.

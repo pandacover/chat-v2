@@ -39,8 +39,8 @@ jobs:
           CSC_FOR_PULL_REQUEST: true
       - name: Check the packaged apps
         run: |
-          bash scripts/ci-mac-verify.sh dist/mac/chat-v2.app adhoc x64
-          bash scripts/ci-mac-verify.sh dist/mac-arm64/chat-v2.app adhoc arm64
+          bash scripts/ci-mac-verify.sh dist/mac/Tomo.app adhoc x64
+          bash scripts/ci-mac-verify.sh dist/mac-arm64/Tomo.app adhoc arm64
 
   # Linux computer use against a real X display: a virtual screen (Xvfb) with a window manager,
   # driving real xterm windows (test/computer/linux.test.ts). Without a display those tests skip.

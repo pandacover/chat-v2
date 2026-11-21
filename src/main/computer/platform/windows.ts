@@ -235,7 +235,7 @@ export const startHost = (
 
 /**
  * Windows: a persistent PowerShell host running compiled C# (SendInput, UI Automation, Windows
- * Search). It starts on the first call, not when the app starts. `ownerPid` is chat-v2's main
+ * Search). It starts on the first call, not when the app starts. `ownerPid` is Tomo's main
  * process: its windows are never targets, and when one of them is in front the host works in
  * the app the user was in before.
  */

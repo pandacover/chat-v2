@@ -31,9 +31,9 @@ const rect = (v: unknown): Rect | undefined => {
 }
 const stamp = () => new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
 
-/** Writes a browser recording to Videos/chat-v2 and returns its path. */
+/** Writes a browser recording to Videos/Tomo and returns its path. */
 const saveRecording = (data: ArrayBuffer) => {
-  const dir = join(app.getPath('videos'), 'chat-v2')
+  const dir = join(app.getPath('videos'), 'Tomo')
   mkdirSync(dir, { recursive: true })
   const file = join(dir, `recording-${stamp()}.webm`)
   writeFileSync(file, new Uint8Array(data))
