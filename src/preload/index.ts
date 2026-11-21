@@ -41,7 +41,8 @@ const api: Api = {
     purge: (id) => call('memory:purge', id),
     versions: (id) => call('memory:versions', id),
     clear: () => call('memory:clear'),
-    restore: (rev) => call('memory:restore', rev)
+    restore: (rev) => call('memory:restore', rev),
+    reconcile: () => call('memory:reconcile')
   },
   chat: {
     send: (input) => call('chat:send', input),
