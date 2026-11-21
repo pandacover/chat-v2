@@ -60,7 +60,9 @@
 
 <!-- It folds away when the wait is over (an outro; Svelte makes it inert meanwhile). -->
 <div
-  class="rounded-lg bg-surface px-4 pt-3 pb-3 shadow-[0_0_0_1px_var(--line),var(--shadow)]"
+  class="rounded-[var(--r-card)] bg-card px-4 pt-3.5 pb-4 {wait.kind === 'approval'
+    ? 'shadow-[0_0_0_1px_color-mix(in_srgb,var(--danger)_35%,transparent),var(--shadow-sm)]'
+    : 'shadow-[0_0_0_1px_var(--ring),var(--shadow-sm)]'}"
   role={wait.kind === 'approval' ? 'alertdialog' : 'status'}
   aria-labelledby="wait-title"
   data-computer-wait={wait.kind}
@@ -70,29 +72,26 @@
   in:fly={{ y: 4, duration: 220 }}
   out:slide={{ duration: 200 }}
 >
-  <div class="flex h-5 items-center gap-2 text-[12px] text-muted">
-    <span class="cu-dot small waiting text-fg-2"></span>
-    {#if wait.kind === 'approval'}
-      <span>Needs your OK</span>
-    {:else}
-      <span class="tabular-nums">Step <span class="text-fg-2">{wait.step}</span> of {wait.total}</span>
-      {#if wait.total <= MAX_DASHES}
-        <span class="cu-dashes ml-auto" aria-hidden="true">{#each Array(wait.total) as _, i (i)}<i class:on={i < wait.step}></i>{/each}</span>
-      {/if}
+  <div class="mb-2.5 flex h-4 items-center gap-2">
+    <span class="mono-label inline-flex items-center gap-1.5 {wait.kind === 'approval' ? '!text-danger' : ''}">
+      <i class="size-1.5 rounded-full {wait.kind === 'approval' ? 'bg-danger' : 'bg-fg-3'}"></i>{wait.kind === 'approval' ? 'Needs your OK' : 'Showing you'}
+    </span>
+    {#if wait.kind === 'teach'}
+      <span class="mono-label ml-auto tabular-nums">Step {wait.step} of {wait.total}</span>
     {/if}
   </div>
-  <p id="wait-title" class="mt-1.5 text-[16px] leading-snug font-[450] tracking-[-0.01em] text-pretty text-fg">{wait.kind === 'approval' ? wait.title : wait.instruction}</p>
+  <p id="wait-title" class="mb-1 font-display text-[18px] leading-[1.3] tracking-[-0.015em] text-pretty text-fg">{wait.kind === 'approval' ? wait.title : wait.instruction}</p>
   {#if wait.kind === 'approval' && wait.detail}
     <pre
-      class="mt-2.5 max-h-24 overflow-auto rounded-[10px] bg-bg px-3 py-2 font-mono text-[11.5px] leading-normal break-all whitespace-pre-wrap text-fg-2 shadow-[inset_0_0_0_1px_var(--line)]">{wait.detail}</pre>
+      class="mt-2 max-h-24 overflow-auto rounded-[10px] bg-canvas px-3 py-2 font-mono text-[12px] leading-normal break-all whitespace-pre-wrap text-fg-2 shadow-[inset_0_0_0_1px_var(--line)]">{wait.detail}</pre>
   {:else if wait.kind === 'teach'}
-    <p class="mt-1 text-[12.5px] text-muted">Do it on screen, then press Done. Or type what happened, or “just do it”.</p>
+    <p class="text-[13.5px] text-fg-3">Do it on screen, then press Done. Or type what happened, or “just do it”.</p>
+    {#if wait.total <= MAX_DASHES}
+      <div class="mt-3 flex gap-1" aria-hidden="true">{#each Array(wait.total) as _, i (i)}<i class="h-[3px] flex-1 rounded-full {i < wait.step ? 'bg-solid' : 'bg-line'}"></i>{/each}</div>
+    {/if}
   {/if}
-  <div class="mt-3 flex items-center justify-end gap-1.5">
+  <div class="mt-3.5 flex items-center gap-2">
     {#if wait.kind === 'approval'}
-      <button class="cu-btn line" onclick={() => app.approve(wait.id, false)}>
-        Deny <kbd class="cu-kbd text-muted">Esc</kbd>
-      </button>
       {#key wait.id}
         <button class="cu-btn primary" class:arming={!armed} disabled={!armed} onclick={() => app.approve(wait.id, true)}>
           <!-- Arming: the pill fills from the left, then takes clicks. -->
@@ -105,9 +104,13 @@
           ></span>
         </button>
       {/key}
+      <button class="cu-btn line" onclick={() => app.approve(wait.id, false)}>
+        Deny <kbd class="cu-kbd">Esc</kbd>
+      </button>
     {:else}
-      <button class="cu-btn" onclick={() => app.stop()}>Stop lesson</button>
       <button class="cu-btn primary" onclick={() => app.teachDone(wait.id)}>Done</button>
+      <span class="flex-1"></span>
+      <button class="cu-btn" onclick={() => app.stop()}>Stop lesson</button>
     {/if}
   </div>
 </div>

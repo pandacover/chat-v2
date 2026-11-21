@@ -31,9 +31,9 @@ export const CODE_FONTS: FontOption[] = [
 ]
 
 export const READING_SIZES = [
-  { id: 'compact', label: 'Compact', px: 15 },
-  { id: 'default', label: 'Default', px: 16.5 },
-  { id: 'large', label: 'Large', px: 18 }
+  { id: 'compact', label: '15', px: 15 },
+  { id: 'default', label: '16.5', px: 16.5 },
+  { id: 'large', label: '18', px: 18 }
 ] as const
 
 export type ReadingSize = (typeof READING_SIZES)[number]['id']
@@ -46,7 +46,8 @@ interface Prefs {
 }
 
 const KEY = 'chat-v2:appearance'
-const DEFAULTS: Prefs = { reading: 'newsreader', ui: 'instrument-sans', code: 'jetbrains-mono', size: 'default' }
+// Studio's faces: Inter for reading and the interface, Geist Mono for code, at 15 px.
+const DEFAULTS: Prefs = { reading: 'inter', ui: 'inter', code: 'geist-mono', size: 'compact' }
 
 const load = (): Prefs => {
   try {
@@ -88,7 +89,7 @@ class Appearance {
     root.setProperty('--font-reading', pick(READING_FONTS, this.prefs.reading).stack)
     root.setProperty('--font-ui', pick(UI_FONTS, this.prefs.ui).stack)
     root.setProperty('--font-code', pick(CODE_FONTS, this.prefs.code).stack)
-    root.setProperty('--reading-size', `${(READING_SIZES.find((s) => s.id === this.prefs.size) ?? READING_SIZES[1]).px}px`)
+    root.setProperty('--reading-size', `${(READING_SIZES.find((s) => s.id === this.prefs.size) ?? READING_SIZES[0]).px}px`)
   }
 }
 

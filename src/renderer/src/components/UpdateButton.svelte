@@ -1,12 +1,13 @@
 <script lang="ts">
-  // The update control: one icon button in the sidebar's footer, beside the theme buttons. Its icon
-  // follows the update (src/main/updateMachine.ts): the retry arrows when there's nothing new
-  // (click to check now), a download arrow when there is (click to download), a ring filling
-  // while it downloads, and a filled accent badge once it's ready (click to restart into it).
-  // Hovering shows a popover with what it would do and, for a new version, what changed.
+  // The update control: one row at the foot of the sidebar, shown only while there is something to
+  // do (src/main/updateMachine.ts): a new version to download, its download, and once it's ready, a
+  // restart into it. The row is the one control for it (no label plus a separate button). Hovering
+  // shows a popover with what it would do and what changed. Checking now, and the last check's
+  // result, live in Settings › About.
   // It's never `disabled` while busy, only aria-disabled: a disabled button gets no hover, and the
   // popover is where the download's percentage shows.
   import { onDestroy } from 'svelte'
+  import { fade } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
   import Icon from './Icon.svelte'
 
@@ -29,11 +30,11 @@
       : status === 'checking'
         ? 'Checking for updates'
         : status === 'available'
-          ? `Download chat-v2 ${u?.next}`
+          ? `Download Tomo ${u?.next}`
           : status === 'downloading'
-            ? `Downloading chat-v2 ${u?.next}: ${u?.percent ?? 0}%`
+            ? `Downloading Tomo ${u?.next}: ${u?.percent ?? 0}%`
             : status === 'downloaded' || status === 'installing'
-              ? `Restart to install chat-v2 ${u?.next}`
+              ? `Restart to install Tomo ${u?.next}`
               : 'Check for updates'
   )
 
@@ -65,7 +66,7 @@
     timer = setTimeout(() => {
       if (!button) return
       const r = button.getBoundingClientRect()
-      pos = { left: Math.max(8, Math.min(innerWidth - WIDTH - 8, r.right - WIDTH + 6)), bottom: innerHeight - r.top + 8 }
+      pos = { left: Math.max(8, Math.min(innerWidth - WIDTH - 8, r.left)), bottom: innerHeight - r.top + 8 }
       tick++
       open = true
       clearInterval(ticker)
@@ -78,65 +79,69 @@
     open = false
   }
   onDestroy(hide)
+  // The row goes once the update is done with; its popover goes with it.
+  $effect(() => {
+    if (!button) hide()
+  })
 </script>
 
-<button
-  bind:this={button}
-  class="relative grid size-6 place-items-center rounded-sm transition-colors {status === 'available'
-    ? 'text-accent hover:bg-hover'
-    : status === 'downloading'
-      ? 'text-fg-2'
-      : status === 'downloaded' || status === 'installing'
-        ? ''
-        : 'text-muted hover:bg-hover hover:text-fg'} aria-disabled:cursor-default aria-disabled:hover:bg-transparent"
-  aria-label={label}
-  aria-busy={status === 'checking' || status === 'downloading' || status === 'installing'}
-  aria-disabled={!['idle', 'available', 'downloaded'].includes(status)}
-  onclick={act}
-  onpointerenter={show}
-  onpointerleave={hide}
-  onfocus={show}
-  onblur={hide}
->
-  {#if status === 'available'}
-    <Icon name="download" size={13} stroke={2} />
-  {:else if status === 'downloading'}
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <circle cx="12" cy="12" r="9" stroke="var(--line)" stroke-width="3" />
-      <circle
-        cx="12"
-        cy="12"
-        r="9"
-        stroke="currentColor"
-        stroke-width="3"
-        stroke-linecap="round"
-        stroke-dasharray={RING}
-        stroke-dashoffset={dash}
-        transform="rotate(-90 12 12)"
-        class="transition-[stroke-dashoffset] duration-300 ease-out"
-      />
-    </svg>
-  {:else if status === 'downloaded' || status === 'installing'}
-    <span class="grid size-[18px] place-items-center rounded-full bg-accent text-on-accent">
-      <span class="grid place-items-center {status === 'installing' ? 'animate-spin' : ''}"><Icon name="refresh" size={11} stroke={2.4} /></span>
+{#if status === 'available' || status === 'downloading' || status === 'downloaded' || status === 'installing'}
+  <button
+    bind:this={button}
+    class="mb-1 flex h-[34px] w-full shrink-0 items-center gap-2 rounded-[10px] bg-blue-wash px-2.5 text-[13px] font-medium whitespace-nowrap text-blue-fg transition-colors hover:bg-[color-mix(in_srgb,var(--blue)_18%,transparent)] aria-disabled:cursor-default"
+    aria-label={label}
+    aria-busy={status === 'downloading' || status === 'installing'}
+    aria-disabled={!['available', 'downloaded'].includes(status)}
+    onclick={act}
+    onpointerenter={show}
+    onpointerleave={hide}
+    onfocus={show}
+    onblur={hide}
+    transition:fade={{ duration: 160 }}
+  >
+    <i class="size-1.5 shrink-0 rounded-full bg-blue"></i>
+    <span class="min-w-0 flex-1 truncate text-left">
+      {status === 'available'
+        ? `Tomo ${u?.next} is out`
+        : status === 'downloading'
+          ? `Downloading ${u?.percent ?? 0}%`
+          : status === 'installing'
+            ? 'Restarting…'
+            : 'Update ready'}
     </span>
-  {:else}
-    <span class="grid place-items-center {status === 'checking' ? 'animate-spin' : ''}"><Icon name="refresh" size={13} /></span>
-    {#if u?.error && status === 'idle'}
-      <span class="absolute top-0.5 right-0.5 size-1.5 rounded-full bg-danger"></span>
+    {#if status === 'available'}
+      <Icon name="download" size={15} />
+    {:else if status === 'downloading'}
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" stroke="color-mix(in srgb, currentColor 25%, transparent)" stroke-width="3" />
+        <circle
+          cx="12"
+          cy="12"
+          r="9"
+          stroke="currentColor"
+          stroke-width="3"
+          stroke-linecap="round"
+          stroke-dasharray={RING}
+          stroke-dashoffset={dash}
+          transform="rotate(-90 12 12)"
+          class="transition-[stroke-dashoffset] duration-300 ease-out"
+        />
+      </svg>
+    {:else}
+      <span class="grid place-items-center {status === 'installing' ? 'animate-spin' : ''}"><Icon name="refresh" size={15} /></span>
     {/if}
-  {/if}
-</button>
+  </button>
+{/if}
 
 {#if open && u}
   <div
     role="tooltip"
-    class="fixed z-[100] rounded-lg bg-surface px-3 py-2.5 text-[12.5px] leading-snug text-fg-2 shadow-[0_0_0_1px_var(--line),var(--shadow)]"
+    class="glass-float fixed z-[100] rounded-[14px] px-3.5 py-3 text-[12.5px] leading-snug text-fg-2"
     style="left: {pos.left}px; bottom: {pos.bottom}px; width: {WIDTH}px"
   >
     {#key tick}
       {#if status === 'unsupported'}
-        <div class="font-medium text-fg">chat-v2 {u.current}</div>
+        <div class="font-medium text-fg">Tomo {u.current}</div>
         <div class="mt-0.5 text-muted">Development build. Updates apply to installed versions.</div>
       {:else if status === 'available' || status === 'downloading' || status === 'downloaded' || status === 'installing'}
         <div class="font-medium text-fg">
@@ -165,8 +170,8 @@
             : u.error
               ? "Couldn't check for updates"
               : u.checkedAt
-                ? `chat-v2 ${u.current} is up to date`
-                : `chat-v2 ${u.current}`}
+                ? `Tomo ${u.current} is up to date`
+                : `Tomo ${u.current}`}
         </div>
         <div class="mt-0.5 text-[11.5px] text-muted">
           {u.error ? `You have ${u.current}. ` : ''}{u.checkedAt ? `Last ${u.error ? 'successful check' : 'checked'} ${ago(u.checkedAt)}.` : 'Not checked yet.'}

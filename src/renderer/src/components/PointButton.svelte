@@ -31,7 +31,7 @@
 
 <!-- A round companion to the Computer switch beside it; solid while Point is on, like the switches. -->
 <button
-  class="icon-btn size-7 !rounded-full {app.pointing ? '!bg-fg !text-bg' : ''}"
+  class="icon-btn size-8 {app.pointing ? '!bg-solid !text-on-solid' : ''}"
   aria-label="Point"
   aria-pressed={app.pointing}
   data-tip-no-label

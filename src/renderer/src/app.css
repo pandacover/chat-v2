@@ -5,81 +5,170 @@
 @custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
 
 /*
- * Ink & paper. Warm neutrals, one ember accent used only for the primary
- * action, focus, and recording. Every text/surface pair here (muted on --hover included) is >= 4.5:1.
+ * Studio: warm stone neutrals, a white workspace inset on a cream sidebar, hairline rings, and
+ * solid black pill actions (white on dark). Dark is the near-black Agents palette. Blue is for
+ * focus, selection, drafts and "the assistant is driving"; the orb carries the voice.
+ *
+ * The older role names (--bg, --surface, --hover, --muted, --accent…) stay as aliases, so every
+ * Tailwind class (bg-bg, text-muted, bg-accent…) follows the palette.
  */
 :root,
 [data-theme='light'] {
-  --bg: #f7f5f0;
-  --side: #efebe3;
-  --surface: #fdfcf9;
-  --hover: #e9e5dc;
-  --line: #e1dcd1;
-  --fg: #1d1b18;
-  --fg-2: #4b463f;
-  --muted: #69625a;
-  --accent: #b9502a;
-  --on-accent: #ffffff;
-  --accent-wash: #b9502a14;
-  --danger: #a83a2c;
-  --code-bg: #f1eee7;
-  --scrim: #1d1b1859;
-  --shadow: 0 1px 2px #1d1b180d, 0 8px 24px -8px #1d1b1826;
+  --side: #f5f3f1;
+  /* A hovered row in the sidebar, opaque, so what fades under the row's actions matches it. */
+  --side-hover: #e9e7e5;
+  --canvas: #fdfcfc;
+  --card: #ffffff;
+  --bubble: #f5f3f1;
+  --line: #ebe8e4;
+  --line-2: #d7d2cc;
+  --fg: #0c0a09;
+  --fg-2: #292524;
+  --fg-3: #777169;
+  --fg-4: #a59f97;
+  --ring: rgb(0 0 0 / 0.075);
+  --ring-2: rgb(0 0 0 / 0.13);
+  --wash: rgb(0 0 0 / 0.05);
+  --solid: #000000;
+  --solid-hover: #292524;
+  --on-solid: #ffffff;
+  --blue: #2b7fff;
+  --blue-fg: #1f5fd1;
+  --blue-wash: rgb(43 127 255 / 0.1);
+  --danger: #b22e20;
+  --danger-wash: #fef3f2;
+  --ok: #006c2f;
+  --code-bg: #f5f3f1;
+  --shadow-sm: 0 1px 1px rgb(0 0 0 / 0.04), 0 2px 4px rgb(0 0 0 / 0.04);
+  --shadow-lg: 0 0 1px 0 rgb(0 0 0 / 0.4), 0 4px 28px 0 rgb(0 0 0 / 0.1);
+  --shadow-float: 0 1px 1px rgb(0 0 0 / 0.04), 0 8px 24px -12px rgb(0 0 0 / 0.14);
+  --scrim: rgb(0 0 0 / 0.3);
+  --orb-base: radial-gradient(circle at 50% 70%, #a0b9d1, #cadcfc 70%);
+  --ripple: rgb(110 135 190 / 0.55);
+  --thumb: radial-gradient(120% 90% at 20% 100%, #ffd29a 0%, transparent 60%), radial-gradient(80% 90% at 90% 10%, #f7b9c6 0%, transparent 70%), #fbeee4;
+  /* Glass: raised and active surfaces are frosted, so what is behind them shows through, blurred. */
+  --glass-bg: rgb(255 255 255 / 0.6);
+  --glass-bg-strong: rgb(253 252 252 / 0.72);
+  --glass-side: rgb(245 243 241 / 0.62);
+  --glass-edge: rgb(255 255 255 / 0.85);
+  --glass-ring: rgb(0 0 0 / 0.07);
+  /* The glass of an active sidebar row as it looks over the sidebar, opaque (what fades under its actions). */
+  --glass-on-side: #fbfaf9;
+  /* Soft colour in the canvas, so the glass above it has something to frost. */
+  --canvas-glow: radial-gradient(55% 45% at 50% 0%, rgb(202 220 252 / 0.32), transparent 72%), radial-gradient(45% 45% at 100% 100%, rgb(255 216 176 / 0.22), transparent 70%), radial-gradient(40% 40% at 0% 100%, rgb(246 184 200 / 0.14), transparent 70%);
   color-scheme: light;
 }
 
 [data-theme='dark'] {
-  --bg: #171614;
-  --side: #121110;
-  --surface: #211f1c;
-  --hover: #2a2824;
-  --line: #2d2a26;
-  --fg: #ede8e0;
-  --fg-2: #bdb5a9;
-  --muted: #9a9286;
-  --accent: #e5703f;
-  --on-accent: #1b0e08;
-  --accent-wash: #e5703f1a;
-  --danger: #e2735f;
-  --code-bg: #1c1b18;
-  --scrim: #0000008c;
-  --shadow: 0 1px 2px #0000004d, 0 12px 32px -12px #00000099;
+  --side: #09090a;
+  --side-hover: #181819;
+  --canvas: #0f0f10;
+  --card: #161618;
+  --bubble: #1c1c1f;
+  --line: #222225;
+  --line-2: #2e2e32;
+  --fg: #f5f5f4;
+  --fg-2: #d6d3d1;
+  --fg-3: #8a847d;
+  --fg-4: #5c5853;
+  --ring: rgb(255 255 255 / 0.08);
+  --ring-2: rgb(255 255 255 / 0.15);
+  --wash: rgb(255 255 255 / 0.06);
+  --solid: #ffffff;
+  --solid-hover: #e7e5e4;
+  --on-solid: #000000;
+  --blue: #5b9bff;
+  --blue-fg: #a8c0e6;
+  --blue-wash: rgb(91 155 255 / 0.12);
+  --danger: #ff9a90;
+  --danger-wash: rgb(250 103 91 / 0.1);
+  --ok: #41c64e;
+  --code-bg: #1c1c1f;
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-lg: 0 0 0 1px rgb(255 255 255 / 0.1), 0 40px 80px -20px rgb(0 0 0 / 0.9);
+  --shadow-float: 0 24px 48px -16px rgb(0 0 0 / 0.7);
+  --scrim: rgb(0 0 0 / 0.55);
+  --orb-base: radial-gradient(circle at 50% 70%, #a0b9d1, #1b2433 85%);
+  --ripple: rgb(202 220 252 / 0.55);
+  --thumb: radial-gradient(120% 90% at 20% 100%, rgb(255 210 154 / 0.35) 0%, transparent 60%), radial-gradient(80% 90% at 90% 10%, rgb(247 185 198 / 0.3) 0%, transparent 70%), #1c1a19;
+  --glass-bg: rgb(44 44 48 / 0.45);
+  --glass-bg-strong: rgb(22 22 24 / 0.72);
+  --glass-side: rgb(9 9 10 / 0.55);
+  --glass-edge: rgb(255 255 255 / 0.09);
+  --glass-ring: rgb(255 255 255 / 0.09);
+  --glass-on-side: #19191b;
+  --canvas-glow: radial-gradient(55% 45% at 50% 0%, rgb(160 185 209 / 0.12), transparent 72%), radial-gradient(45% 45% at 100% 100%, rgb(255 216 176 / 0.06), transparent 70%), radial-gradient(40% 40% at 0% 100%, rgb(246 184 200 / 0.05), transparent 70%);
   color-scheme: dark;
+}
+
+:root {
+  /* The older role names, as aliases of the palette above. */
+  --bg: var(--canvas);
+  --surface: var(--card);
+  --hover: var(--wash);
+  --muted: var(--fg-3);
+  --accent: var(--blue);
+  --on-accent: #ffffff;
+  --accent-wash: var(--blue-wash);
+  --shadow: var(--shadow-float);
+  --r-card: 16px;
+  --r-inner: 10px;
+  --ease-studio: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 @theme inline {
   --color-bg: var(--bg);
   --color-side: var(--side);
+  --color-canvas: var(--canvas);
+  --color-card: var(--card);
+  --color-bubble: var(--bubble);
   --color-surface: var(--surface);
   --color-hover: var(--hover);
+  --color-wash: var(--wash);
   --color-line: var(--line);
+  --color-line-2: var(--line-2);
   --color-fg: var(--fg);
   --color-fg-2: var(--fg-2);
+  --color-fg-3: var(--fg-3);
+  --color-fg-4: var(--fg-4);
   --color-muted: var(--muted);
+  --color-solid: var(--solid);
+  --color-on-solid: var(--on-solid);
   --color-accent: var(--accent);
   --color-on-accent: var(--on-accent);
   --color-accent-wash: var(--accent-wash);
+  --color-blue: var(--blue);
+  --color-blue-fg: var(--blue-fg);
   --color-danger: var(--danger);
+  --color-ok: var(--ok);
   --color-scrim: var(--scrim);
   --shadow-float: var(--shadow);
-  /* Font roles follow Settings › Appearance (lib/appearance.svelte.ts). */
+  /* Font roles follow Settings › Appearance (lib/appearance.svelte.ts); display and labels are fixed. */
   --font-sans: var(--font-ui);
-  --font-serif: var(--font-reading);
+  --font-serif: var(--font-display);
   --font-mono: var(--font-code);
+  --font-display: var(--face-display);
+  --font-label: var(--face-label);
 }
 
 :root {
-  --font-reading: 'Newsreader Variable', Georgia, serif;
-  --font-ui: 'Instrument Sans Variable', system-ui, sans-serif;
-  --font-code: 'JetBrains Mono Variable', ui-monospace, Consolas, monospace;
-  --reading-size: 16.5px;
+  --font-reading: 'Inter Variable', system-ui, sans-serif;
+  --font-ui: 'Inter Variable', system-ui, sans-serif;
+  --font-code: 'Geist Mono Variable', ui-monospace, Consolas, monospace;
+  /* Headings: light, tightly tracked. */
+  --face-display: 'Geist Variable', 'Inter Variable', system-ui, sans-serif;
+  /* Small uppercase labels (group names, steps, costs). */
+  --face-label: 'Geist Mono Variable', ui-monospace, Consolas, monospace;
+  --reading-size: 15px;
 }
 
 @theme {
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
-  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --radius-xl: 16px;
+  --radius-2xl: 20px;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 html,
@@ -90,7 +179,7 @@ body,
 
 body {
   margin: 0;
-  background: var(--bg);
+  background: var(--side);
   color: var(--fg);
   font-family: var(--font-ui);
   font-size: 14px;
@@ -103,11 +192,11 @@ body {
 }
 
 ::selection {
-  background: var(--accent-wash);
+  background: var(--blue-wash);
   color: var(--fg);
 }
 [data-theme='dark'] ::selection {
-  background: #e5703f40;
+  background: rgb(91 155 255 / 0.3);
 }
 
 /* Text being quoted in a reply stays marked while the reply is typed (SelectionReply). */
@@ -116,12 +205,12 @@ body {
   color: var(--fg);
 }
 [data-theme='dark'] ::highlight(reply-quote) {
-  background-color: #e5703f40;
+  background-color: rgb(91 155 255 / 0.3);
 }
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--line) transparent;
+  scrollbar-color: var(--line-2) transparent;
 }
 
 button {
@@ -133,17 +222,17 @@ button:disabled {
 
 /* Fields show focus on their container; controls get a ring. */
 :where(button, a, [role='switch'], [role='tab'], [role='radio'], summary):focus-visible {
-  outline: 1.5px solid var(--accent);
+  outline: 2px solid var(--blue);
   outline-offset: 2px;
-  border-radius: var(--radius-sm);
+  border-radius: 8px;
 }
 
-/* Quiet icon button used across the app. */
+/* Quiet round icon button used across the app. */
 .icon-btn {
   display: inline-grid;
   place-items: center;
-  border-radius: var(--radius-sm);
-  color: var(--muted);
+  border-radius: 999px;
+  color: var(--fg-3);
   padding: 5px;
   transition:
     color 120ms var(--ease-out),
@@ -161,8 +250,8 @@ button:disabled {
 .prose-chat {
   font-family: var(--font-reading);
   font-size: var(--reading-size);
-  line-height: 1.68;
-  color: var(--fg);
+  line-height: 1.65;
+  color: var(--fg-2);
   overflow-wrap: anywhere;
   font-optical-sizing: auto;
 }
@@ -193,15 +282,16 @@ button:disabled {
   top: 0.78em;
   width: 0.32em;
   height: 1.5px;
-  background: var(--muted);
+  background: var(--fg-4);
 }
 .prose-chat ol {
   list-style: decimal;
   padding-left: 1.4em;
 }
 .prose-chat ol > li::marker {
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
+  color: var(--fg-4);
+  font-family: var(--face-label);
+  font-size: 0.8em;
 }
 .prose-chat li {
   margin: 0.3em 0;
@@ -210,8 +300,10 @@ button:disabled {
 .prose-chat h2,
 .prose-chat h3,
 .prose-chat h4 {
-  font-weight: 560;
-  letter-spacing: -0.01em;
+  font-family: var(--face-display);
+  font-weight: 500;
+  color: var(--fg);
+  letter-spacing: -0.015em;
   line-height: 1.25;
   margin: 1.4em 0 0.45em;
 }
@@ -225,18 +317,19 @@ button:disabled {
   font-size: 1.1em;
 }
 .prose-chat strong {
-  font-weight: 620;
+  color: var(--fg);
+  font-weight: 600;
 }
 .prose-chat a {
   color: var(--fg);
   text-decoration: underline;
-  text-decoration-color: var(--muted);
+  text-decoration-color: var(--fg-4);
   text-decoration-thickness: 1px;
   text-underline-offset: 3px;
   transition: text-decoration-color 120ms;
 }
 .prose-chat a:hover {
-  text-decoration-color: var(--accent);
+  text-decoration-color: var(--fg);
 }
 .prose-chat blockquote {
   border-left: 2px solid var(--line);
@@ -280,8 +373,9 @@ button:disabled {
 
 .code-block {
   margin: 1em 0;
-  border-radius: var(--radius-md);
-  background: var(--code-bg);
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: 0 0 0 1px var(--ring);
   overflow: hidden;
 }
 .code-head {
@@ -390,16 +484,16 @@ code.hljs {
     background-position: 100% 0;
   }
   to {
-    background-position: -100% 0;
+    background-position: 0 0;
   }
 }
 .thinking {
-  background: linear-gradient(90deg, var(--muted) 0%, var(--muted) 40%, var(--fg) 50%, var(--muted) 60%, var(--muted) 100%);
-  background-size: 200% 100%;
+  background: linear-gradient(90deg, var(--fg-3) 0 38%, var(--fg) 50%, var(--fg-3) 62% 100%);
+  background-size: 300% 100%;
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  animation: sweep 1.8s linear infinite;
+  animation: sweep 2s linear infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -442,10 +536,10 @@ code.hljs {
   box-sizing: border-box;
   width: max-content;
   max-width: min(300px, calc(100vw - 12px));
-  padding: 4px 8px;
-  border-radius: var(--radius-sm);
-  background: var(--fg);
-  color: var(--bg);
+  padding: 5px 9px;
+  border-radius: 8px;
+  background: var(--solid);
+  color: var(--on-solid);
   font-family: var(--font-ui);
   font-size: 12px;
   line-height: 1.35;
@@ -469,9 +563,9 @@ code.hljs {
   display: inline-block;
   margin-left: 6px;
   white-space: nowrap;
-  font-family: var(--font-ui);
+  font-family: var(--face-label);
   font-size: 11px;
-  opacity: 0.6;
+  opacity: 0.55;
 }
 
 /* Built-in browser: the misty border while the assistant drives, and its cursor. */
@@ -518,4 +612,233 @@ code.hljs {
   border-radius: 999px;
   background: color-mix(in oklab, var(--accent) 45%, transparent);
   animation: ripple 480ms var(--ease-out) forwards;
+}
+
+/* ------------------------------------------------------------------ Studio components */
+
+/* Small uppercase labels: group names, step counts, costs. */
+.mono-label {
+  font-family: var(--face-label);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+.mono-stat {
+  font-family: var(--face-label);
+  font-size: 11.5px;
+  color: var(--fg-4);
+  font-variant-numeric: tabular-nums;
+}
+kbd.studio-kbd {
+  font-family: var(--face-label);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--fg-4);
+}
+
+/* One button vocabulary: hairline pills, solid pills, quiet pills. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 13px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg-2);
+  box-shadow: inset 0 0 0 1px var(--line);
+  white-space: nowrap;
+  transition:
+    background-color 150ms,
+    box-shadow 150ms,
+    color 150ms;
+}
+.btn:hover:not(:disabled) {
+  background: var(--wash);
+  color: var(--fg);
+}
+.btn:disabled {
+  opacity: 0.45;
+}
+.btn.solid {
+  background: var(--solid);
+  color: var(--on-solid);
+  box-shadow: none;
+}
+.btn.solid:hover:not(:disabled) {
+  background: var(--solid-hover);
+  color: var(--on-solid);
+}
+.btn.quiet {
+  box-shadow: none;
+  color: var(--fg-3);
+}
+.btn.quiet:hover:not(:disabled) {
+  color: var(--fg);
+}
+.btn.sm {
+  height: 28px;
+  padding: 0 11px;
+  font-size: 12.5px;
+}
+.btn kbd {
+  color: inherit;
+  opacity: 0.55;
+  font-family: var(--face-label);
+  font-size: 11px;
+}
+
+/* Cards: white (or raised dark) on the canvas, with a hairline ring. */
+.card {
+  background: var(--card);
+  border-radius: 14px;
+  box-shadow:
+    0 0 0 1px var(--ring),
+    var(--shadow-sm);
+}
+
+/* The switch. */
+.switch {
+  position: relative;
+  flex: none;
+  width: 36px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--line-2);
+  transition: background-color 200ms;
+}
+.switch::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.2);
+  transition:
+    transform 250ms var(--ease-studio),
+    background-color 200ms;
+}
+.switch[aria-checked='true'] {
+  background: var(--solid);
+}
+.switch[aria-checked='true']::after {
+  transform: translateX(14px);
+  background: var(--on-solid);
+}
+
+/* Segmented control: pills in a washed track. */
+.seg {
+  display: inline-flex;
+  flex: none;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--wash);
+}
+.seg button {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--fg-3);
+  white-space: nowrap;
+  transition:
+    color 120ms,
+    background-color 120ms;
+}
+.seg button:hover {
+  color: var(--fg);
+}
+.seg button[aria-checked='true'],
+.seg button[aria-selected='true'] {
+  color: var(--fg);
+}
+.seg button[aria-checked='true'],
+.seg button[aria-selected='true'],
+.glass {
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  backdrop-filter: blur(16px) saturate(180%);
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge),
+    0 0 0 1px var(--glass-ring),
+    var(--shadow-sm);
+}
+
+/* Glass that floats: the composer, popovers, the scroll-to-end pill. */
+.glass-float {
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge),
+    0 0 0 1px var(--glass-ring),
+    var(--shadow-float);
+}
+
+/* Glass for modals (settings, search, chat instructions): thicker, over the blurred app. */
+.glass-strong {
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: blur(32px) saturate(180%);
+  backdrop-filter: blur(32px) saturate(180%);
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge),
+    0 0 0 1px var(--glass-ring),
+    var(--shadow-lg);
+}
+
+/* The orb: lib/orb.ts draws the shader into it; the gradient shows only without WebGL2. */
+.orb {
+  --s: 88px;
+  --lvl: 0;
+  --pk: 0.14;
+  position: relative;
+  display: block;
+  flex: none;
+  width: var(--s);
+  height: var(--s);
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--orb-base);
+  transform: scale(calc(1 + var(--lvl) * var(--pk)));
+}
+.orb.gl {
+  background: none;
+}
+.orb > canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+/* A ring leaves the orb on each spike in the voice level. */
+.ripple {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: var(--rs);
+  height: var(--rs);
+  margin: calc(var(--rs) / -2) 0 0 calc(var(--rs) / -2);
+  border-radius: 50%;
+  border: 1.5px solid var(--ripple);
+  pointer-events: none;
+  animation: ripple-out 1s var(--ease-studio) forwards;
+}
+@keyframes ripple-out {
+  from {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  to {
+    transform: scale(var(--rg, 1.7));
+    opacity: 0;
+  }
 }

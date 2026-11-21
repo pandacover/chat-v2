@@ -15,7 +15,8 @@
   import BranchSwitcher from './BranchSwitcher.svelte'
   import Icon from './Icon.svelte'
   import Markdown from './Markdown.svelte'
-  import { usageDetail, usageLabel } from '@/lib/usage'
+  import { usageDetail, usageShort } from '@/lib/usage'
+  import { orb } from '@/lib/orb'
   import { listEditing } from '@/lib/textarea'
 
   let { node, last = false }: { node: PathNode; last?: boolean } = $props()
@@ -159,9 +160,9 @@
 </script>
 
 {#if message.role === 'user'}
-  <div class="group flex flex-col gap-1.5" in:fly={{ y: 8, duration: fresh ? 240 : 0 }}>
+  <div class="group flex flex-col items-end gap-1.5" in:fly={{ y: 8, duration: fresh ? 240 : 0 }}>
     {#if message.attachments.length > 0}
-      <div class="flex flex-wrap gap-1.5">
+      <div class="flex flex-wrap justify-end gap-1.5">
         {#each editing ? message.attachments.filter((a) => keptAttachments.includes(a.id)) : message.attachments as a (a.id)}
           <AttachmentChip
             attachment={a}
@@ -171,14 +172,15 @@
       </div>
     {/if}
 
+    <div class="flex w-full flex-row-reverse items-end gap-1">
     {#if message.content || editing}
       <!-- The same box switches between text and textarea, so editing does not move anything. -->
       <div
-        class="rounded-lg bg-hover transition-shadow duration-150 {editing
-          ? 'shadow-[0_0_0_1px_var(--muted)]'
+        class="min-w-0 rounded-[18px_18px_6px_18px] bg-bubble transition-shadow duration-150 {editing
+          ? 'w-full shadow-[0_0_0_1px_var(--ring-2)]'
           : busy
-            ? ''
-            : 'cursor-text hover:shadow-[0_0_0_1px_var(--line)]'}"
+            ? 'max-w-[80%]'
+            : 'max-w-[80%] cursor-text hover:shadow-[0_0_0_1px_var(--ring)]'}"
       >
         {#if editing}
           <textarea
@@ -187,7 +189,7 @@
             rows="1"
             bind:value={draft}
             aria-label="Edit message"
-            class="block w-full resize-none bg-transparent px-3.5 py-2 text-[14.5px] leading-[1.6] text-fg outline-none"
+            class="block w-full resize-none bg-transparent px-4 py-2.5 text-[15px] leading-normal text-fg outline-none"
             onkeydown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
                 e.preventDefault()
@@ -210,7 +212,7 @@
             role="button"
             tabindex={busy ? -1 : 0}
             aria-label="Edit message"
-            class="px-3.5 py-2 text-[14.5px] leading-[1.6] whitespace-pre-wrap text-fg outline-none"
+            class="px-4 py-2.5 text-[15px] leading-normal break-words whitespace-pre-wrap text-fg outline-none"
             onclick={() => {
               // Selecting text to copy should not flip the message into edit mode.
               if (!getSelection()?.isCollapsed) return
@@ -229,17 +231,20 @@
       </div>
     {/if}
 
-    {#if editing}
-      <div class="flex h-7 items-center gap-1 text-[12.5px]" data-edit-actions in:fade={{ duration: 120 }}>
-        <button class="rounded-md bg-fg px-2.5 py-1 font-medium text-bg disabled:opacity-40" disabled={busy} onclick={submitEdit}>Send</button>
-        <button class="rounded-md px-2.5 py-1 text-fg-2 hover:bg-hover hover:text-fg" onclick={() => (editing = false)}>Cancel</button>
-        <span class="ml-1.5 text-muted">Sends as a new branch</span>
-      </div>
-    {:else}
-      <div class="-ml-1 flex h-6 items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
-        <button class="icon-btn !p-1" use:tip={copied ? 'Copied' : 'Copy'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={14} /></button>
-        <button class="icon-btn !p-1" use:tip={'Edit (creates a branch)'} disabled={busy} onclick={startEdit}><Icon name="edit" size={14} /></button>
+    {#if !editing}
+      <div class="flex h-[26px] shrink-0 items-center opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
         <BranchSwitcher {node} disabled={busy} />
+        <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Edit · makes a branch'} disabled={busy} onclick={startEdit}><Icon name="edit" size={14} /></button>
+        <button class="icon-btn size-[26px] !rounded-lg" use:tip={copied ? 'Copied' : 'Copy'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={14} /></button>
+      </div>
+    {/if}
+    </div>
+
+    {#if editing}
+      <div class="flex items-center gap-1.5" data-edit-actions in:fade={{ duration: 120 }}>
+        <span class="mr-1.5 text-[12.5px] text-fg-3">Sends as a new branch</span>
+        <button class="btn sm" onclick={() => (editing = false)}>Cancel</button>
+        <button class="btn solid sm" disabled={busy} onclick={submitEdit}>Send</button>
       </div>
     {/if}
   </div>
@@ -254,21 +259,22 @@
       {:else}
         {@const active = app.artifact?.identifier === block.identifier && app.artifact?.messageId === message.id}
         <button
-          class="group/card relative flex w-full max-w-sm items-center gap-3 overflow-hidden rounded-lg py-2.5 pr-3 pl-2.5 text-left transition-[background-color,box-shadow] duration-150 {active
-            ? 'bg-surface shadow-[0_0_0_1px_var(--muted)]'
-            : 'bg-surface shadow-[0_0_0_1px_var(--line)] hover:shadow-[0_0_0_1px_var(--muted)]'}"
+          class="group/card relative flex w-full max-w-[400px] items-center gap-3 overflow-hidden rounded-[14px] bg-card py-[7px] pr-3 pl-[7px] text-left transition-shadow duration-150 {active
+            ? 'shadow-[0_0_0_1px_var(--ring-2),var(--shadow-sm)]'
+            : 'shadow-[0_0_0_1px_var(--ring),var(--shadow-sm)] hover:shadow-[0_0_0_1px_var(--ring-2),0_6px_18px_-8px_rgb(0_0_0/0.2)]'}"
           disabled={!block.complete}
+          aria-current={active || undefined}
           onclick={() => app.showArtifact({ identifier: block.identifier, messageId: message.id })}
         >
-          <span class="grid size-9 place-items-center rounded-md bg-hover text-fg-2"><Icon name="window" size={17} /></span>
+          <span class="grid size-10 shrink-0 place-items-center rounded-[10px] text-fg-2" style="background: var(--thumb)"><Icon name="window" size={17} /></span>
           <span class="min-w-0 flex-1">
-            <span class="block truncate text-[13.5px] font-medium text-fg">{block.title}</span>
-            <span class="block text-[12px] text-muted">
-              {#if block.complete}HTML · {lines(block.content)}{:else}Writing… {lines(block.content)}{/if}
+            <span class="block truncate text-[14px] font-medium text-fg">{block.title}</span>
+            <span class="block text-[12px] text-fg-3">
+              {#if block.complete}Artifact · HTML · {lines(block.content)}{:else}Writing… {lines(block.content)}{/if}
             </span>
           </span>
           {#if block.complete}
-            <span class="text-[12px] text-muted transition-colors group-hover/card:text-fg">{active ? 'Open' : 'View'}</span>
+            <Icon name="chevronRight" size={16} class="text-fg-4 transition-colors group-hover/card:text-fg" />
           {:else}
             <span class="absolute inset-x-0 bottom-0 h-px overflow-hidden"><span class="block h-full w-1/3 animate-[slide_1.2s_ease-in-out_infinite] bg-fg-2"></span></span>
           {/if}
@@ -281,10 +287,10 @@
       <div class="flex flex-wrap gap-2">
         {#each message.attachments as a (a.id)}
           {#if a.kind === 'image'}
-            <div class="group/shot relative max-w-md overflow-hidden rounded-lg shadow-[0_0_0_1px_var(--line)]" in:fade={{ duration: live ? 200 : 0 }}>
+            <div class="group/shot relative max-w-md overflow-hidden rounded-[14px] shadow-[0_0_0_1px_var(--ring)]" in:fade={{ duration: live ? 200 : 0 }}>
               <img src={window.api.attachments.url(a.id)} alt={a.name} class="block max-h-80 w-auto" />
               <button
-                class="absolute top-2 right-2 rounded-md bg-fg px-2 py-0.5 text-[12px] font-medium text-bg opacity-0 transition-opacity group-hover/shot:opacity-100 focus-visible:opacity-100"
+                class="btn solid sm absolute top-2 right-2 opacity-0 transition-opacity group-hover/shot:opacity-100 focus-visible:opacity-100"
                 use:tip={`Save ${a.name}`}
                 onclick={() => saveImage(a)}>Save</button
               >
@@ -301,14 +307,16 @@
     {:else if placeholder}
       <StepList steps={[]} live running {doing} />
     {:else if streaming && blocks.length === 0}
-      <div class="thinking py-1 text-[13.5px]" aria-live="polite">Thinking</div>
+      <div class="flex h-[26px] items-center gap-2.5 text-[14px]" aria-live="polite">
+        <span class="orb" style="--s: 18px" use:orb={{ state: 'thinking' }}></span><span class="thinking">Thinking</span>
+      </div>
     {/if}
     {#if computerRun}
       <!-- While a computer reply runs: the Stop shortcut (it works from any app), and the mode this
            reply works in, which a click switches for the rest of the reply. The chip sits at the far
            end, so it can arrive a moment later without moving the line. It folds away with its gap
            when the reply ends, so the reply's text glides up rather than jumping. -->
-      <div class="-mt-1 flex h-6 items-center gap-2 text-[12px] text-muted" in:fade={{ duration: 200 }} out:collapse>
+      <div class="-mt-1 flex h-6 items-center gap-2 text-[12px] text-fg-3" in:fade={{ duration: 200 }} out:collapse>
         <span class="cu-keys text-fg-2" aria-label={stopShortcutLabel(isMac)}>{#each stopShortcutLabel(isMac).split(' ') as k (k)}<kbd class="cu-kbd">{k}</kbd>{/each}</span>
         <span>stops it from any app</span>
         {#if mode}
@@ -324,7 +332,7 @@
     {/if}
 
     {#if message.status === 'interrupted' || message.status === 'stopped' || message.status === 'error'}
-      <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] {message.status === 'error' ? 'text-danger' : 'text-muted'}" in:fade>
+      <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] {message.status === 'error' ? 'text-danger' : 'text-fg-3'}" in:fade>
         <span class="flex items-center gap-1.5">
           {#if message.status === 'error'}<Icon name="alert" size={14} />{/if}
           {notice[message.status]}
@@ -332,35 +340,31 @@
         </span>
         <span class="flex items-center gap-1">
           {#if message.status !== 'error' || message.content}
-            <button class="rounded-md px-2 py-0.5 font-medium text-fg hover:bg-hover disabled:opacity-40" disabled={busy} onclick={() => app.continueReply(message.id)}>
-              Continue
-            </button>
+            <button class="btn solid sm" disabled={busy} onclick={() => app.continueReply(message.id)}>Continue</button>
           {/if}
-          <button class="rounded-md px-2 py-0.5 text-fg-2 hover:bg-hover hover:text-fg disabled:opacity-40" disabled={busy} onclick={() => app.regenerate(message.id)}>
-            Retry
-          </button>
+          <button class="btn sm" disabled={busy} onclick={() => app.regenerate(message.id)}>Retry</button>
         </span>
       </div>
     {/if}
 
     {#if !streaming}
       <div
-        class="-ml-1 flex h-6 items-center gap-0.5 transition-opacity duration-150 select-none {last
+        class="-ml-1.5 flex h-[26px] min-w-0 items-center transition-opacity duration-150 select-none {last
           ? 'opacity-100'
           : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}"
       >
-        <button class="icon-btn !p-1" use:tip={copied ? 'Copied' : 'Copy'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={14} /></button>
-        <button class="icon-btn !p-1" use:tip={'Regenerate (creates a branch)'} disabled={busy} onclick={() => app.regenerate(message.id)}>
+        <BranchSwitcher {node} disabled={busy} />
+        <button class="icon-btn size-[26px] !rounded-lg" use:tip={copied ? 'Copied' : 'Copy'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={14} /></button>
+        <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Regenerate · makes a branch'} disabled={busy} onclick={() => app.regenerate(message.id)}>
           <Icon name="refresh" size={14} />
         </button>
-        <button class="icon-btn !p-1" use:tip={'Fork into a new chat from here'} onclick={() => app.fork(message.id)}>
-          <Icon name="branch" size={14} />
+        <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Fork into a new chat from here'} onclick={() => app.fork(message.id)}>
+          <Icon name="fork" size={14} />
         </button>
-        <BranchSwitcher {node} disabled={busy} />
-        {#if message.model}<span class="ml-2 truncate text-[11.5px] text-muted">{modelName(message.model)}</span>{/if}
-        {#if message.usage}
-          <span class="px-0.5 text-[11.5px] text-muted/60" aria-hidden="true">·</span>
-          <span class="shrink-0 text-[11.5px] text-muted tabular-nums" use:tip={usageDetail(message.usage)} in:fade={{ duration: 200 }}>{usageLabel(message.usage)}</span>
+        {#if message.model || message.usage}
+          <span class="mono-stat ml-2 min-w-0 truncate" use:tip={message.usage ? usageDetail(message.usage) : null} in:fade={{ duration: 200 }}
+            >{[message.model ? modelName(message.model) : '', message.usage ? usageShort(message.usage) : ''].filter(Boolean).join(' · ')}</span
+          >
         {/if}
       </div>
     {/if}

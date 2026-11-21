@@ -6,7 +6,7 @@
 
   /**
    * Full-screen, click-through layer above everything.
-   *  - While computer use drives: an ember hairline around the screen (the chat says what it's doing).
+   *  - While computer use drives: a hairline in the orb colours around the screen (the chat says what it's doing).
    *  - In Show-me mode: a spotlight on the exact control, with the instruction beside it. The
    *    spotlight glides from step to step; the user can drag the callout aside.
    *  - While the chat is out of sight: a notch at the top of the screen with what it's doing, Point
@@ -258,7 +258,7 @@
 </script>
 
 {#if st.acting}
-  <!-- Computer use is driving: an ember hairline around the screen. The chat says what it's doing. -->
+  <!-- Computer use is driving: a hairline in the orb colours around the screen. The chat says what it's doing. -->
   <div class="frame" aria-hidden="true" in:fade={{ duration: 320 }} out:fade={{ duration: 240 }}></div>
 {/if}
 
@@ -269,7 +269,7 @@
     {#key t.id ?? t.step}<span class="ping" style="--ping-delay:{pingDelay}ms"></span>{/key}
   </div>
   <div
-    class="callout cu-ink"
+    class="callout cu-paper"
     class:pinned={!!pin}
     class:placed
     style="left:{pin?.left ?? callout.left}px;top:{pin?.top ?? callout.top}px;translate:0 {callout.lift && !pin ? '-100%' : '0'};width:{CALLOUT_W}px"
@@ -287,7 +287,7 @@
     out:fade={{ duration: 160 }}
   >
     <div class="meta">
-      <span class="count">Step <b>{t.step}</b> of {t.total}</span>
+      <span class="count">Step {t.step} of {t.total}</span>
       <span class="grip" aria-hidden="true" title="Drag to move"></span>
       <span class="cu-dashes" aria-hidden="true">
         {#if t.total <= MAX_DASHES}
@@ -391,14 +391,33 @@
   }
 
   /* ---------------------------------------------------------------- acting */
+  /* A hairline in the orb's colours around the whole screen, turning slowly. It runs only while
+     it shows: a full-screen gradient repainting every frame is not free. */
+  @property --fa {
+    syntax: '<angle>';
+    inherits: false;
+    initial-value: 0deg;
+  }
   .frame {
     position: fixed;
     inset: 0;
+    padding: 3px;
     pointer-events: none;
-    /* An ember hairline, with a dark one inside it so it holds on an ember-coloured wallpaper. */
-    box-shadow:
-      inset 0 0 0 2px color-mix(in srgb, var(--cu-accent) 92%, transparent),
-      inset 0 0 0 3px rgb(20 19 17 / 0.16);
+    background: conic-gradient(from var(--fa), #cadcfc, #ffd8b0, #f6b8c8, #a0b9d1, #cadcfc);
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask-composite: exclude;
+    animation: frame-turn 6s linear infinite;
+  }
+  @keyframes frame-turn {
+    to {
+      --fa: 360deg;
+    }
   }
 
   /* ---------------------------------------------------------------- Show me */
@@ -406,7 +425,7 @@
     position: fixed;
     border-radius: 10px;
     /* The dim is the spotlight's own shadow, so the hole is always exact. */
-    box-shadow: 0 0 0 200vmax rgb(12 11 10 / 0.38);
+    box-shadow: 0 0 0 200vmax rgb(0 0 0 / 0.38);
     transition:
       left var(--cu-glide) var(--cu-ease),
       top var(--cu-glide) var(--cu-ease),
@@ -414,7 +433,7 @@
       height var(--cu-glide) var(--cu-ease);
     pointer-events: none;
   }
-  /* Paper ring with an ink hairline outside it: it reads on light and dark controls alike. */
+  /* A white ring with a soft orb-blue halo outside it: it reads on light and dark controls alike. */
   .ring,
   .ping {
     position: absolute;
@@ -423,8 +442,8 @@
   }
   .ring {
     box-shadow:
-      0 0 0 2px var(--cu-paper),
-      0 0 0 3px rgb(20 19 17 / 0.5);
+      0 0 0 2px #fff,
+      0 0 0 5px rgb(160 185 209 / 0.6);
   }
   /* The ping grows by the same 8 px on every side, whatever the target's size. */
   .ping {
@@ -446,7 +465,7 @@
 
   .callout {
     position: fixed;
-    padding: 12px 14px 12px 16px;
+    padding: 14px 16px;
     border-radius: var(--cu-r-card);
     cursor: grab;
     touch-action: none;
@@ -472,14 +491,14 @@
     height: 16px;
   }
   .count {
-    font-size: 11.5px;
+    font-family: var(--cu-mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
     color: var(--cu-fg-3);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
-  }
-  .count b {
-    font-weight: 500;
-    color: var(--cu-fg);
   }
   .grip {
     width: 20px;
@@ -491,19 +510,27 @@
     justify-self: end;
   }
   .callout p {
-    margin: 10px 0 12px;
-    font-size: 16px;
-    font-weight: 450;
-    line-height: 1.38;
-    letter-spacing: -0.012em;
+    margin: 8px 0 12px;
+    font-family: var(--cu-display);
+    font-size: 18px;
+    font-weight: 400;
+    line-height: 1.3;
+    letter-spacing: -0.015em;
     text-wrap: pretty;
     overflow-wrap: break-word;
   }
   .row {
     display: flex;
     align-items: center;
-    gap: 2px;
-    margin: 0 -2px 0 -10px;
+    gap: 6px;
+  }
+  .row .cu-btn {
+    height: 30px;
+    padding: 0 11px;
+    font-size: 12.5px;
+  }
+  .row .cu-btn:not(.primary) {
+    box-shadow: inset 0 0 0 1px var(--cu-hair);
   }
   .row .primary {
     margin-left: auto;
@@ -517,16 +544,16 @@
     right: 0;
     margin: 0 auto;
     /* One width for every state, so the notch never jumps as its text changes. */
-    width: 380px;
+    width: 460px;
     max-width: calc(100vw - 24px);
-    border-radius: 0 0 var(--cu-r-card) var(--cu-r-card);
+    border-radius: 0 0 20px 20px;
     overflow: hidden;
   }
   .head {
     display: flex;
     align-items: center;
-    gap: 10px;
-    height: 36px;
+    gap: 8px;
+    height: 42px;
     /* The notch's insets, in every variant and its panel: 14 px left, 8 px right. */
     padding: 0 8px 0 14px;
   }
@@ -567,15 +594,28 @@
     background: none;
     color: var(--cu-fg-2);
     font: inherit;
-    font-size: 12.5px;
+    font-size: 13px;
     cursor: default;
     transition: color var(--cu-fast) var(--cu-ease);
   }
-  .status:hover {
-    color: var(--cu-fg);
+  .status:hover .text {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: rgb(255 255 255 / 0.4);
   }
+  /* The notch's dot: the orb's colours while it works, amber while it waits on the user. */
   .status .cu-dot {
-    color: var(--cu-fg);
+    width: 9px;
+    height: 9px;
+    color: #fbbe45;
+  }
+  .status .cu-dot::before {
+    background: conic-gradient(#cadcfc, #ffd8b0, #f6b8c8, #a0b9d1, #cadcfc);
+    box-shadow: 0 0 10px rgb(202 220 252 / 0.6);
+  }
+  .status .cu-dot::after {
+    background: #fbbe45;
+    box-shadow: 0 0 10px rgb(251 190 69 / 0.6);
   }
   .text-slot {
     display: grid;
@@ -618,9 +658,10 @@
   }
   .ask-title {
     margin: 4px 0 0;
-    font-size: 15px;
-    font-weight: 500;
-    line-height: 1.35;
+    font-family: var(--cu-display);
+    font-size: 17px;
+    font-weight: 400;
+    line-height: 1.3;
     letter-spacing: -0.01em;
     display: -webkit-box;
     -webkit-line-clamp: 3;
@@ -635,9 +676,9 @@
     border-radius: var(--cu-r-inner);
     background: var(--cu-ink-raised);
     box-shadow: inset 0 0 0 1px var(--cu-hair);
-    color: var(--cu-fg-2);
+    color: rgb(255 255 255 / 0.6);
     font-family: var(--cu-mono);
-    font-size: 11px;
+    font-size: 12px;
     line-height: 1.5;
     max-height: calc(4 * 1.5em + 12px);
     overflow-y: auto;
@@ -652,7 +693,12 @@
     justify-content: flex-end;
     gap: 6px;
     margin: 12px 0 0;
-    padding-bottom: 8px;
+    padding-bottom: 14px;
+  }
+  .ask-row .cu-btn {
+    height: 30px;
+    padding: 0 14px;
+    font-size: 12.5px;
   }
   .see-all {
     margin-right: auto;

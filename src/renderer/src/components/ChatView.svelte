@@ -1,17 +1,25 @@
 <script lang="ts">
   import { tip } from '@/lib/tooltip'
-  import { tick } from 'svelte'
+  import { tick, untrack } from 'svelte'
   import { isClaudeModel } from '@shared/models'
   import { fade, fly, pop } from '@/lib/motion'
+  import { orb } from '@/lib/orb'
+  import { shortcut } from '@/lib/keys'
   import { app } from '@/lib/store.svelte'
+  import { clock, voice } from '@/lib/voice.svelte'
   import Composer from './Composer.svelte'
   import Icon from './Icon.svelte'
-  import Logo from './Logo.svelte'
   import MessageItem from './MessageItem.svelte'
   import SelectionReply from './SelectionReply.svelte'
 
+  let canvas: HTMLElement | undefined = $state()
   let scroller: HTMLDivElement | undefined = $state()
   let dock: HTMLDivElement | undefined = $state()
+  /** The docked composer floats over the thread (its glass frosts the lines under it): the thread keeps room for it. */
+  let dockH = $state(0)
+  let heroSlot: HTMLDivElement | undefined = $state()
+  let stageSlot: HTMLDivElement | undefined = $state()
+  let orbButton: HTMLButtonElement | undefined = $state()
   let composer: ReturnType<typeof Composer> | undefined = $state()
   let pinned = $state(true)
   let promptOpen = $state(false)
@@ -19,14 +27,11 @@
 
   const view = $derived(app.view)
   const empty = $derived(!view || view.path.length === 0)
+  /** Voice on a new chat: the composer docks, the rest fades, and the orb takes the centre. */
+  const stage = $derived(empty && voice.home !== 'off')
   // A chat from before Claude keeps its old model id; it now runs on the default.
   const model = $derived(isClaudeModel(app.chat.model) ? app.chat.model : (app.settings?.settings.defaultModel ?? ''))
   const hasOverride = $derived(app.chat.systemPrompt != null)
-
-  const greeting = (() => {
-    const h = new Date().getHours()
-    return h < 5 ? 'Up late' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'
-  })()
 
   // Keep the newest line in view unless the user scrolled up to read.
   const onscroll = () => {
@@ -55,26 +60,82 @@
   $effect(() => {
     void view?.session.id
     pinned = true
+    untrack(() => voice.leaveHome())
     composer?.focus()
   })
 
-  // The composer starts centred and glides to the bottom on the first message (FLIP).
+  // The composer starts centred and glides to the bottom on the first message, and on the voice
+  // stage (FLIP).
   let lastTop: number | null = null
   $effect.pre(() => {
     void empty
+    void stage
     lastTop = dock?.getBoundingClientRect().top ?? null
   })
   $effect(() => {
     void empty
+    void stage
     const el = dock
     if (!el || lastTop === null) return
     const dy = lastTop - el.getBoundingClientRect().top
     if (Math.abs(dy) < 2 || matchMedia('(prefers-reduced-motion: reduce)').matches) return
     el.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }], {
-      duration: 380,
-      easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)'
+      duration: 650,
+      easing: 'cubic-bezier(0.16, 1, 0.3, 1)'
     })
   })
+
+  /**
+   * The Home orb floats over the canvas, over whichever slot holds it: the hero's, or the voice
+   * stage's centre. It glides between them, growing as it goes.
+   */
+  let orbAt = $state<{ x: number; y: number; s: number } | null>(null)
+  let orbGlides = $state(false)
+  const place = () => {
+    const slot = stage ? stageSlot : heroSlot
+    if (!canvas || !slot) return
+    const c = canvas.getBoundingClientRect()
+    const r = slot.getBoundingClientRect()
+    const s = stage ? 168 : 88
+    orbAt = { x: r.left - c.left + r.width / 2 - s / 2, y: r.top - c.top + r.height / 2 - s / 2, s }
+  }
+  $effect(() => {
+    void stage
+    void empty
+    void heroSlot
+    void stageSlot
+    void tick().then(place)
+  })
+  $effect(() => {
+    if (!canvas) return
+    const observer = new ResizeObserver(() => {
+      orbGlides = false
+      place()
+      requestAnimationFrame(() => (orbGlides = true))
+    })
+    observer.observe(canvas)
+    return () => observer.disconnect()
+  })
+
+  // A ring leaves the orb on each spike in the voice.
+  $effect(() => {
+    void voice.spikes
+    const host = untrack(() => orbButton)
+    if (!host || !untrack(() => stage) || untrack(() => voice.spikes) === 0) return
+    const ring = document.createElement('span')
+    ring.className = 'ripple'
+    ring.style.setProperty('--rs', '168px')
+    ring.style.setProperty('--rg', '1.55')
+    host.append(ring)
+    ring.addEventListener('animationend', () => ring.remove())
+  })
+
+  const orbState = $derived(voice.phase === 'recording' || voice.phase === 'starting' ? 'listening' : voice.phase === 'transcribing' ? 'thinking' : '')
+  const homeVoice = $derived(empty)
+  const orbClick = () => {
+    if (voice.phase === 'transcribing' || voice.phase === 'starting') return
+    voice.toggle()
+  }
 
   const toggleBrowser = async () => {
     const next = !app.chat.browserEnabled
@@ -94,122 +155,198 @@
   }
 </script>
 
-<div class="relative flex h-full min-w-0 flex-1 flex-col">
-  <!--
-    The chat is inset below a thin sidebar-coloured strip, its edge carrying on from the sidebar's, and these controls
-    sit in a notch curved out of its top-right corner. The inset stays when the sidebar closes, so the chat never shifts.
-  -->
-  <header class="absolute top-0 right-0 z-10">
-    <svg class="pointer-events-none absolute top-0 right-0" width="132" height="49" aria-hidden="true">
-      <path d="M0 0V14.5C16 14.5 16 47.5 32 47.5H132V0Z" fill="var(--side)" />
-      <path d="M0 14.5C16 14.5 16 47.5 32 47.5H132" fill="none" stroke="var(--line)" />
-    </svg>
-    <div class="relative mt-2 mr-2 flex items-center gap-0.5 rounded-lg p-1">
-      <button class="icon-btn relative {hasOverride ? '!text-fg' : ''}" use:tip={'Instructions for this chat'} onclick={openPrompt}>
-        <Icon name="sliders" size={16} />
-        {#if hasOverride}<span class="absolute top-1 right-1 size-1.5 rounded-full bg-fg"></span>{/if}
-      </button>
-      {#if app.settings}
-        {@const onTop = app.settings.settings.alwaysOnTop}
-        <button
-          class="icon-btn {onTop ? '!text-fg' : ''}"
-          aria-pressed={onTop}
-          use:tip={onTop ? 'Unpin window' : 'Keep on top of other apps'}
-          onclick={() => app.setPinned(!onTop)}
-        >
-          <Icon name="pin" size={16} class="transition-transform duration-200 {onTop ? '' : 'rotate-45'}" />
-        </button>
-      {/if}
+<section
+  bind:this={canvas}
+  class="canvas relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-[var(--r-card)] shadow-[0_0_0_1px_var(--ring),var(--shadow-sm)]"
+  style="background: var(--canvas-glow), var(--canvas)"
+  class:voice={stage}
+>
+  <!-- The top bar keeps room for the fixed toggles: the sidebar's at the left while the sidebar is
+       shut, and the panel's at the right while the panel is shut. -->
+  <header
+    class="topbar flex h-[52px] shrink-0 items-center gap-1 transition-[opacity,padding] duration-300 ease-out"
+    style="padding-left: {app.sidebarOpen ? 16 : 86}px; padding-right: {app.panelToggle && !app.panelOpen ? 46 : 12}px"
+  >
+    <span class="min-w-0 truncate pl-1 font-medium" data-chat-title>{view?.session.title ?? ''}</span>
+    <span class="flex-1"></span>
+    <button class="icon-btn relative size-8 {hasOverride ? '!text-fg' : ''}" use:tip={'Instructions for this chat'} onclick={openPrompt}>
+      <Icon name="settings" size={16} />
+      {#if hasOverride}<span class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-fg"></span>{/if}
+    </button>
+    {#if app.settings}
+      {@const onTop = app.settings.settings.alwaysOnTop}
       <button
-        class="icon-btn relative {app.browserOpen ? '!text-fg' : ''}"
-        use:tip={app.browserOpen ? 'Hide browser' : 'Open browser'}
-        onclick={() => (app.browserOpen && app.activeTab === 'browser' ? app.closeBrowser() : app.openBrowser())}
+        class="icon-btn size-8 {onTop ? '!text-fg' : ''}"
+        aria-pressed={onTop}
+        use:tip={onTop ? 'Unpin window' : 'Keep on top of other apps'}
+        onclick={() => app.setPinned(!onTop)}
       >
-        <Icon name="globe" size={16} />
-        {#if app.control.active}<span class="absolute top-1 right-1 size-1.5 rounded-full bg-accent"></span>{/if}
+        <Icon name="pin" size={16} class="transition-transform duration-200 {onTop ? '' : 'rotate-45'}" />
       </button>
-    </div>
+    {/if}
+    <button
+      class="icon-btn relative size-8 {app.browserOpen ? '!text-fg' : ''}"
+      use:tip={app.browserOpen ? 'Hide browser' : 'Open browser'}
+      onclick={() => (app.browserOpen && app.activeTab === 'browser' ? app.closeBrowser() : app.openBrowser())}
+    >
+      <Icon name="globe" size={16} />
+      {#if app.control.active}<span class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-blue"></span>{/if}
+    </button>
   </header>
 
-  <div
-    class="mt-3.5 flex min-h-0 flex-1 flex-col rounded-tl-xl border-t border-l border-line bg-bg"
-  >
-    {#if empty}<div class="flex-1"></div>{/if}
-
-    <div class="relative {empty ? 'shrink-0' : 'min-h-0 flex-1'}">
-      <div bind:this={scroller} {onscroll} class="h-full overflow-y-auto {empty ? 'overflow-hidden' : ''}">
-        {#if empty}
-          <div class="mx-auto max-w-[720px] px-6 pb-6 text-center" in:fade={{ duration: 260 }}>
-            <Logo size={64} class="mx-auto mb-5 text-fg" />
-            <h2 class="font-serif text-[34px] leading-tight font-[420] tracking-[-0.015em]">{greeting}.</h2>
-            {#if app.settings && app.settings.settings.auth === 'apiKey' && !app.settings.hasAnthropicKey}
-              <button class="mt-3 text-[14px] text-fg-2 underline decoration-muted underline-offset-4 hover:decoration-fg" onclick={() => (app.settingsOpen = true)}>
-                Add your Anthropic API key to begin
-              </button>
-            {/if}
-          </div>
-        {:else if view}
-          <div class="mx-auto flex max-w-[720px] flex-col gap-7 px-6 pt-10 pb-10">
-            {#each view.path as node, i (node.message.id)}
-              <MessageItem {node} last={i === view.path.length - 1} />
-            {/each}
-          </div>
-        {/if}
+  {#if empty}
+    <div class="min-h-0 flex-1"></div>
+    <!-- Home: one screen, no scroll. -->
+    <div class="hero flex w-full flex-col items-center px-8 text-center {stage ? 'pointer-events-none absolute inset-x-0 top-[30%]' : ''}" in:fade={{ duration: 260 }}>
+      <div bind:this={heroSlot} class="size-[88px]"></div>
+      <div class="fadeable">
+        <h1 class="mt-[26px] mb-2.5 font-display text-[42px] leading-[1.05] font-light tracking-[-0.035em] text-balance">What are we working on?</h1>
+        <p class="mb-7 text-[15.5px] text-fg-3">
+          Type, talk, or let Claude use your browser{app.computerSupported ? ' and computer' : ''}.
+          {#if app.settings && app.settings.settings.auth === 'apiKey' && !app.settings.hasAnthropicKey}
+            <button class="ml-1 text-fg-2 underline decoration-fg-4 underline-offset-4 hover:decoration-fg" onclick={() => (app.settingsOpen = true)}>
+              Add your Anthropic API key to begin.
+            </button>
+          {/if}
+        </p>
+      </div>
+    </div>
+  {:else if view}
+    <div class="relative min-h-0 flex-1">
+      <!-- The thread runs on under the composer's glass, and fades out in the strip below it. -->
+      <div bind:this={scroller} {onscroll} class="h-full overflow-y-auto thread-fade">
+        <div class="mx-auto flex max-w-[760px] flex-col gap-6 px-8 pt-4" style="padding-bottom: {dockH + 24}px">
+          {#each view.path as node, i (node.message.id)}
+            <MessageItem {node} last={i === view.path.length - 1} />
+          {/each}
+        </div>
       </div>
 
-      {#if !pinned && !empty}
+      {#if !pinned}
         <!-- Centred by a wrapper so the fly transition's transform doesn't fight the centring. -->
-        <div class="pointer-events-none absolute inset-x-0 bottom-4 z-10 flex justify-center" transition:fly={{ y: 6, duration: 160 }}>
-          <button
-            class="pointer-events-auto flex h-8 items-center gap-1.5 rounded-full bg-surface pr-3.5 pl-3 text-[12.5px] text-fg-2 shadow-[0_0_0_1px_var(--line),var(--shadow)] transition-colors hover:text-fg"
-            onclick={() => toBottom('smooth')}
-          >
+        <!-- Under the composer's layer, so the composer's popovers (the model list) cover it. -->
+        <div class="pointer-events-none absolute inset-x-0 z-[2] flex justify-center" style="bottom: {dockH + 12}px" transition:fly={{ y: 6, duration: 160 }}>
+          <button class="btn glass-float pointer-events-auto !shadow-[inset_0_1px_0_var(--glass-edge),0_0_0_1px_var(--glass-ring),var(--shadow-float)]" onclick={() => toBottom('smooth')}>
             <Icon name="arrowDown" size={14} /> Scroll to end
           </button>
         </div>
       {/if}
     </div>
+  {/if}
 
-    <div bind:this={dock} class="mx-auto w-full max-w-[720px] shrink-0 px-6 {empty ? 'pb-2' : 'pb-5'}">
-      <Composer
-        bind:this={composer}
-        placeholder={empty ? 'Ask anything, or drop a file' : 'Reply'}
-        {model}
-        onmodel={(id) => app.updateSession({ model: id })}
-        browserEnabled={app.chat.browserEnabled}
-        onbrowser={toggleBrowser}
-        computerEnabled={app.chat.computerEnabled}
-        oncomputer={() => app.updateSession({ computerEnabled: !app.chat.computerEnabled })}
-      />
+  <div
+    bind:this={dock}
+    bind:clientHeight={dockH}
+    class="z-[3] mx-auto w-full max-w-[824px] shrink-0 px-8 {empty ? 'relative' : 'absolute inset-x-0 bottom-0'} {empty && !stage ? '' : 'pb-[18px]'}"
+  >
+    <Composer
+      bind:this={composer}
+      tall={empty && !stage}
+      inChat={!homeVoice}
+      placeholder={empty ? 'Ask anything' : 'Reply'}
+      {model}
+      onmodel={(id) => app.updateSession({ model: id })}
+      browserEnabled={app.chat.browserEnabled}
+      onbrowser={toggleBrowser}
+      computerEnabled={app.chat.computerEnabled}
+      oncomputer={() => app.updateSession({ computerEnabled: !app.chat.computerEnabled })}
+    />
+  </div>
+
+  {#if empty}
+    <div class="min-h-0 transition-[flex-grow] duration-500 {stage ? 'flex-[0]' : 'flex-1 pb-[52px]'}"></div>
+
+    <!-- The voice stage on a new chat. -->
+    <div
+      class="vstage pointer-events-none absolute inset-x-0 top-[52px] bottom-[150px] flex flex-col items-center justify-center transition-opacity duration-[400ms] ease-out {stage ? 'opacity-100' : 'opacity-0'}"
+      aria-hidden={!stage}
+    >
+      <div bind:this={stageSlot} class="size-[176px]"></div>
+      <div class="mt-[34px] h-[30px] font-display text-[26px] leading-[1.1] font-light tracking-[-0.02em]" aria-live="polite">
+        {#if voice.home === 'ready' && voice.phase === 'idle'}Ready when you are{:else if voice.phase === 'transcribing'}<span class="thinking">Transcribing</span>{:else}<span class="thinking">Listening</span>{/if}
+      </div>
+      <div class="mt-2.5 flex h-[18px] items-center gap-2.5 text-[13px] text-fg-3">
+        {#if voice.home === 'ready' && voice.phase === 'idle'}
+          <span>Enter to send · click the orb to keep talking · Esc to start over</span>
+        {:else if voice.phase !== 'transcribing'}
+          <span class="font-label text-[12.5px] font-medium text-fg-2 tabular-nums">{clock(voice.elapsed)}</span>
+          <span>{voice.held ? 'Release to transcribe' : 'Click the orb to finish · Esc to cancel'}</span>
+        {/if}
+      </div>
     </div>
 
-    {#if empty}<div class="flex-[1.3]"></div>{/if}
-  </div>
-</div>
+    {#if orbAt}
+      <button
+        bind:this={orbButton}
+        class="absolute z-[2] grid place-items-center rounded-full {orbGlides ? 'orb-glide' : ''}"
+        style="left: {orbAt.x}px; top: {orbAt.y}px; width: {orbAt.s}px; height: {orbAt.s}px"
+        aria-label={voice.recording ? 'Finish talking' : 'Talk'}
+        data-tip-no-label
+        use:tip={stage ? null : { text: 'Talk', kbd: shortcut('M') }}
+        onclick={orbClick}
+        in:fade={{ duration: 260 }}
+        onintroend={() => (orbGlides = true)}
+      >
+        <span
+          class="orb"
+          style="--s: 100%; --lvl: {stage ? voice.level.toFixed(3) : 0}"
+          use:orb={{ state: orbState, level: stage && voice.recording ? voice.level : undefined }}
+        ></span>
+      </button>
+    {/if}
+  {/if}
+</section>
 
 <SelectionReply {scroller} onreply={(block) => composer?.append(block)} />
 
 {#if promptOpen}
   <div class="fixed inset-0 z-50 grid place-items-center p-6" role="dialog" aria-modal="true" aria-label="Chat instructions">
-    <button class="absolute inset-0 bg-scrim" aria-label="Close" transition:fade={{ duration: 150 }} onclick={() => (promptOpen = false)}></button>
-    <div class="relative w-full max-w-lg rounded-lg bg-surface p-5 shadow-float" transition:pop>
-      <h2 class="font-serif text-[20px]">Instructions for this chat</h2>
-      <p class="mt-1 text-[13px] text-muted">Replaces the global instructions for this chat only.</p>
+    <button class="absolute inset-0 bg-scrim backdrop-blur-[4px]" aria-label="Close" transition:fade={{ duration: 150 }} onclick={() => (promptOpen = false)}></button>
+    <div class="glass-strong relative w-full max-w-lg rounded-[20px] p-6" transition:pop>
+      <h2 class="font-display text-[22px] leading-tight font-normal tracking-[-0.02em]">Instructions for this chat</h2>
+      <p class="mt-1 text-[13.5px] text-fg-3">Replaces the global instructions for this chat only.</p>
       <!-- svelte-ignore a11y_autofocus -->
       <textarea
         autofocus
         bind:value={promptDraft}
         rows="9"
-        class="mt-4 w-full resize-y rounded-md bg-bg px-3 py-2.5 font-mono text-[12.5px] leading-relaxed outline-none focus:shadow-[0_0_0_1px_var(--muted)]"
+        class="mt-4 w-full resize-y rounded-[10px] bg-[var(--glass-bg)] px-3 py-2.5 font-mono text-[12.5px] leading-relaxed shadow-[inset_0_0_0_1px_var(--line)] outline-none focus:shadow-[inset_0_0_0_1px_var(--line-2)]"
         onkeydown={(e) => e.key === 'Escape' && (promptOpen = false)}
       ></textarea>
-      <div class="mt-4 flex items-center gap-1 text-[13px]">
+      <div class="mt-4 flex items-center gap-2">
         {#if hasOverride}
-          <button class="rounded-md px-2 py-1 text-fg-2 hover:bg-hover hover:text-fg" onclick={() => savePrompt(null)}>Use global</button>
+          <button class="btn quiet" onclick={() => savePrompt(null)}>Use global</button>
         {/if}
-        <button class="ml-auto rounded-md px-3 py-1.5 text-fg-2 hover:bg-hover hover:text-fg" onclick={() => (promptOpen = false)}>Cancel</button>
-        <button class="rounded-md bg-fg px-3.5 py-1.5 font-medium text-bg" onclick={() => savePrompt(promptDraft)}>Save</button>
+        <button class="btn ml-auto" onclick={() => (promptOpen = false)}>Cancel</button>
+        <button class="btn solid" onclick={() => savePrompt(promptDraft)}>Save</button>
       </div>
     </div>
   </div>
 {/if}
+
+<style>
+  .fadeable {
+    transition:
+      opacity 0.35s var(--ease-studio),
+      transform 0.5s var(--ease-studio);
+  }
+  .canvas.voice .fadeable {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  .canvas.voice .topbar {
+    opacity: 0;
+    pointer-events: none;
+  }
+  /* Lines that scroll past the composer fade out in the strip below it. */
+  .thread-fade {
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 46px), transparent calc(100% - 16px));
+  }
+  .orb-glide {
+    transition:
+      left 650ms var(--ease-studio),
+      top 650ms var(--ease-studio),
+      width 650ms var(--ease-studio),
+      height 650ms var(--ease-studio);
+  }
+</style>

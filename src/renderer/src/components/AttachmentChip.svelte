@@ -31,11 +31,11 @@
   const ext = $derived(attachment.kind === 'pdf' ? 'PDF' : (attachment.name.split('.').pop()?.slice(0, 4).toUpperCase() ?? 'TXT'))
 </script>
 
-<div class="group relative flex h-11 items-center gap-2.5 rounded-md bg-hover/70 pr-3 pl-1.5" in:pop>
+<div class="group relative flex h-11 items-center gap-2.5 rounded-xl bg-card pr-3 pl-1.5 shadow-[0_0_0_1px_var(--ring)]" in:pop>
   {#if attachment.kind === 'image'}
-    <img src={window.api.attachments.url(attachment.id)} alt="" class="size-8 rounded-sm object-cover" />
+    <img src={window.api.attachments.url(attachment.id)} alt="" class="size-8 rounded-lg object-cover" />
   {:else if attachment.kind === 'audio'}
-    <div class="flex size-8 items-center justify-center gap-[1.5px] rounded-sm bg-surface px-1" aria-hidden="true">
+    <div class="flex size-8 items-center justify-center gap-[1.5px] rounded-lg bg-bubble px-1" aria-hidden="true">
       {#if bars.length}
         {#each bars as b, i (i)}<span class="w-[1.5px] rounded-full bg-fg-2" style="height: {Math.max(2, (b / 99) * 22)}px"></span>{/each}
       {:else}
@@ -44,9 +44,9 @@
     </div>
   {:else if /^point-\d+\.md$/.test(attachment.name)}
     <!-- Point's note (its image is the chip beside it). -->
-    <div class="grid size-8 place-items-center rounded-sm bg-surface text-fg-2" aria-hidden="true"><Icon name="crosshair" size={15} /></div>
+    <div class="grid size-8 place-items-center rounded-lg bg-bubble text-fg-2" aria-hidden="true"><Icon name="crosshair" size={15} /></div>
   {:else}
-    <div class="grid size-8 place-items-center rounded-sm bg-surface font-mono text-[9.5px] font-medium tracking-wide text-muted">{ext}</div>
+    <div class="grid size-8 place-items-center rounded-lg bg-bubble font-label text-[9.5px] font-medium tracking-wide text-fg-3">{ext}</div>
   {/if}
   <div class="min-w-0 leading-tight">
     <div class="max-w-36 truncate text-[12.5px] text-fg" use:tip={attachment.name}>{attachment.name}</div>
@@ -54,7 +54,7 @@
   </div>
   {#if onremove}
     <button
-      class="absolute -top-1.5 -right-1.5 grid size-5 place-items-center rounded-full bg-fg text-bg opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+      class="absolute -top-1.5 -right-1.5 grid size-5 place-items-center rounded-full bg-solid text-on-solid opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
       use:tip={`Remove ${attachment.name}`}
       onclick={onremove}><Icon name="x" size={11} stroke={2.2} /></button
     >
