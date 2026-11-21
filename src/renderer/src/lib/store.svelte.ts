@@ -64,6 +64,8 @@ class AppState {
     this.page = open ? 'settings' : 'chat'
   }
   toasts = $state<Toast[]>([])
+  /** The search modal (Ctrl K). */
+  findOpen = $state(false)
   /** Message ids whose replies started streaming in this window (artifacts auto-open for these). */
   liveIds = new SvelteSet<string>()
   sidebarOpen = $state(true)
@@ -157,6 +159,43 @@ class AppState {
   activeTab = $derived<'artifact' | 'browser'>(
     this.panelTab === 'browser' && this.browserOpen ? 'browser' : this.hasArtifact ? 'artifact' : 'browser'
   )
+
+  /** The newest finished artifact in the open chat's visible branch, if any. */
+  latestArtifact = $derived.by<OpenArtifact | null>(() => {
+    const path = this.view?.path ?? []
+    for (let i = path.length - 1; i >= 0; i--) {
+      const m = path[i]!.message
+      if (m.role !== 'assistant' || !/<artifact/i.test(m.content)) continue
+      const found = parseContent(m.content).findLast((b) => b.type === 'artifact' && b.complete)
+      if (found && found.type === 'artifact') return { identifier: found.identifier, messageId: m.id }
+    }
+    return null
+  })
+
+  /** What the panel showed when its toggle closed it, so the toggle can bring it back. */
+  private closedPanel = $state<{ sessionId: string; artifact: OpenArtifact | null; browser: boolean; tab: 'artifact' | 'browser' } | null>(null)
+
+  /** The panel toggle (top right) shows while the panel is open, or there's something to open. */
+  panelToggle = $derived(
+    this.panelOpen || this.latestArtifact !== null || (this.closedPanel !== null && this.closedPanel.sessionId === (this.view?.session.id ?? ''))
+  )
+
+  /** The panel toggle: closes the panel (artifact and browser), or brings back what it showed. */
+  togglePanel() {
+    const id = this.view?.session.id ?? ''
+    if (this.panelOpen) {
+      this.closedPanel = { sessionId: id, artifact: this.hasArtifact ? this.artifact : null, browser: this.browserOpen, tab: this.activeTab }
+      this.artifact = null
+      this.browserOpen = false
+      return
+    }
+    const last = this.closedPanel?.sessionId === id ? this.closedPanel : null
+    this.closedPanel = null
+    if (last?.browser) this.browserOpen = true
+    const artifact = last?.artifact ?? (last?.browser ? null : this.latestArtifact)
+    if (artifact) this.artifact = artifact
+    this.panelTab = last?.tab ?? 'artifact'
+  }
 
   showArtifact(artifact: OpenArtifact) {
     this.artifact = artifact

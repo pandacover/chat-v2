@@ -88,12 +88,12 @@ jobs:
       - name: Check the macOS signatures
         if: runner.os == 'macOS'
         run: |
-          bash scripts/ci-mac-verify.sh dist/mac/chat-v2.app self-signed x64
-          bash scripts/ci-mac-verify.sh dist/mac-arm64/chat-v2.app self-signed arm64
+          bash scripts/ci-mac-verify.sh dist/mac/Tomo.app self-signed x64
+          bash scripts/ci-mac-verify.sh dist/mac-arm64/Tomo.app self-signed arm64
           for arch in arm64 x64; do
             unzipped="$RUNNER_TEMP/zip-$arch"
             ditto -x -k "dist/chat-v2-${VERSION}-${arch}.zip" "$unzipped"
-            bash scripts/ci-mac-verify.sh "$unzipped/chat-v2.app" self-signed "$arch"
+            bash scripts/ci-mac-verify.sh "$unzipped/Tomo.app" self-signed "$arch"
           done
       # Apps from before the per-processor builds download "-universal.dmg". The Intel DMG runs on
       # both (through Rosetta on Apple silicon), and their next update moves them to arm64. Drop

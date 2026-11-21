@@ -1,8 +1,8 @@
-<img src="assets/icon.svg" width="64" height="64" alt="">
+<img src="assets/logo.png" width="64" height="64" alt="">
 
-# chat-v2
+# Tomo
 
-chat-v2 is a desktop chat app for Claude. Replies run on Claude Code, which comes with the app, through the [Claude Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview). It transcribes voice with [ElevenLabs](https://elevenlabs.io) Scribe. It is built with Electron, Svelte 5, and Effect.
+Tomo is a desktop chat app for Claude. Replies run on Claude Code, which comes with the app, through the [Claude Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview). It transcribes voice with [ElevenLabs](https://elevenlabs.io) Scribe. It is built with Electron, Svelte 5, and Effect.
 
 ## What it does
 
@@ -37,7 +37,7 @@ If your shell sets `ELECTRON_RUN_AS_NODE=1`, unset it first. Otherwise Electron 
 
 ## Computer use
 
-Turn on **Computer** in the composer, and Claude can see your screen and use your apps in that chat. It is a port of Tomo's computer use, in `src/main/computer`.
+Turn on **Computer** in the composer, and Claude can see your screen and use your apps in that chat. It lives in `src/main/computer`.
 
 There is nothing to switch: each message is read for what you want.
 
@@ -49,14 +49,14 @@ There is nothing to switch: each message is read for what you want.
 - Before anything you can't take back (deleting, sending, buying, installing, changing settings), a card in the chat asks for your OK, and the chat window comes to the front. `Ctrl+Enter` (`⌘ Enter` on a Mac) approves once the button has filled; `Esc` denies.
 - `Ctrl+Alt+Esc` (`⌃⌥Esc` on a Mac) stops a computer reply from any app, as Stop does. The app holds the shortcut only while a computer reply runs.
 - Shell commands that only read run freely. Any other command, and any file write, asks first.
-- While a computer reply runs, chat-v2's windows are left out of screenshots, which also hides them from screen sharing.
+- While a computer reply runs, Tomo's windows are left out of screenshots, which also hides them from screen sharing.
 - Computer replies think at low effort on Sonnet and Haiku and medium on the others, whatever Settings say: they make many short look-and-click calls.
-- On Windows, a window running as administrator drops chat-v2's input, and Claude says so.
-- On macOS, chat-v2 needs Accessibility and Screen Recording permission. This side hasn't run on a Mac yet.
+- On Windows, a window running as administrator drops Tomo's input, and Claude says so.
+- On macOS, Tomo needs Accessibility and Screen Recording permission. This side hasn't run on a Mac yet.
 
 ## Where your data lives
 
-The app keeps its files in `%APPDATA%\chat-v2` on Windows, `~/Library/Application Support/chat-v2` on macOS, and `~/.config/chat-v2` on Linux.
+Tomo keeps its files in `%APPDATA%\chat-v2` on Windows, `~/Library/Application Support/chat-v2` on macOS, and `~/.config/chat-v2` on Linux. The folder keeps the app's old name, chat-v2, so data from before the rename stays where it was. Browser recordings go to `Videos/Tomo`.
 
 - `config.json` holds the settings and the system prompt. You can edit it by hand.
 - `secrets.json` holds the encrypted API keys.
@@ -82,7 +82,7 @@ The release workflow signs macOS builds with a self-signed certificate (`build/c
 
 Messages form a tree through `parent_id`. Edits, regenerations, and forks add messages and never change existing ones.
 
-`bun scripts/make-icons.ts` regenerates the icons from `src/shared/logo.ts`.
+`python scripts/make-icons.py` (Pillow and NumPy) regenerates the logo and icons from `assets/logo-source.png`.
 
 ## License
 

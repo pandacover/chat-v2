@@ -96,9 +96,9 @@ export interface Platform {
   readonly name: 'windows' | 'macos' | 'linux'
   /** False where controls can't be read (Linux): ui_elements isn't offered there. Absent means true. */
   readonly controls?: boolean
-  /** Remember the app the user was in before chat-v2's window came to the front. */
+  /** Remember the app the user was in before Tomo's window came to the front. */
   remember(): Promise<WindowInfo>
-  /** If chat-v2 has focus, give it back to the remembered app. */
+  /** If Tomo has focus, give it back to the remembered app. */
   restoreFocus(): Promise<WindowInfo>
   foreground(): Promise<WindowInfo>
   windows(): Promise<ReadonlyArray<WindowInfo & { minimized?: boolean }>>
@@ -142,7 +142,7 @@ export interface Platform {
   elementAt(x: number, y: number): Promise<ScreenRect | null>
   /**
    * For the user's Point: the app window and control under a point (input space), looking past
-   * chat-v2's own windows, since the Point overlay covers the screen then. A fallback search
+   * Tomo's own windows, since the Point overlay covers the screen then. A fallback search
    * stops after about `budgetMs`. Absent where controls can't be read (macOS, Linux).
    */
   pointAt?(x: number, y: number, budgetMs?: number): Promise<PointHit | null>

@@ -135,7 +135,7 @@ try {
   await send('Show me how to turn on night light')
   const step = page.locator('[data-computer-wait="teach"]:not([inert])')
   await step.waitFor()
-  ok((await step.innerText()).includes('Step 1 of 3'), 'the Show-me step shows in the chat')
+  ok(/Step 1 of 3/i.test(await step.innerText()), 'the Show-me step shows in the chat')
   await sleep(1200)
   await capture('show-me')
   // The overlay's own Done.
@@ -194,7 +194,7 @@ try {
   await capture('overlay-notch', 'computer-overlay.html')
 
   await done.click()
-  await until(async () => (await step.innerText()).includes('Step 2 of 3'), "the overlay's Done ends the step")
+  await until(async () => /Step 2 of 3/i.test(await step.innerText()), "the overlay's Done ends the step")
   await until(async () => (await overlay.locator('.callout p').innerText()) === 'Click Night light', 'the next step shows on the overlay')
   // A hidden window runs the new callout's 6 px rise only as captures force frames.
   await capture('overlay-step-2', 'computer-overlay.html')
@@ -202,7 +202,7 @@ try {
   ok(Math.abs(next.x - moved.x) < 2 && Math.abs(next.y - moved.y) < 2, `the next step keeps the place the callout was dragged to (${JSON.stringify(moved)} vs ${JSON.stringify(next)})`)
   // The chat's Done.
   await step.getByRole('button', { name: 'Done' }).click()
-  await until(async () => (await step.innerText()).includes('Step 3 of 3'), "the chat's Done ends the step")
+  await until(async () => /Step 3 of 3/i.test(await step.innerText()), "the chat's Done ends the step")
   // A typed answer.
   const before = await page.locator('[aria-label="Edit message"]').count()
   await send('There is no switch for it')

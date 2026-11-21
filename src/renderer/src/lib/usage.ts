@@ -11,6 +11,12 @@ export const formatCost = (cost: number) => {
 
 export const usageLabel = (u: Usage) => `${n(u.totalTokens)} tokens${u.cost !== null ? ` · ${formatCost(u.cost)}` : ''}`
 
+/** Thousands as "12.4k", for the line under a reply. */
+const short = (v: number) => (v < 1000 ? String(v) : v < 100_000 ? `${(v / 1000).toFixed(1).replace(/\.0$/, '')}k` : `${Math.round(v / 1000)}k`)
+
+/** "12.4k tok · $0.042" */
+export const usageShort = (u: Usage) => `${short(u.totalTokens)} tok${u.cost !== null ? ` · ${formatCost(u.cost)}` : ''}`
+
 export const usageDetail = (u: Usage) => {
   const cache = [u.cachedTokens ? `${n(u.cachedTokens)} from the cache` : '', u.cacheWriteTokens ? `${n(u.cacheWriteTokens)} written to it` : ''].filter(Boolean).join(', ')
   return [

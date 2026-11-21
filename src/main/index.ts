@@ -27,6 +27,16 @@ import { Db } from './services/Db'
 import { ElevenLabs } from './services/ElevenLabs'
 import { type SecretCipher, SettingsStore } from './services/SettingsStore'
 
+// The app was called chat-v2, and its data (chats, settings, keys) lives in a folder of that name.
+// Renamed Tomo, Electron would default to a new, empty "Tomo" folder: keep the old one. Not when
+// --user-data-dir is passed (tests pass a temp folder and must never touch real data).
+if (!app.commandLine.hasSwitch('user-data-dir')) app.setPath('userData', join(app.getPath('appData'), 'chat-v2'))
+// On macOS and Linux the key that encrypts saved API keys (safeStorage) is kept in the OS keychain
+// under the app's name ("chat-v2 Safe Storage"), read at startup: renamed, the app could no longer
+// decrypt them. So the name stays chat-v2 there, and the Mac menu says Tomo itself (menu.ts).
+// On Windows the key lives in the userData folder, so the name can follow the brand.
+app.setName(process.platform === 'win32' ? 'Tomo' : 'chat-v2')
+
 registerSchemes()
 
 const cipher: SecretCipher = {
@@ -156,7 +166,7 @@ const agentDeps = (root: string): AgentDeps => {
     query: process.env.CHAT_V2_FAKE_QUERY ? (load(process.env.CHAT_V2_FAKE_QUERY) as { query: QueryFn }).query : query,
     configDir,
     cwd: root,
-    clientApp: `chat-v2/${app.getVersion()}`,
+    clientApp: `tomo/${app.getVersion()}`,
     ...(app.isPackaged ? { executable: claudeBinary() } : {}),
     // Started as the SDK would, but tracked, so quitting ends every Claude Code process.
     spawn: (o) => {
@@ -257,8 +267,9 @@ const createWindow = async () => {
     minWidth: 760,
     minHeight: 520,
     show: false,
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#171614' : '#f7f5f0',
-    title: 'chat-v2',
+    // The sidebar's colour (app.css --side), so the window never flashes another before it paints.
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#09090a' : '#f5f3f1',
+    title: 'Tomo',
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),
@@ -419,8 +430,18 @@ if (process.platform === 'darwin') nativeUpdater.on('before-quit-for-update', ()
 const quitTest = () => {
   const child = trackChild(spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, stdio: 'pipe' }))
   console.log(`[quit-test] child ${child.pid}`)
-  setTimeout(() => {
-    console.log('[quit-test] quitting')
-    app.quit()
-  }, 1000)
+  // Quits once the window has loaded and settled, as a user would. On a macOS VM without a GPU
+  // (CI), quitting in the first seconds after launch stalls the main thread until startup work
+  // drains, on main as well as here (2-5 s, past the test's limit); quitting a few seconds in, it
+  // exits in well under a second. That stall isn't what this test is for: a quit that hangs is.
+  const quit = () =>
+    setTimeout(() => {
+      console.log('[quit-test] quitting')
+      app.quit()
+    }, SETTLE_MS)
+  const win = BrowserWindow.getAllWindows()[0]
+  if (!win || !win.webContents.isLoading()) quit()
+  else win.webContents.once('did-finish-load', quit)
 }
+/** How long the quit test lets the window settle after it loads. */
+const SETTLE_MS = 5000

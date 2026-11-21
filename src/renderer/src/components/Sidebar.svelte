@@ -3,65 +3,22 @@
   import { flip } from 'svelte/animate'
   import { SvelteSet } from 'svelte/reactivity'
   import type { Session } from '@shared/types'
+  import { entries, grouped, openEntry, type Entry } from '@/lib/chats.svelte'
   import { ease, fade } from '@/lib/motion'
   import { shortcut } from '@/lib/keys'
   import { app } from '@/lib/store.svelte'
   import { theme, type ThemePref } from '@/lib/theme.svelte'
   import Icon, { type IconName } from './Icon.svelte'
-  import Logo from './Logo.svelte'
   import UpdateButton from './UpdateButton.svelte'
 
-  let query = $state('')
   let renaming = $state<string | null>(null)
   let confirming = $state<string | null>(null)
   let draft = $state('')
 
-  const DAY = 24 * 60 * 60 * 1000
+  // Drafts first, then pinned chats, then the rest by day.
+  const groups = $derived(grouped(entries()))
 
-  /** A sidebar row: a saved chat, or (session null) the new chat while it has a draft. */
-  interface Entry {
-    key: string
-    title: string
-    session: Session | null
-    draft: boolean
-  }
-
-  /** The new chat has no title yet; its draft's first line stands in. */
-  const draftTitle = (text: string) => {
-    const line = text.replace(/\s+/g, ' ').trim()
-    return line.length > 60 ? `${line.slice(0, 57).trimEnd()}…` : line || 'New chat'
-  }
-
-  // Unsent drafts first, then pinned chats, then the rest by day.
-  const groups = $derived.by(() => {
-    const q = query.trim().toLowerCase()
-    const entries: Entry[] = app.sessions.map((s) => ({ key: s.id, title: s.title, session: s, draft: app.hasDraft(s.id) }))
-    if (app.hasDraft('')) entries.push({ key: '', title: draftTitle(app.draftText('')), session: null, draft: true })
-    const list = q ? entries.filter((e) => e.title.toLowerCase().includes(q)) : entries
-    const draftAt = (e: Entry) => app.drafts.get(e.key)?.at ?? Number.MAX_SAFE_INTEGER
-    const drafts = list.filter((e) => e.draft).sort((a, b) => draftAt(b) - draftAt(a))
-    const pinned = list
-      .filter((e) => !e.draft && e.session?.pinnedAt != null)
-      .sort((a, b) => a.session!.pinnedAt! - b.session!.pinnedAt!)
-    const today = new Date().setHours(0, 0, 0, 0)
-    const buckets: Array<[string, Entry[]]> = [
-      ['Drafts', drafts],
-      ['Pinned', pinned],
-      ['Today', []],
-      ['Yesterday', []],
-      ['This week', []],
-      ['Earlier', []]
-    ]
-    for (const e of list) {
-      if (e.draft || !e.session || e.session.pinnedAt != null) continue
-      const at = e.session.updatedAt
-      const i = at >= today ? 2 : at >= today - DAY ? 3 : at >= today - 7 * DAY ? 4 : 5
-      buckets[i]![1].push(e)
-    }
-    return buckets.filter(([, items]) => items.length > 0)
-  })
-
-  // Collapsed groups, by label, kept across launches. A search shows every group open.
+  // Collapsed groups, by label, kept across launches.
   const COLLAPSED_KEY = 'chat-v2:collapsed-groups'
   const collapsed = new SvelteSet<string>(JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '[]') as string[])
   const toggleGroup = (label: string) => {
@@ -73,10 +30,9 @@
   // Headers and chats in one keyed list, so a header moves with the same flip as the chats around it.
   type Row = { key: string; label: string; open: boolean; entry?: undefined } | { key: string; entry: Entry }
   const rows = $derived.by(() => {
-    const searching = query.trim() !== ''
     const out: Row[] = []
     for (const [label, items] of groups) {
-      const open = searching || !collapsed.has(label)
+      const open = !collapsed.has(label)
       out.push({ key: `group:${label}`, label, open })
       if (open) for (const e of items) out.push({ key: `chat:${e.key}`, entry: e })
     }
@@ -106,9 +62,11 @@
     { id: 'system', icon: 'monitor', label: 'System' }
   ]
 
+  const authLabel = $derived(app.settings?.settings.auth === 'apiKey' ? 'API key' : 'Claude sign-in')
+
   // Drag the right edge to resize; the width is kept across launches. Double-click resets it.
-  const DEFAULT_WIDTH = 252
-  const clampWidth = (px: number) => Math.round(Math.max(200, Math.min(480, window.innerWidth - 640, px)))
+  const DEFAULT_WIDTH = 256
+  const clampWidth = (px: number) => Math.round(Math.max(208, Math.min(420, window.innerWidth - 640, px)))
   app.sidebarWidth = clampWidth(app.sidebarWidth)
   let resizing = $state(false)
   const setWidth = (px: number) => {
@@ -121,8 +79,10 @@
     const target = e.currentTarget as HTMLElement
     target.setPointerCapture(e.pointerId)
     resizing = true
+    // Relative to where it was grabbed, so the edge doesn't jump to the pointer.
+    const from = app.sidebarWidth - e.clientX
     const move = (ev: PointerEvent) => {
-      app.sidebarWidth = clampWidth(ev.clientX)
+      app.sidebarWidth = clampWidth(from + ev.clientX)
     }
     const up = () => {
       resizing = false
@@ -139,165 +99,206 @@
 
 <svelte:window onresize={() => (app.sidebarWidth = clampWidth(app.sidebarWidth))} />
 
+<!-- One spot for the sidebar toggle, open or closed, so a second click lands on it. -->
+<div class="fixed top-[18px] left-[14px] z-[45] flex gap-0.5">
+  <button
+    class="icon-btn size-8"
+    data-sidebar-toggle
+    use:tip={{ text: app.sidebarOpen ? 'Hide sidebar' : 'Show sidebar', kbd: shortcut('B') }}
+    onclick={() => (app.sidebarOpen = !app.sidebarOpen)}
+  >
+    <Icon name="sidebar" size={16} />
+  </button>
+  {#if !app.sidebarOpen}
+    <button class="icon-btn size-8" use:tip={{ text: 'Home', kbd: shortcut('N') }} onclick={() => app.newSession()} in:fade={{ duration: 160 }}>
+      <Icon name="home" size={16} />
+    </button>
+  {/if}
+</div>
+
 <aside
-  class="relative flex h-full shrink-0 flex-col overflow-hidden bg-side {resizing ? 'cursor-col-resize select-none' : 'transition-[width] duration-200 ease-out'}"
-  style="width: {app.sidebarOpen ? app.sidebarWidth : 0}px"
+  class="side relative flex h-full shrink-0 flex-col overflow-hidden bg-side {resizing ? 'cursor-col-resize select-none' : 'transition-[width,opacity] duration-[350ms] ease-out'}"
+  style="width: {app.sidebarOpen ? app.sidebarWidth : 0}px; opacity: {app.sidebarOpen ? 1 : 0}"
   inert={!app.sidebarOpen}
 >
   <div
     role="separator"
     aria-orientation="vertical"
     aria-label="Resize sidebar"
-    class="group absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize"
+    class="group absolute inset-y-0 right-0 z-10 w-2 cursor-col-resize"
+    use:tip={'Drag to resize · double-click to reset'}
     onpointerdown={startResize}
     ondblclick={() => setWidth(DEFAULT_WIDTH)}
   >
-    <span class="absolute inset-y-0 right-0 w-px transition-colors group-hover:bg-muted {resizing ? '!bg-fg-2' : ''}"></span>
+    <span class="absolute inset-y-3 right-0 w-0.5 rounded-full transition-colors group-hover:bg-line-2 {resizing ? '!bg-line-2' : ''}"></span>
   </div>
-  <div class="flex h-full flex-col" style="width: {app.sidebarWidth}px">
-    <!-- The toggle sits exactly where the closed sidebar's "Show sidebar" button does, so it never moves under the pointer. -->
-    <div class="relative flex h-12 items-start justify-between pt-3 pr-2 pl-3">
-      <button class="icon-btn" use:tip={{ text: 'Hide sidebar', kbd: shortcut('B') }} onclick={() => (app.sidebarOpen = false)}>
-        <Icon name="sidebar" size={17} />
-      </button>
-      <div class="pointer-events-none absolute inset-x-0 top-3 flex h-[27px] items-center justify-center gap-1">
-        <Logo size={22} class="text-fg" />
-        <span class="font-serif text-[17px] tracking-tight italic">chat</span>
-      </div>
-      <button class="icon-btn" use:tip={{ text: 'New chat', kbd: shortcut('N') }} onclick={() => app.newSession()}>
-        <Icon name="compose" size={17} />
-      </button>
+
+  <div class="flex h-full flex-col gap-0.5 px-2.5 pt-4 pb-2.5" style="width: {app.sidebarWidth}px">
+    <!-- The name, centred across the sidebar, level with the sidebar toggle beside it. The fox
+         mascot is the app's icon (and in Settings › About). -->
+    <div class="mb-2 flex h-9 shrink-0 items-center justify-center">
+      <span class="font-display text-[17px] leading-none font-medium tracking-[-0.02em] select-none">tomo</span>
     </div>
 
-    <label class="mx-2 mb-1 flex items-center gap-2 rounded-md px-2.5 py-1.5 text-muted transition-colors focus-within:bg-surface focus-within:text-fg">
-      <Icon name="search" size={14} />
-      <input bind:value={query} placeholder="Search" class="w-full bg-transparent text-[13px] outline-none placeholder:text-muted" />
-      {#if query}
-        <button class="text-muted hover:text-fg" use:tip={'Clear'} onclick={() => (query = '')}><Icon name="x" size={13} /></button>
-      {/if}
-    </label>
+    <button class="nav-item {app.view ? '' : 'on'}" onclick={() => app.newSession()}>
+      <Icon name="home" size={16} />Home<kbd class="studio-kbd ml-auto">{shortcut('N')}</kbd>
+    </button>
+    <button class="nav-item" onclick={() => (app.findOpen = true)}>
+      <Icon name="search" size={16} />Search<kbd class="studio-kbd ml-auto">{shortcut('K')}</kbd>
+    </button>
 
-    <nav class="relative min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+    <nav class="relative -mx-1 min-h-0 flex-1 overflow-y-auto px-1 pb-2 [scrollbar-width:none]">
       {#each rows as row (row.key)}
-        <div class={row.entry ? 'mt-1' : 'pt-[18px]'} animate:flip={{ duration: 200, easing: ease }} transition:fade={{ duration: 120 }}>
+        <div class={row.entry ? 'mt-[3px]' : ''} animate:flip={{ duration: 200, easing: ease }} transition:fade={{ duration: 120 }}>
           {#if !row.entry}
             <button
-              class="group/label flex items-center gap-1 rounded-sm px-2.5 py-0.5 text-[11.5px] text-muted transition-colors enabled:hover:text-fg"
+              class="group/label mono-label mt-3.5 mb-0.5 flex items-center gap-1 rounded-lg px-2.5 py-1.5 whitespace-nowrap transition-colors hover:text-fg"
               aria-expanded={row.open}
-              disabled={query.trim() !== ''}
               onclick={() => toggleGroup(row.label)}
             >
               {row.label}
-              {#if !query.trim()}
-                <Icon
-                  name="chevronDown"
-                  size={12}
-                  class="transition-[transform,opacity] duration-150 {row.open
-                    ? 'opacity-0 group-hover/label:opacity-100 group-focus-visible/label:opacity-100'
-                    : '-rotate-90'}"
-                />
-              {/if}
+              <Icon
+                name="chevronDown"
+                size={12}
+                class="transition-[transform,opacity] duration-200 {row.open
+                  ? 'opacity-0 group-hover/label:opacity-100 group-focus-visible/label:opacity-100'
+                  : '-rotate-90'}"
+              />
             </button>
           {:else}
             {@const e = row.entry}
             {@const s = e.session}
             {@const active = (app.view?.session.id ?? '') === e.key}
-            <div
-              class="group relative flex h-9 items-center rounded-md text-[13px] transition-colors {active
-                ? 'bg-surface text-fg'
-                : 'text-fg-2 focus-within:bg-hover hover:bg-hover hover:text-fg'}"
-            >
+            <div class="chat-row group relative">
               {#if s && renaming === s.id}
-                <input
-                  use:focusSelect
-                  bind:value={draft}
-                  class="mx-1 h-6 min-w-0 flex-1 rounded-sm bg-bg px-1.5 text-fg outline-none"
-                  onkeydown={(e) => {
-                    if (e.key === 'Enter') commitRename()
-                    if (e.key === 'Escape') {
-                      e.preventDefault()
-                      renaming = null
-                    }
-                  }}
-                  onblur={commitRename}
-                />
+                <div class="nav-item on">
+                  <input
+                    use:focusSelect
+                    bind:value={draft}
+                    aria-label="Chat title"
+                    class="h-6 min-w-0 flex-1 bg-transparent text-fg outline-none"
+                    onkeydown={(e) => {
+                      if (e.key === 'Enter') commitRename()
+                      if (e.key === 'Escape') {
+                        e.preventDefault()
+                        renaming = null
+                      }
+                    }}
+                    onblur={commitRename}
+                  />
+                </div>
               {:else if s && confirming === s.id}
-                <div class="flex w-full items-center gap-1 pr-1 pl-2.5" in:fade={{ duration: 120 }}>
+                <div class="nav-item on !pr-1" in:fade={{ duration: 120 }}>
                   <span class="min-w-0 flex-1 truncate text-fg">Delete this chat?</span>
-                  <button class="rounded-sm px-1.5 py-0.5 text-[12px] text-muted hover:text-fg" onclick={() => (confirming = null)}>Keep</button>
-                  <button class="rounded-sm px-1.5 py-0.5 text-[12px] font-medium text-danger hover:bg-hover" onclick={() => app.remove(s.id)}>Delete</button>
+                  <button class="btn quiet sm !h-6 !px-2" onclick={() => (confirming = null)}>Keep</button>
+                  <button class="btn quiet sm !h-6 !px-2 !text-danger" onclick={() => app.remove(s.id)}>Delete</button>
                 </div>
               {:else}
-                <button
-                  class="flex h-full min-w-0 flex-1 items-center gap-1.5 px-2.5 text-left"
-                  onclick={() => (s ? app.open(s.id) : app.newSession())}
-                  ondblclick={() => s && startRename(s)}
-                >
-                  {#if e.draft}<span class="shrink-0 text-accent" use:tip={'Unsent draft'}><Icon name="pen" size={12} /></span>{/if}
-                  {#if s?.forkedFromSessionId}<span class="text-muted" use:tip={'Forked chat'}><Icon name="branch" size={12} /></span>{/if}
-                  <span class="truncate {s ? '' : 'italic'}">{e.title}</span>
+                <button class="nav-item !gap-2 {active ? 'on' : ''}" onclick={() => openEntry(e)} ondblclick={() => s && startRename(s)}>
+                  {#if e.draft}<span class="grid shrink-0 place-items-center text-blue" use:tip={'Unsent draft'}><Icon name="pen" size={13} /></span>{/if}
+                  {#if s?.forkedFromSessionId}
+                    {@const parent = app.sessions.find((x) => x.id === s.forkedFromSessionId)}
+                    <span class="grid shrink-0 place-items-center text-fg-3" use:tip={parent ? `Forked from “${parent.title}”` : 'Forked chat'}><Icon name="branch" size={13} /></span>
+                  {/if}
+                  <span class="min-w-0 flex-1 truncate text-left {s ? '' : 'italic'}">{e.title}</span>
                 </button>
-                <!-- Over the title rather than beside it, so the title runs to the tile's edge; it fades out under the actions. -->
-                <div class="absolute inset-y-0 right-0 flex opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
-                  <span class="pointer-events-none w-6 bg-linear-to-l to-transparent {active ? 'from-surface' : 'from-hover'}"></span>
-                  <div class="flex items-center rounded-r-md pr-1 {active ? 'bg-surface' : 'bg-hover'}">
-                    {#if s}
-                      <button class="icon-btn !p-1" use:tip={s.pinnedAt != null ? 'Unpin chat' : 'Pin chat'} onclick={() => app.pin(s.id, s.pinnedAt == null)}>
-                        <Icon name="pin" size={13} class={s.pinnedAt != null ? '' : 'rotate-45'} />
-                      </button>
-                      <button class="icon-btn !p-1" use:tip={'Rename'} onclick={() => startRename(s)}><Icon name="edit" size={13} /></button>
-                      <button class="icon-btn !p-1" use:tip={'Delete'} onclick={() => (confirming = s.id)}><Icon name="trash" size={13} /></button>
-                    {:else}
-                      <button class="icon-btn !p-1" use:tip={'Discard draft'} onclick={() => app.discardDraft('')}><Icon name="trash" size={13} /></button>
-                    {/if}
-                  </div>
+                <!-- Over the title rather than beside it, so the title runs to the row's edge; it fades out under the actions. -->
+                <div class="acts pointer-events-none absolute top-1 right-1 flex rounded-r-lg pl-4 opacity-0 transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100 {active ? 'on' : ''}">
+                  {#if s}
+                    <button class="icon-btn size-[26px] !rounded-lg" use:tip={s.pinnedAt != null ? 'Unpin chat' : 'Pin chat'} onclick={() => app.pin(s.id, s.pinnedAt == null)}>
+                      <Icon name="pin" size={14} class={s.pinnedAt != null ? '' : 'rotate-45'} />
+                    </button>
+                    <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Rename'} onclick={() => startRename(s)}><Icon name="edit" size={14} /></button>
+                    <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Delete'} onclick={() => (confirming = s.id)}><Icon name="trash" size={14} /></button>
+                  {:else}
+                    <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Discard draft'} onclick={() => app.discardDraft('')}><Icon name="trash" size={14} /></button>
+                  {/if}
                 </div>
               {/if}
             </div>
           {/if}
         </div>
       {:else}
-        <p class="px-3 pt-8 text-center text-[13px] text-muted" in:fade>{query ? 'Nothing matches.' : 'Your chats will show up here.'}</p>
+        <p class="px-2.5 py-6 text-[13px] text-fg-3" in:fade>Your chats will show up here.</p>
       {/each}
     </nav>
 
-    <div class="flex items-center gap-1 px-2 py-2">
-      <button
-        class="flex h-7 items-center gap-1.5 rounded-md px-2 text-[13px] text-fg-2 transition-colors hover:bg-hover hover:text-fg"
-        onclick={() => (app.settingsOpen = true)}
-      >
-        <Icon name="settings" size={13} /> Settings
-      </button>
-      <div class="ml-auto"><UpdateButton /></div>
-      <div class="flex rounded-md bg-hover/60 p-0.5" role="radiogroup" aria-label="Theme">
-        {#each themes as t (t.id)}
-          <button
-            role="radio"
-            aria-checked={theme.pref === t.id}
-            use:tip={t.label}
-            class="grid size-6 place-items-center rounded-sm transition-colors {theme.pref === t.id ? 'bg-surface text-fg shadow-[0_1px_2px_#0000001a]' : 'text-muted hover:text-fg'}"
-            onclick={() => theme.set(t.id)}
-          >
-            <Icon name={t.icon} size={13} />
-          </button>
-        {/each}
-      </div>
+    <UpdateButton />
+    <div class="mb-1.5 flex shrink-0 rounded-[10px] bg-wash p-[3px]" role="radiogroup" aria-label="Theme">
+      {#each themes as t (t.id)}
+        <button
+          role="radio"
+          aria-checked={theme.pref === t.id}
+          class="inline-flex h-[26px] flex-1 items-center justify-center gap-1.5 rounded-[7px] text-[12.5px] font-medium whitespace-nowrap transition-colors {theme.pref === t.id
+            ? 'glass text-fg'
+            : 'text-fg-3 hover:text-fg'}"
+          onclick={() => theme.set(t.id)}
+        >
+          <Icon name={t.icon} size={13} />{t.label}
+        </button>
+      {/each}
     </div>
+    <button
+      class="group flex h-12 w-full min-w-0 shrink-0 items-center gap-2.5 rounded-xl pr-1.5 pl-2 text-left whitespace-nowrap transition-colors hover:bg-wash"
+      use:tip={{ text: 'Settings', kbd: shortcut(',') }}
+      data-tip-no-label
+      aria-label="Settings"
+      onclick={() => (app.settingsOpen = true)}
+    >
+      <span class="avatar size-[30px] shrink-0 rounded-full"></span>
+      <span class="min-w-0 flex-1 leading-[1.25]">
+        <b class="block truncate font-medium">{authLabel}</b>
+        <span class="block font-label text-[11.5px] text-fg-3">Settings</span>
+      </span>
+      <Icon name="settings" size={15} class="text-fg-3 opacity-0 transition-opacity group-hover:opacity-100" />
+    </button>
   </div>
 </aside>
 
-{#if !app.sidebarOpen}
-  <!-- A notch curved out of the chat's top-left corner, mirroring the one on the right. -->
-  <svg class="pointer-events-none fixed top-0 left-0 z-30" width="104" height="49" aria-hidden="true" in:fade={{ duration: 180 }}>
-    <path d="M104 0V14.5C88 14.5 88 47.5 72 47.5H0V0Z" fill="var(--side)" />
-    <path d="M104 14.5C88 14.5 88 47.5 72 47.5H0" fill="none" stroke="var(--line)" />
-  </svg>
-  <div class="fixed top-2 left-2 z-30 flex items-center gap-0.5 rounded-lg p-1" in:fade={{ duration: 180 }}>
-    <button class="icon-btn" use:tip={{ text: 'Show sidebar', kbd: shortcut('B') }} onclick={() => (app.sidebarOpen = true)}>
-      <Icon name="sidebar" size={17} />
-    </button>
-    <button class="icon-btn" use:tip={{ text: 'New chat', kbd: shortcut('N') }} onclick={() => app.newSession()}>
-      <Icon name="compose" size={17} />
-    </button>
-  </div>
-{/if}
+<style>
+  .nav-item {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    height: 34px;
+    padding: 0 10px;
+    border-radius: var(--r-inner);
+    color: var(--fg-2);
+    text-align: left;
+    white-space: nowrap;
+    transition: background-color 120ms;
+  }
+  .nav-item:hover {
+    background: var(--side-hover);
+  }
+  /* The active row is glass (app.css .glass). */
+  .nav-item.on {
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: blur(16px) saturate(180%);
+    backdrop-filter: blur(16px) saturate(180%);
+    color: var(--fg);
+    box-shadow:
+      inset 0 1px 0 var(--glass-edge),
+      0 0 0 1px var(--glass-ring),
+      var(--shadow-sm);
+  }
+  .nav-item > :global(svg) {
+    color: var(--fg-3);
+  }
+  .nav-item.on > :global(svg) {
+    color: var(--fg);
+  }
+  /* The actions fade the title out under them, in the row's own colour. */
+  .acts {
+    background: linear-gradient(90deg, transparent, var(--side-hover) 16px);
+  }
+  .acts.on {
+    background: linear-gradient(90deg, transparent, var(--glass-on-side) 16px);
+  }
+  .avatar {
+    background: conic-gradient(from 200deg, #ffd29a, #f7a8b8, #a8c5ff, #ffd29a);
+    box-shadow: inset 0 0 0 1px var(--ring);
+  }
+</style>

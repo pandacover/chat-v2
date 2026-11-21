@@ -16,7 +16,22 @@ export const setAppMenu = () => {
   if (!app.isPackaged) view.unshift({ role: 'reload' }, { role: 'toggleDevTools' }, { type: 'separator' })
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
-      { role: 'appMenu' },
+      // Written out rather than { role: 'appMenu' }, whose labels use app.name: that stays
+      // "chat-v2" on a Mac so saved keys still decrypt (index.ts), but the app is Tomo.
+      {
+        label: 'Tomo',
+        submenu: [
+          { role: 'about', label: 'About Tomo' },
+          { type: 'separator' },
+          { role: 'services' },
+          { type: 'separator' },
+          { role: 'hide', label: 'Hide Tomo' },
+          { role: 'hideOthers' },
+          { role: 'unhide' },
+          { type: 'separator' },
+          { role: 'quit', label: 'Quit Tomo' }
+        ]
+      },
       { role: 'editMenu' },
       { label: 'View', submenu: view },
       {

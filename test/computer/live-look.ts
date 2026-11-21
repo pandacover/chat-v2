@@ -38,7 +38,7 @@ const q = query({
     strictMcpConfig: true,
     persistSession: false,
     maxTurns: 14,
-    systemPrompt: `You are the assistant in chat-v2, a desktop chat app. Write short Markdown.\n\n${mod.instructions}`,
+    systemPrompt: `You are the assistant in Tomo, a desktop chat app. Write short Markdown.\n\n${mod.instructions}`,
     tools: [...(mod.builtins ?? []), 'ToolSearch'],
     mcpServers: { [mod.name]: mod.server },
     abortController: abort,

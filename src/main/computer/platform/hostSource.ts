@@ -3,7 +3,7 @@
 // host.ps1 compiles host.cs once and keeps the DLL beside it.
 // Edit the C# here; it must stay C# 5 for the .NET Framework compiler PowerShell uses.
 
-export const HOST_PS1 = String.raw`# chat-v2's Windows control host for computer use: compiles host.cs once (cached by content
+export const HOST_PS1 = String.raw`# Tomo's Windows control host for computer use: compiles host.cs once (cached by content
 # hash), then serves JSON-line requests on stdin until stdin closes.
 param([int]$ElectronPid = 0)
 $ErrorActionPreference = 'Stop'
@@ -18,7 +18,7 @@ $dll = Join-Path $PSScriptRoot "ChatV2Host-$hash.dll"
 
 if (-not (Test-Path $dll)) {
   # Compile to a private file, then move it into place: two hosts starting at
-  # once (a second chat-v2, parallel tests) must not write the same DLL.
+  # once (a second Tomo, parallel tests) must not write the same DLL.
   $tmp = Join-Path $PSScriptRoot "ChatV2Host-$hash-$PID.dll"
   Add-Type -TypeDefinition $src -Language CSharp -OutputAssembly $tmp -OutputType Library -ReferencedAssemblies @(
     'System.Drawing', 'System.Data', 'System.Web.Extensions', 'UIAutomationClient', 'UIAutomationTypes', 'WindowsBase'
@@ -38,7 +38,7 @@ Add-Type -Path $dll
 [ChatV2Host]::Serve()
 `
 
-export const HOST_CS = String.raw`// chat-v2's Windows control host for computer use. Compiled once by host.ps1 (C# 5 / .NET Framework,
+export const HOST_CS = String.raw`// The app's Windows control host for computer use. Compiled once by host.ps1 (C# 5 / .NET Framework,
 // so no string interpolation, no ?. operator, no expression-bodied members).
 // Protocol: one JSON request per stdin line {id, method, params}; one JSON
 // response per stdout line {id, ok, result | error}. Responses can arrive out
@@ -113,7 +113,7 @@ public static class ChatV2Host
                MOUSEEVENTF_MIDDLEDOWN = 0x20, MOUSEEVENTF_MIDDLEUP = 0x40, MOUSEEVENTF_WHEEL = 0x800, MOUSEEVENTF_HWHEEL = 0x1000;
 
     static IntPtr remembered = IntPtr.Zero; // written by "remember" (immediate lane), read everywhere
-    static uint ownerPid = 0; // the Electron main process; its windows are chat-v2's
+    static uint ownerPid = 0; // the Electron main process; its windows are the app's own
     // ui_elements ids: never reused, so an id from an older list still means
     // the same control or is reported stale. The most recent MaxKept are kept.
     static Dictionary<int, AutomationElement> elements = new Dictionary<int, AutomationElement>();
@@ -308,8 +308,8 @@ public static class ChatV2Host
     }
 
     /**
-     * The foreground window, ignoring chat-v2's own windows. The user types requests into
-     * chat-v2, so it is usually in front: then the app they were in is the topmost app window
+     * The foreground window, ignoring the app's own windows. The user types requests into
+     * the chat window, so it is usually in front: then the app they were in is the topmost app window
      * under it, which is where Windows keeps the window that was in front before.
      */
     static IntPtr ExternalForeground()
@@ -333,7 +333,7 @@ public static class ChatV2Host
         return ShellClasses.Contains(cls.ToString());
     }
 
-    /** The first visible, titled, non-minimized app window in z-order (top first) that isn't chat-v2's. */
+    /** The first visible, titled, non-minimized app window in z-order (top first) that isn't the app's. */
     static IntPtr TopAppWindow()
     {
         IntPtr found = IntPtr.Zero;
@@ -350,7 +350,7 @@ public static class ChatV2Host
         return found;
     }
 
-    /** The window the agent is working in: the remembered one when chat-v2 is in front. */
+    /** The window the agent is working in: the remembered one when the app is in front. */
     static IntPtr TargetWindow()
     {
         var fg = GetForegroundWindow();
@@ -451,7 +451,7 @@ public static class ChatV2Host
         return Describe(GetForegroundWindow());
     }
 
-    /** The topmost visible window (not chat-v2's) whose title contains "title", or whose app is named so. */
+    /** The topmost visible window (not the app's) whose title contains "title", or whose app is named so. */
     static IntPtr FindWindowByTitle(string title)
     {
         IntPtr found = IntPtr.Zero;
@@ -868,7 +868,7 @@ public static class ChatV2Host
         if (ec is ExpandCollapseState && (ExpandCollapseState)ec != ExpandCollapseState.LeafNode) d["expanded"] = (ExpandCollapseState)ec != ExpandCollapseState.Collapsed;
     }
 
-    /** The control with keyboard focus, unless it is chat-v2's own. Its value is left out for password fields. */
+    /** The control with keyboard focus, unless it is the app's own. Its value is left out for password fields. */
     static object Focused()
     {
         AutomationElement el = null;
@@ -919,7 +919,7 @@ public static class ChatV2Host
      * apps answer FromPoint with the top-level pane or a big layout group; then
      * search the window under the point the way ui_elements does, with the
      * control-type filter inside UIA. Null for nothing sensible, for big
-     * containers, and for chat-v2's own windows.
+     * containers, and for the app's own windows.
      * Leaves the ui_elements id cache untouched.
      */
     static object ElementAt(int x, int y)
@@ -1028,7 +1028,7 @@ public static class ChatV2Host
 
     /**
      * For the user's Point: the app window under a screen point, and the control there if
-     * there is a sensible one. Unlike ElementAt it looks past chat-v2's own windows, since the
+     * there is a sensible one. Unlike ElementAt it looks past the app's own windows, since the
      * Point overlay covers the screen and takes the mouse while the user points. Null when no
      * window is there.
      */

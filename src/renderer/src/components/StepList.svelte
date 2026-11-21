@@ -99,15 +99,15 @@
     <span class="cu-dot small"></span>
   {:else}
     <span
-      class="size-1.5 shrink-0 rounded-full {tone === 'failed' ? 'bg-danger' : tone === 'denied' ? 'shadow-[inset_0_0_0_1.25px_var(--muted)]' : 'bg-muted/70'}"
+      class="size-1.5 shrink-0 rounded-full {tone === 'failed' ? 'bg-danger' : tone === 'denied' ? 'shadow-[inset_0_0_0_1.25px_var(--fg-3)]' : 'bg-fg-4'}"
     ></span>
   {/if}
 {/snippet}
 
-<div class="flex flex-col rounded-lg bg-surface px-3 py-1.5 shadow-[0_0_0_1px_var(--line)]">
-  <div class="flex h-7 items-center gap-1.5 text-[12px] text-muted">
-    <button class="-mx-1 flex h-6 min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 text-left transition-colors hover:text-fg" aria-expanded={open} onclick={() => (toggled = !open)}>
-      <Icon name={desktop ? 'monitor' : 'globe'} size={12} class="shrink-0" />
+<div class="flex flex-col overflow-hidden rounded-[14px] bg-card shadow-[0_0_0_1px_var(--ring)]">
+  <div class="flex h-10 items-center gap-2 px-3.5 text-[13px] text-fg-2">
+    <button class="flex h-10 min-w-0 flex-1 items-center gap-2.5 text-left transition-colors hover:text-fg" aria-expanded={open} onclick={() => (toggled = !open)}>
+      <Icon name={desktop ? 'monitor' : 'globe'} size={16} class="shrink-0 text-fg-3" />
       <span class="shrink-0">{desktop ? 'Computer' : 'Browser'}</span>
       <!-- Slot: each new line rolls in from below as the previous one rolls out above. The summary
            (once the reply is over) rolls in the same way. -->
@@ -116,14 +116,14 @@
           {#key shown.key}
             <span class="flex min-w-0 items-center gap-2 [grid-area:1/1]" in:fly={{ y: 14, duration: ROLL }} out:fly={{ y: -14, duration: ROLL }}>
               {#if shown.tone === 'summary'}
-                <span class="text-[12px] text-muted tabular-nums"
+                <span class="font-label text-[11.5px] text-fg-4 tabular-nums"
                   >{steps.length} {steps.length === 1 ? 'step' : 'steps'}{#if failed}<span class="text-danger">, {failed} failed</span>{/if}</span
                 >
               {:else}
                 {@render dot(shown.tone)}
                 <!-- What it did and to what; the target is cut first when the line is short of room. -->
-                <span class="truncate transition-colors duration-200 {shown.tone === 'failed' ? 'text-danger' : shown.tone === 'quiet' ? 'text-muted' : shown.tone === 'live' ? 'text-fg' : 'text-fg-2'}"
-                  >{shown.label}{#if shown.detail}<span class="text-muted"><span class="px-1.5" aria-hidden="true">·</span>{shown.detail}</span>{/if}</span
+                <span class="truncate transition-colors duration-200 {shown.tone === 'failed' ? 'text-danger' : shown.tone === 'quiet' ? 'text-fg-3' : shown.tone === 'live' ? 'text-fg' : 'text-fg-2'}"
+                  >{shown.label}{#if shown.detail}<span class="text-fg-3"><span class="px-1.5" aria-hidden="true">·</span>{shown.detail}</span>{/if}</span
                 >
               {/if}
             </span>
@@ -131,32 +131,32 @@
         {/if}
       </span>
       <!-- Always there (hidden until there is a list), so the line never narrows when the first step lands. -->
-      <Icon name="chevronDown" size={12} class="shrink-0 transition-[transform,opacity] duration-150 {open ? 'rotate-180' : ''} {steps.length > 0 || done ? '' : 'opacity-0'}" />
+      <Icon name="chevronDown" size={16} class="shrink-0 text-fg-4 transition-[transform,opacity] duration-200 {open ? 'rotate-180' : ''} {steps.length > 0 || done ? '' : 'opacity-0'}" />
     </button>
     {#if open && hidden > 0}
-      <button class="ml-auto h-6 shrink-0 rounded-md px-1.5 transition-colors hover:text-fg" onclick={() => (expanded = true)}>Show {hidden} earlier</button>
+      <button class="btn quiet sm ml-auto !h-6 !px-2" onclick={() => (expanded = true)}>Show {hidden} earlier</button>
     {:else if open && expanded && steps.length > COLLAPSED}
-      <button class="ml-auto h-6 shrink-0 rounded-md px-1.5 transition-colors hover:text-fg" onclick={() => (expanded = false)}>Show fewer</button>
+      <button class="btn quiet sm ml-auto !h-6 !px-2" onclick={() => (expanded = false)}>Show fewer</button>
     {/if}
   </div>
   {#if open}
-    <div class="flex flex-col pb-1" transition:slide>
+    <div class="flex flex-col border-t border-line px-3.5 pt-1 pb-3" transition:slide>
       {#each shownSteps as step, i (hidden + i)}
         <!-- A step that just stood live in the row below takes its place without moving. -->
-        <div class="flex items-start gap-2 py-[3px] text-[13px] leading-snug" in:fly={{ y: 4, duration: live && hidden + i !== since.count ? 200 : 0 }}>
-          <span class="grid h-[1lh] w-3 shrink-0 place-items-center">{@render dot(step.denied ? 'denied' : step.ok ? 'done' : 'failed')}</span>
-          <span class="min-w-0 {step.ok ? (step.denied ? 'text-muted' : 'text-fg-2') : 'text-danger'}">
+        <div class="flex items-start gap-2.5 py-[5px] text-[13px] leading-snug" in:fly={{ y: 4, duration: live && hidden + i !== since.count ? 200 : 0 }}>
+          <span class="grid h-[1lh] w-4 shrink-0 place-items-center">{@render dot(step.denied ? 'denied' : step.ok ? 'done' : 'failed')}</span>
+          <span class="min-w-0 {step.ok ? (step.denied ? 'text-fg-3' : 'text-fg-2') : 'text-danger'}">
             {step.label}
-            {#if step.detail}<span class="block text-[12px] break-words text-muted">{step.detail}</span>{/if}
+            {#if step.detail}<span class="block text-[12px] break-words text-fg-3">{step.detail}</span>{/if}
           </span>
         </div>
       {/each}
       {#if now}
-        <div class="flex items-start gap-2 py-[3px] text-[13px] leading-snug" in:fly={{ y: 4, duration: 200 }} data-step-now>
-          <span class="grid h-[1lh] w-3 shrink-0 place-items-center">{@render dot(now.quiet ? 'quiet' : 'live')}</span>
-          <span class="min-w-0 {now.quiet ? 'text-muted' : 'text-fg'}">
+        <div class="flex items-start gap-2.5 py-[5px] text-[13px] leading-snug" in:fly={{ y: 4, duration: 200 }} data-step-now>
+          <span class="grid h-[1lh] w-4 shrink-0 place-items-center">{@render dot(now.quiet ? 'quiet' : 'live')}</span>
+          <span class="min-w-0 {now.quiet ? 'text-fg-3' : 'text-fg'}">
             {now.label}
-            {#if now.detail}<span class="block text-[12px] break-words text-muted">{now.detail}</span>{/if}
+            {#if now.detail}<span class="block text-[12px] break-words text-fg-3">{now.detail}</span>{/if}
           </span>
         </div>
       {/if}

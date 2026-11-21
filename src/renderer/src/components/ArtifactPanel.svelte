@@ -3,7 +3,11 @@
   import { escapeHtml, highlighter } from '@/lib/highlight.svelte'
   import { fade } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
+  import type { Snippet } from 'svelte'
   import Icon from './Icon.svelte'
+
+  /** The panel's tabs (App.svelte), at the start of the header. */
+  let { tabs }: { tabs: Snippet } = $props()
 
   let tab = $state<'preview' | 'code'>('preview')
   let url = $state<string | null>(null)
@@ -68,43 +72,32 @@
 />
 
 {#if current}
-  <section class="flex h-full min-w-0 flex-col bg-side">
-    <header class="flex h-12 shrink-0 items-center gap-1 pr-2 pl-4">
-      <h2 class="min-w-0 truncate font-serif text-[16px]" use:tip={current.block.title}>{current.block.title}</h2>
+  <section class="flex h-full min-w-0 flex-col" aria-label="Artifact">
+    <!-- Room at the right for the panel toggle, which is also the close control (Esc closes it too). -->
+    <header class="flex h-[52px] shrink-0 items-center gap-1 border-b border-line pr-[46px] pl-2.5">
+      {@render tabs()}
       {#if versions.length > 1}
-        <div class="ml-1 flex items-center text-[12px] text-muted tabular-nums">
-          <button class="icon-btn !p-1" aria-label="Previous version" disabled={index === 0} onclick={() => select(index - 1)}>
-            <Icon name="chevronLeft" size={13} />
+        <div class="flex shrink-0 items-center font-label text-[11.5px] text-fg-3 tabular-nums">
+          <button class="icon-btn size-[26px] !rounded-lg" aria-label="Previous version" disabled={index === 0} onclick={() => select(index - 1)}>
+            <Icon name="chevronLeft" size={14} />
           </button>
-          <span>v{index + 1}</span>
-          <button class="icon-btn !p-1" aria-label="Next version" disabled={index === versions.length - 1} onclick={() => select(index + 1)}>
-            <Icon name="chevronRight" size={13} />
+          <span>v{index + 1}/{versions.length}</span>
+          <button class="icon-btn size-[26px] !rounded-lg" aria-label="Next version" disabled={index === versions.length - 1} onclick={() => select(index + 1)}>
+            <Icon name="chevronRight" size={14} />
           </button>
         </div>
       {/if}
-
-      <div class="relative ml-auto grid grid-cols-2 rounded-md bg-hover/70 p-0.5 text-[12.5px]" role="tablist">
-        <span
-          class="absolute inset-y-0.5 left-0.5 w-[calc(50%-2px)] rounded-sm bg-surface shadow-[0_1px_2px_#0000001f] transition-transform duration-200 ease-out"
-          style="transform: translateX({tab === 'code' ? '100%' : '0'})"
-        ></span>
-        <button role="tab" aria-selected={tab === 'preview'} class="relative px-3 py-1 {tab === 'preview' ? 'text-fg' : 'text-muted'}" onclick={() => (tab = 'preview')}>
-          Preview
-        </button>
-        <button role="tab" aria-selected={tab === 'code'} class="relative px-3 py-1 {tab === 'code' ? 'text-fg' : 'text-muted'}" onclick={() => (tab = 'code')}>
-          Code
-        </button>
+      <div class="seg mx-1 !p-0.5" role="tablist" aria-label="View">
+        <button role="tab" class="!h-6 !px-2.5" aria-selected={tab === 'preview'} onclick={() => (tab = 'preview')}>Preview</button>
+        <button role="tab" class="!h-6 !px-2.5" aria-selected={tab === 'code'} onclick={() => (tab = 'code')}>Code</button>
       </div>
-
-      <span class="mx-1 h-4 w-px bg-line"></span>
-      <button class="icon-btn" use:tip={'Reload'} onclick={() => ((loading = true), reloadKey++)}><Icon name="refresh" size={15} /></button>
-      <button class="icon-btn" use:tip={copied ? 'Copied' : 'Copy HTML'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={15} /></button>
-      <button class="icon-btn" use:tip={'Download .html'} onclick={download}><Icon name="download" size={15} /></button>
-      <button class="icon-btn" use:tip={{ text: 'Close', kbd: 'Esc' }} onclick={() => (app.artifact = null)}><Icon name="x" size={15} /></button>
+      <button class="icon-btn size-[26px] shrink-0 !rounded-lg" use:tip={'Reload'} onclick={() => ((loading = true), reloadKey++)}><Icon name="refresh" size={14} /></button>
+      <button class="icon-btn size-[26px] shrink-0 !rounded-lg" use:tip={copied ? 'Copied' : 'Copy HTML'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={14} /></button>
+      <button class="icon-btn size-[26px] shrink-0 !rounded-lg" use:tip={'Download .html'} onclick={download}><Icon name="download" size={14} /></button>
     </header>
 
-    <div class="relative min-h-0 flex-1 px-2 pb-2">
-      <div class="relative h-full overflow-hidden rounded-md bg-surface shadow-[0_0_0_1px_var(--line)]">
+    <div class="relative min-h-0 flex-1 bg-canvas">
+      <div class="relative h-full overflow-hidden">
         {#if tab === 'preview'}
           {#if url}
             {#key `${url}:${reloadKey}`}
@@ -123,7 +116,7 @@
             <div class="absolute inset-0 grid place-items-center" out:fade={{ duration: 150 }}><span class="thinking text-[13px]">Loading</span></div>
           {/if}
         {:else}
-          <div class="h-full overflow-auto px-4 py-3" in:fade={{ duration: 140 }}>
+          <div class="h-full overflow-auto p-5" in:fade={{ duration: 140 }}>
             <pre class="text-[12.5px] leading-relaxed"><code class="hljs font-mono">{@html highlighted}</code></pre>
           </div>
         {/if}

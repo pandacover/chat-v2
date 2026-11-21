@@ -1,7 +1,7 @@
 // The computer-use overlay: a full-screen, click-through, always-on-top window. While computer use
 // drives, it draws a hairline frame around the screen; in Show-me mode, a spotlight on the exact
 // control with the instruction and Done, Can't find it and Do it for me beside it, which the user
-// can drag aside. While a computer reply runs and no chat-v2 window has focus, a notch at the top
+// can drag aside. While a computer reply runs and no Tomo window has focus, a notch at the top
 // of the screen says what it is doing, with Stop, and asks a waiting approval with Approve / Deny.
 // Presses that answer a wait carry its id. Screen captures leave the overlay out. The global Stop shortcut is here
 // too: the chat window is often covered while computer use acts.

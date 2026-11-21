@@ -51,7 +51,7 @@ export const describeUpdateError = (e: unknown, platform: NodeJS.Platform = proc
   if (/releases\.atom|\b404\b/.test(text)) return 'No published releases found yet.'
   if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|net::/.test(text)) return "Couldn't reach GitHub to check for updates."
   // Squirrel.Mac can't replace an app it can't write to (run from the DMG, or not in Applications).
-  if (platform === 'darwin' && /read-only|translocat|EACCES|EROFS/i.test(text)) return 'Move chat-v2 into Applications to update it.'
+  if (platform === 'darwin' && /read-only|translocat|EACCES|EROFS/i.test(text)) return 'Move Tomo into Applications to update it.'
   return text.split('\n')[0]!.slice(0, 200)
 }
 

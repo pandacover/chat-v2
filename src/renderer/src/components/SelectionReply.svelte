@@ -151,7 +151,7 @@
     in:pop={{ duration: 140 }}
   >
     {#if writing}
-      <div class="flex w-[360px] max-w-[calc(100vw-32px)] items-center gap-2 rounded-lg bg-surface py-1.5 pr-1.5 pl-3 shadow-[0_0_0_1px_var(--line),var(--shadow)]">
+      <div class="flex w-[360px] max-w-[calc(100vw-32px)] items-center gap-2 glass-float rounded-full py-1.5 pr-1.5 pl-3.5">
         <Icon name="reply" size={14} class="text-muted" />
         <input
           bind:this={input}
@@ -170,7 +170,7 @@
           }}
         />
         <button
-          class="grid size-7 shrink-0 place-items-center rounded-full bg-fg text-bg transition-transform duration-150 active:scale-95"
+          class="grid size-7 shrink-0 place-items-center rounded-full bg-solid text-on-solid transition-transform duration-150 active:scale-95"
           use:tip={{ text: 'Add to your message', kbd: 'Enter' }}
           onclick={submit}
         >
@@ -179,7 +179,7 @@
       </div>
     {:else}
       <button
-        class="flex h-7 items-center gap-1.5 rounded-full bg-fg pr-3 pl-2.5 text-[12.5px] font-medium text-bg shadow-float transition-transform duration-150 active:scale-95"
+        class="flex h-8 items-center gap-1.5 rounded-full bg-solid pr-3.5 pl-3 text-[13px] font-medium text-on-solid shadow-float transition-transform duration-150 active:scale-95"
         onmousedown={(e) => e.preventDefault()}
         onclick={open}
       >

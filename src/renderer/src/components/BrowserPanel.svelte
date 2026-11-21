@@ -4,7 +4,11 @@
   import { fade, fly, pop } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
   import { tip } from '@/lib/tooltip'
+  import type { Snippet } from 'svelte'
   import Icon from './Icon.svelte'
+
+  /** The panel's tabs (App.svelte), at the start of the header. */
+  let { tabs }: { tabs: Snippet } = $props()
 
   type WebviewEl = HTMLElement & {
     getWebContentsId(): number
@@ -390,22 +394,47 @@
 
 <svelte:window {onkeydown} />
 
-<section class="flex h-full min-w-0 flex-col bg-side" aria-label="Browser">
-  <header class="flex h-12 shrink-0 items-center gap-0.5 pr-2 pl-2">
-    <button class="icon-btn" use:tip={'Back'} disabled={!app.browser.canBack || app.control.active} onclick={() => view?.goBack()}><Icon name="chevronLeft" size={16} /></button>
-    <button class="icon-btn" use:tip={'Forward'} disabled={!app.browser.canForward || app.control.active} onclick={() => view?.goForward()}><Icon name="chevronRight" size={16} /></button>
-    <button class="icon-btn" use:tip={app.browser.loading ? 'Stop loading' : 'Reload'} disabled={app.control.active} onclick={() => (app.browser.loading ? view?.stop() : view?.reload())}>
-      <Icon name={app.browser.loading ? 'x' : 'refresh'} size={15} />
+<section class="flex h-full min-w-0 flex-col" aria-label="Browser">
+  <!-- Room at the right for the panel toggle, which is also the close control. -->
+  <header class="flex h-[52px] shrink-0 items-center gap-0.5 border-b border-line pr-[46px] pl-2.5">
+    {@render tabs()}
+    <button class="icon-btn size-[26px] shrink-0 !rounded-lg" use:tip={'Screenshot to message'} disabled={isBlank || busyCapture} onclick={screenshot}><Icon name="camera" size={15} /></button>
+    <button
+      class="icon-btn size-[26px] shrink-0 !rounded-lg {recording ? '!bg-danger !text-white' : ''}"
+      use:tip={recording ? 'Stop recording' : 'Record video'}
+      disabled={isBlank && !recording}
+      onclick={() => (recording ? stopRecording() : startRecording())}
+    >
+      <Icon name={recording ? 'stop' : 'record'} size={15} />
     </button>
+    {#if recording}<span class="px-1 font-label text-[11.5px] text-fg-2 tabular-nums" in:fade>{clock}</span>{/if}
+    <span class="mx-1 h-4 w-px shrink-0 bg-line"></span>
+    <button class="icon-btn size-[26px] shrink-0 !rounded-lg {mode === 'draw' ? '!bg-wash !text-fg' : ''}" use:tip={'Draw to comment'} disabled={isBlank || app.control.active} onclick={() => setMode('draw')}>
+      <Icon name="pen" size={15} />
+    </button>
+    <button class="icon-btn size-[26px] shrink-0 !rounded-lg {mode === 'select' ? '!bg-wash !text-fg' : ''}" use:tip={'Comment on an element'} disabled={isBlank || app.control.active} onclick={() => setMode('select')}>
+      <Icon name="pointer" size={15} />
+    </button>
+  </header>
 
+  <div class="flex shrink-0 items-center bg-canvas px-3 pt-3 pb-2">
     <form
-      class="mx-1 flex h-8 min-w-0 flex-1 items-center rounded-md bg-surface px-2.5 shadow-[0_0_0_1px_var(--line)] transition-shadow focus-within:shadow-[0_0_0_1px_var(--muted)]"
+      class="flex h-9 min-w-0 flex-1 items-center gap-0.5 rounded-full bg-card pr-3 pl-1 shadow-[0_0_0_1px_var(--ring)] transition-shadow focus-within:shadow-[0_0_0_1px_var(--ring-2),0_0_0_4px_var(--wash)]"
       onsubmit={(e) => {
         e.preventDefault()
         go()
       }}
     >
-      {#if app.browser.loading}<span class="mr-2 size-1.5 shrink-0 animate-pulse rounded-full bg-muted"></span>{/if}
+      <button type="button" class="icon-btn size-7" use:tip={'Back'} disabled={!app.browser.canBack || app.control.active} onclick={() => view?.goBack()}><Icon name="chevronLeft" size={15} /></button>
+      <button type="button" class="icon-btn size-7" use:tip={'Forward'} disabled={!app.browser.canForward || app.control.active} onclick={() => view?.goForward()}><Icon name="chevronRight" size={15} /></button>
+      <button type="button" class="icon-btn size-7" use:tip={app.browser.loading ? 'Stop loading' : 'Reload'} disabled={app.control.active} onclick={() => (app.browser.loading ? view?.stop() : view?.reload())}>
+        <Icon name={app.browser.loading ? 'x' : 'refresh'} size={14} />
+      </button>
+      {#if app.browser.loading}
+        <span class="mx-1.5 size-1.5 shrink-0 animate-pulse rounded-full bg-fg-3"></span>
+      {:else if app.browser.url.startsWith('https:')}
+        <span class="mx-1 grid shrink-0 place-items-center text-ok"><Icon name="lock" size={13} /></span>
+      {/if}
       <input
         bind:value={address}
         onfocus={(e) => {
@@ -417,52 +446,39 @@
         placeholder="Search or enter address"
         aria-label="Address"
         spellcheck="false"
-        class="min-w-0 flex-1 bg-transparent text-[12.5px] text-fg outline-none placeholder:text-muted"
+        class="min-w-0 flex-1 bg-transparent font-label text-[12.5px] text-fg-2 outline-none placeholder:text-fg-4"
       />
+      {#if app.control.active}
+        <span class="ml-1 inline-flex shrink-0 items-center gap-1.5 text-[12.5px] font-medium text-blue-fg"><i class="size-1.5 rounded-full bg-blue [animation:rec-pulse_1.2s_infinite]"></i>Claude is browsing</span>
+      {/if}
     </form>
-
-    <button class="icon-btn" use:tip={'Screenshot to message'} disabled={isBlank || busyCapture} onclick={screenshot}><Icon name="camera" size={16} /></button>
-    <button
-      class="icon-btn {recording ? '!bg-accent !text-on-accent' : ''}"
-      use:tip={recording ? 'Stop recording' : 'Record video'}
-      disabled={isBlank && !recording}
-      onclick={() => (recording ? stopRecording() : startRecording())}
-    >
-      <Icon name={recording ? 'stop' : 'record'} size={16} />
-    </button>
-    {#if recording}<span class="px-1 font-mono text-[12px] text-fg-2 tabular-nums" in:fade>{clock}</span>{/if}
-    <span class="mx-1 h-4 w-px bg-line"></span>
-    <button class="icon-btn {mode === 'draw' ? '!bg-hover !text-fg' : ''}" use:tip={'Draw to comment'} disabled={isBlank || app.control.active} onclick={() => setMode('draw')}>
-      <Icon name="pen" size={16} />
-    </button>
-    <button class="icon-btn {mode === 'select' ? '!bg-hover !text-fg' : ''}" use:tip={'Comment on an element'} disabled={isBlank || app.control.active} onclick={() => setMode('select')}>
-      <Icon name="pointer" size={16} />
-    </button>
-    <button class="icon-btn" use:tip={'Close browser'} onclick={() => app.closeBrowser()}><Icon name="x" size={15} /></button>
-  </header>
+  </div>
 
   {#if app.control.active}
-    <div class="mx-2 mb-2 flex items-center gap-2 rounded-md bg-accent-wash px-3 py-1.5 text-[12.5px]" transition:fly={{ y: -4, duration: 180 }}>
-      <span class="size-1.5 rounded-full bg-accent [animation:rec-pulse_1.4s_ease-in-out_infinite]"></span>
-      <span class="min-w-0 flex-1 truncate text-fg">{app.control.label || 'The assistant is using the browser'}</span>
-      <button class="rounded-md bg-fg px-2.5 py-0.5 font-medium text-bg" onclick={() => app.stop()}>Take over</button>
+    <div class="flex bg-canvas px-3 pb-2" transition:fly={{ y: -4, duration: 180 }}>
+      <div class="flex min-w-0 flex-1 items-center gap-2 rounded-full bg-blue-wash py-1 pr-1 pl-3.5 text-[12.5px]">
+        <span class="min-w-0 flex-1 truncate text-fg">{app.control.label || 'The assistant is using the browser'}</span>
+        <button class="btn solid sm !h-6" onclick={() => app.stop()}>Take over</button>
+      </div>
     </div>
   {:else if mode !== 'none'}
-    <div class="mx-2 mb-2 flex items-center gap-2 rounded-md bg-hover/70 px-3 py-1.5 text-[12.5px] text-fg-2" transition:fly={{ y: -4, duration: 160 }}>
-      {mode === 'draw' ? 'Draw around what you want to point at.' : 'Click an element to comment on it.'}
-      <button class="ml-auto text-muted hover:text-fg" onclick={() => setMode('none')}>Done</button>
+    <div class="flex bg-canvas px-3 pb-2" transition:fly={{ y: -4, duration: 160 }}>
+      <div class="flex min-w-0 flex-1 items-center gap-2 rounded-full bg-wash py-1 pr-1 pl-3.5 text-[12.5px] text-fg-2">
+        <span class="min-w-0 flex-1 truncate">{mode === 'draw' ? 'Draw around what you want to point at.' : 'Click an element to comment on it.'}</span>
+        <button class="btn sm !h-6" onclick={() => setMode('none')}>Done</button>
+      </div>
     </div>
   {/if}
 
-  <div class="relative min-h-0 flex-1 px-2 pb-2">
-    <div bind:this={stage} class="relative h-full overflow-hidden rounded-md bg-white shadow-[0_0_0_1px_var(--line)]">
+  <div class="relative min-h-0 flex-1 bg-canvas px-3 pb-3">
+    <div bind:this={stage} class="relative h-full overflow-hidden rounded-[14px] bg-white shadow-[0_0_0_1px_var(--ring)]">
       <webview bind:this={view} src={initialSrc} partition="persist:browser" class="absolute inset-0 size-full"></webview>
 
       {#if isBlank && !app.control.active}
         <div class="absolute inset-0 grid place-items-center bg-surface" transition:fade={{ duration: 150 }}>
           <div class="text-center">
-            <div class="font-serif text-[22px]">Browser</div>
-            <p class="mt-1 max-w-[30ch] text-[13px] text-muted">Enter an address above, or turn on Browser in the composer to let the assistant use it.</p>
+            <div class="font-display text-[22px] font-light tracking-[-0.02em]">Browser</div>
+            <p class="mt-1 max-w-[30ch] text-[13px] text-fg-3">Enter an address above, or turn on Browser in the composer to let the assistant use it.</p>
           </div>
         </div>
       {/if}

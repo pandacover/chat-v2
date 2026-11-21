@@ -13,13 +13,13 @@
 </script>
 
 {#if node.siblingIds.length > 1}
-  <div class="flex items-center text-[12px] text-muted tabular-nums" use:tip={'Branches'}>
-    <button class="icon-btn !p-1" aria-label="Previous branch" disabled={disabled || node.siblingIndex === 0} onclick={() => go(-1)}>
+  <div class="mr-1 flex items-center font-label text-[11.5px] text-fg-3 tabular-nums" use:tip={'Branches'}>
+    <button class="icon-btn size-[26px] !rounded-lg" aria-label="Previous branch" disabled={disabled || node.siblingIndex === 0} onclick={() => go(-1)}>
       <Icon name="chevronLeft" size={13} />
     </button>
-    <span class="min-w-7 text-center">{node.siblingIndex + 1} / {node.siblingIds.length}</span>
+    <span class="min-w-6 text-center">{node.siblingIndex + 1}/{node.siblingIds.length}</span>
     <button
-      class="icon-btn !p-1"
+      class="icon-btn size-[26px] !rounded-lg"
       aria-label="Next branch"
       disabled={disabled || node.siblingIndex === node.siblingIds.length - 1}
       onclick={() => go(1)}

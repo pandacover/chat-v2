@@ -11,7 +11,7 @@ export const supported =
   process.platform === 'win32' || process.platform === 'darwin' || (process.platform === 'linux' && linuxSupported())
 
 export interface PlatformOptions {
-  /** chat-v2's main process, whose windows are never targets. */
+  /** Tomo's main process, whose windows are never targets. */
   ownerPid?: number
   /** Called with every process the platform starts, so quitting can end them. */
   track?: (p: ChildProcess) => void

@@ -3,12 +3,14 @@
   import ArtifactPanel from './components/ArtifactPanel.svelte'
   import BrowserPanel from './components/BrowserPanel.svelte'
   import ChatView from './components/ChatView.svelte'
+  import FindModal from './components/FindModal.svelte'
   import Icon from './components/Icon.svelte'
   import SettingsPage from './components/SettingsPage.svelte'
   import Sidebar from './components/Sidebar.svelte'
   import { modKey } from './lib/keys'
   import { ease, fade, fly } from './lib/motion'
   import { app } from './lib/store.svelte'
+  import { tip } from './lib/tooltip'
 
   let ready = $state(false)
   let resizing = $state(false)
@@ -29,9 +31,9 @@
    * instead of jumping. The contents keep their final width throughout.
    */
   const reveal = (_node: Element, { width }: { width: number }) => ({
-    duration: reduce.matches ? 0 : 300,
+    duration: reduce.matches ? 0 : 450,
     easing: ease,
-    css: (t: number) => `width: ${t * width}px`
+    css: (t: number) => `width: ${t * width}px; opacity: ${Math.min(1, t * 1.5)}`
   })
 
   onMount(async () => {
@@ -43,8 +45,13 @@
   const onkeydown = (e: KeyboardEvent) => {
     if (!modKey(e)) return
     const key = e.key.toLowerCase()
-    // Settings sits over the chat as a modal; new chat and the sidebar toggle would act unseen behind it.
-    if (app.settingsOpen && key !== ',') return
+    // Settings and search sit over the chat as modals; shortcuts would act unseen behind them.
+    if (key === 'k' && !app.settingsOpen) {
+      e.preventDefault()
+      app.findOpen = !app.findOpen
+      return
+    }
+    if ((app.settingsOpen && key !== ',') || app.findOpen) return
     if (key === 'n') {
       e.preventDefault()
       void app.newSession()
@@ -57,13 +64,13 @@
     }
   }
 
-  // Drag the divider to resize the artifact panel.
+  // Drag the gap left of the panel to resize it.
   const startResize = (e: PointerEvent) => {
     const target = e.currentTarget as HTMLElement
     target.setPointerCapture(e.pointerId)
     resizing = true
     const move = (ev: PointerEvent) => {
-      panelWidth = clampPanel(window.innerWidth - ev.clientX)
+      panelWidth = clampPanel(window.innerWidth - 8 - ev.clientX)
     }
     const up = () => {
       resizing = false
@@ -73,20 +80,45 @@
     target.addEventListener('pointermove', move)
     target.addEventListener('pointerup', up)
   }
+
+  const tabs = $derived([
+    ...(app.hasArtifact ? [{ id: 'artifact' as const, label: app.artifactVersions[0]?.block.title ?? 'Artifact', icon: 'window' as const }] : []),
+    ...(app.browserOpen ? [{ id: 'browser' as const, label: app.browser.title || 'Browser', icon: 'globe' as const }] : [])
+  ])
 </script>
 
 <svelte:window {onkeydown} onresize={() => (panelWidth = clampPanel(panelWidth))} />
 
+<!-- The panel's tabs, at the start of whichever panel's header shows. -->
+{#snippet panelTabs()}
+  <div class="mr-auto inline-flex min-w-0 rounded-full bg-wash p-[3px]" role="tablist" aria-label="Panel">
+    {#each tabs as t (t.id)}
+      <button
+        role="tab"
+        aria-selected={app.activeTab === t.id}
+        class="inline-flex h-7 min-w-0 max-w-[180px] items-center gap-1.5 rounded-full px-3 text-[13px] font-medium transition-colors {app.activeTab === t.id
+          ? 'glass text-fg'
+          : 'text-fg-3 hover:text-fg'}"
+        onclick={() => (app.panelTab = t.id)}
+      >
+        <Icon name={t.icon} size={14} />
+        <span class="truncate">{t.label}</span>
+        {#if t.id === 'browser' && app.control.active}<span class="size-1.5 shrink-0 rounded-full bg-blue"></span>{/if}
+      </button>
+    {/each}
+  </div>
+{/snippet}
+
 {#if ready}
-  <!-- Behind the settings modal nothing takes focus or clicks. -->
-  <div class="flex h-full {resizing ? 'cursor-col-resize select-none' : ''}" inert={app.settingsOpen} in:fade={{ duration: 200 }}>
+  <!-- Behind a modal nothing takes focus or clicks. -->
+  <div class="flex h-full {resizing ? 'cursor-col-resize select-none' : ''}" inert={app.settingsOpen || app.findOpen} in:fade={{ duration: 200 }}>
     <Sidebar />
-    <main class="relative flex min-w-0 flex-1 bg-side">
+    <main class="relative flex min-w-0 flex-1 py-2 pr-2 transition-[padding] duration-[350ms] ease-out {app.sidebarOpen ? 'pl-0' : 'pl-2'}">
       <div class="flex min-w-0 flex-1" inert={app.page !== 'chat'}>
         <ChatView />
         {#if app.panelOpen}
-          <div class="relative flex shrink-0 justify-end overflow-hidden" style="width: {panelWidth}px" transition:reveal={{ width: panelWidth }}>
-            <div class="relative flex h-full shrink-0" style="width: {panelWidth}px">
+          <div class="relative flex shrink-0 justify-end overflow-hidden" style="width: {panelWidth + 8}px" transition:reveal={{ width: panelWidth + 8 }}>
+            <div class="relative flex h-full shrink-0 pl-2" style="width: {panelWidth + 8}px">
               <div
                 role="separator"
                 aria-orientation="vertical"
@@ -94,56 +126,55 @@
                 class="group absolute inset-y-0 left-0 z-10 w-2 cursor-col-resize"
                 onpointerdown={startResize}
               >
-                <span class="absolute inset-y-0 left-0 w-px bg-line transition-colors group-hover:bg-muted {resizing ? '!bg-fg-2' : ''}"></span>
+                <span class="absolute inset-y-3 left-[3px] w-0.5 rounded-full transition-colors group-hover:bg-line-2 {resizing ? '!bg-line-2' : ''}"></span>
               </div>
-              <div class="flex min-w-0 flex-1 flex-col bg-side {resizing ? 'pointer-events-none' : ''}">
-                {#if app.browserOpen && app.hasArtifact}
-                  <div class="flex shrink-0 gap-1 px-2 pt-2" role="tablist" aria-label="Panel">
-                    {#each [{ id: 'artifact', label: app.artifactVersions[0]?.block.title ?? 'Artifact', icon: 'window' }, { id: 'browser', label: app.browser.title || 'Browser', icon: 'globe' }] as t (t.id)}
-                      <button
-                        role="tab"
-                        aria-selected={app.activeTab === t.id}
-                        class="flex min-w-0 max-w-[50%] items-center gap-1.5 rounded-md px-2.5 py-1 text-[12.5px] transition-colors {app.activeTab === t.id
-                          ? 'bg-surface text-fg shadow-[0_0_0_1px_var(--line)]'
-                          : 'text-fg-2 hover:bg-hover hover:text-fg'}"
-                        onclick={() => (app.panelTab = t.id as 'artifact' | 'browser')}
-                      >
-                        <Icon name={t.icon as 'window' | 'globe'} size={13} />
-                        <span class="truncate">{t.label}</span>
-                        {#if t.id === 'browser' && app.control.active}<span class="size-1.5 shrink-0 rounded-full bg-accent"></span>{/if}
-                      </button>
-                    {/each}
-                  </div>
-                {/if}
+              <section
+                class="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-[var(--r-card)] bg-card shadow-[0_0_0_1px_var(--ring),var(--shadow-sm)] {resizing ? 'pointer-events-none' : ''}"
+              >
                 <!-- Both stay mounted so switching tabs never reloads the page or the artifact. -->
-                <div class="relative min-h-0 flex-1">
-                  {#if app.hasArtifact}
-                    <div class="absolute inset-0 {app.activeTab === 'artifact' ? '' : 'invisible'}" inert={app.activeTab !== 'artifact'}><ArtifactPanel /></div>
-                  {/if}
-                  {#if app.browserOpen}
-                    <div class="absolute inset-0 {app.activeTab === 'browser' ? '' : 'invisible'}" inert={app.activeTab !== 'browser'}><BrowserPanel /></div>
-                  {/if}
-                </div>
-              </div>
+                {#if app.hasArtifact}
+                  <div class="absolute inset-0 {app.activeTab === 'artifact' ? '' : 'invisible'}" inert={app.activeTab !== 'artifact'}><ArtifactPanel tabs={panelTabs} /></div>
+                {/if}
+                {#if app.browserOpen}
+                  <div class="absolute inset-0 {app.activeTab === 'browser' ? '' : 'invisible'}" inert={app.activeTab !== 'browser'}><BrowserPanel tabs={panelTabs} /></div>
+                {/if}
+              </section>
             </div>
           </div>
         {/if}
       </div>
     </main>
   </div>
+
+  {#if app.panelToggle && app.page === 'chat'}
+    <!-- The sidebar toggle mirrored: one spot whether the panel is open or shut, and it is the
+         panel's close control too. The chat's top bar and the panel's header keep room for it. -->
+    <button
+      class="icon-btn fixed top-[18px] right-5 z-[45] size-8"
+      aria-pressed={app.panelOpen}
+      data-panel-toggle
+      use:tip={app.panelOpen ? 'Hide panel' : app.latestArtifact ? 'Show artifact' : 'Show panel'}
+      onclick={() => app.togglePanel()}
+      transition:fade={{ duration: 160 }}
+    >
+      <Icon name="sidebar" size={16} class="-scale-x-100" />
+    </button>
+  {/if}
+
   {#if app.page === 'settings' && app.settings}
     <SettingsPage />
   {/if}
+  {#if app.findOpen}
+    <FindModal />
+  {/if}
 {/if}
 
-
-<div class="pointer-events-none fixed inset-x-0 bottom-5 z-[60] flex flex-col items-center gap-2 px-4">
+<div class="pointer-events-none fixed inset-x-0 bottom-6 z-[70] flex flex-col items-center gap-2 px-4">
   {#each app.toasts as t (t.id)}
     <div
-      class="pointer-events-auto flex max-w-[560px] items-center gap-2.5 rounded-full py-2 pr-2 pl-4 text-[13px] shadow-float {t.kind === 'error'
-        ? 'bg-fg text-bg'
-        : 'bg-surface text-fg shadow-[0_0_0_1px_var(--line),var(--shadow)]'}"
-      in:fly={{ y: 10, duration: 220 }}
+      class="pointer-events-auto flex max-w-[560px] items-center gap-2.5 rounded-full bg-solid py-[7px] pr-2 pl-4 text-[13px] font-medium text-on-solid shadow-float"
+      role={t.kind === 'error' ? 'alert' : 'status'}
+      in:fly={{ y: 16, duration: 300 }}
       out:fade={{ duration: 140 }}
     >
       {#if t.kind === 'error'}<Icon name="alert" size={14} />{/if}

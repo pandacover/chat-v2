@@ -63,20 +63,20 @@
 <div class="relative {block ? 'w-full' : 'min-w-0'}" bind:this={root} data-model-picker>
   <button
     type="button"
-    class="flex max-w-full items-center gap-1.5 rounded-md text-[13px] transition-colors {block
-      ? 'h-9 w-full bg-bg px-3 hover:bg-hover'
-      : 'h-8 px-2.5 text-fg-2 hover:bg-hover hover:text-fg'} {open ? 'bg-hover text-fg' : ''}"
+    class="flex max-w-full items-center gap-1.5 text-[13px] font-medium transition-colors {block
+      ? 'h-8 rounded-[10px] bg-card pr-2.5 pl-3 shadow-[inset_0_0_0_1px_var(--line)] hover:bg-wash'
+      : 'h-[30px] rounded-full pr-2 pl-2.5 text-fg-2 hover:bg-wash'} {open ? 'bg-wash text-fg' : ''}"
     onclick={toggle}
     aria-haspopup="listbox"
     aria-expanded={open}
   >
-    <span class="truncate text-fg">{label}</span>
-    <Icon name="chevronDown" size={13} class="text-muted transition-transform duration-150 {open ? 'rotate-180' : ''} {block ? 'ml-auto' : ''}" />
+    <span class="truncate {block ? 'text-fg' : ''}">{label}</span>
+    <Icon name="chevronDown" size={14} class="text-fg-4 transition-transform duration-200 {open ? 'rotate-180' : ''} {block ? 'ml-auto' : ''}" />
   </button>
 
   {#if open}
     <div
-      class="absolute z-50 w-[320px] max-w-[80vw] overflow-hidden {placement === 'up' ? 'bottom-full mb-1.5 origin-bottom-right' : 'top-full mt-1.5 origin-top-right'} rounded-lg bg-surface shadow-[0_0_0_1px_var(--line),var(--shadow)] {block
+      class="absolute z-50 w-[300px] max-w-[80vw] overflow-hidden {placement === 'up' ? 'bottom-full mb-2 origin-bottom-right' : 'top-full mt-2 origin-top-right'} glass-float rounded-[14px] {block
         ? 'left-0'
         : 'right-0'}"
       transition:pop={{ duration: 150 }}
@@ -87,15 +87,15 @@
             <button
               type="button"
               tabindex="-1"
-              class="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] {i === cursor ? 'bg-hover' : ''}"
+              class="flex w-full items-center gap-2.5 rounded-[10px] px-2.5 py-2 text-left {i === cursor ? 'bg-wash' : ''}"
               onmouseenter={() => (cursor = i)}
               onclick={() => pick(m.id)}
             >
               <span class="min-w-0 flex-1">
-                <span class="block truncate {m.id ? 'text-fg' : 'text-fg-2'}">{m.name}</span>
-                {#if m.note}<span class="block truncate text-[11.5px] text-muted">{m.note}</span>{/if}
+                <span class="block truncate text-[13.5px] font-medium {m.id ? 'text-fg' : 'text-fg-2'}">{m.name}</span>
+                {#if m.note}<span class="block truncate text-[12px] text-fg-3">{m.note}</span>{/if}
               </span>
-              <Icon name="check" size={13} class={m.id === value ? 'text-fg' : 'opacity-0'} />
+              <Icon name="check" size={15} class={m.id === value ? 'text-fg' : 'opacity-0'} />
             </button>
           </li>
         {/each}

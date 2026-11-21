@@ -67,7 +67,7 @@ export interface ComputerUseOptions {
   readonly platform: Platform | null
   /** The Electron overlay and Stop shortcut (`makeElectronOverlay()` from ./overlay), or `noOverlay`. */
   readonly overlay: OverlayPort
-  /** Saves a fact the model was told to remember (chat-v2's memory). */
+  /** Saves a fact the model was told to remember (Tomo's memory). */
   readonly remember: (fact: string, ctx: RunContext) => Promise<void>
   /** How long an action gets to show its effect before the screenshot after it (tests shorten it). */
   readonly settleMs?: number

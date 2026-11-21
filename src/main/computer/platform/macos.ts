@@ -1,7 +1,7 @@
 // macOS adapter, experimental: it follows the same Platform contract as Windows but hasn't run on
 // a Mac yet. It uses only tools that ship with the OS: `osascript -l JavaScript` (CoreGraphics
 // events, System Events), `screencapture`, `sips`, `mdfind` and `open`. Coordinates are points.
-// Needs Accessibility and Screen Recording permission for chat-v2.
+// Needs Accessibility and Screen Recording permission for Tomo.
 import { type ChildProcess, spawn } from 'node:child_process'
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
@@ -140,7 +140,7 @@ export const buildMdfindQuery = (q: SearchQuery): string => {
 /** Text field roles, whose text type_text replaces. */
 const MAC_FIELDS = new Set(['TextField', 'TextArea', 'ComboBox'])
 
-/** `ownerPid` is chat-v2's main process: its windows are never targets. */
+/** `ownerPid` is Tomo's main process: its windows are never targets. */
 export const makeMacPlatform = (opts: { ownerPid: number; track?: (p: ChildProcess) => void }): Platform => {
   if (opts.track) track = opts.track
   let remembered = ''
@@ -154,7 +154,7 @@ export const makeMacPlatform = (opts: { ownerPid: number; track?: (p: ChildProce
       try { title = p.windows[0].name() || '' } catch (e) {}
       return { name: p.name(), pid: p.unixId(), title };`)
 
-  /** The app of the frontmost normal window that isn't chat-v2's: the app the user was in before. */
+  /** The app of the frontmost normal window that isn't Tomo's: the app the user was in before. */
   const appBelow = () =>
     jxa<string | null>(`
       ObjC.import('CoreGraphics');
@@ -281,7 +281,7 @@ export const makeMacPlatform = (opts: { ownerPid: number; track?: (p: ChildProce
         const needle = ${JSON.stringify(needle)};
         let p = null, win = null;
         if (needle) {
-          // Another window, by app name or part of its title (not chat-v2's).
+          // Another window, by app name or part of its title (not Tomo's).
           for (const q of se.processes.whose({ backgroundOnly: false })()) {
             if (q.unixId() === ${opts.ownerPid}) continue;
             if (q.name().toLowerCase() === needle) { p = q; try { win = q.windows[0] } catch (e) {} break; }

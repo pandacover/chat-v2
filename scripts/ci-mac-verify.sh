@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# CI (macOS runners): checks a packaged chat-v2.app is signed as it must be.
+# CI (macOS runners): checks a packaged Tomo.app is signed as it must be.
 #
-#   bash scripts/ci-mac-verify.sh <path/to/chat-v2.app> self-signed|adhoc arm64|x64
+#   bash scripts/ci-mac-verify.sh <path/to/Tomo.app> self-signed|adhoc arm64|x64
 #
 # self-signed (releases): signed with the release certificate, and its designated requirement is
 # exactly `identifier "com.pandacover.chatv2" and certificate root|leaf = H"<build/chat-v2-signing.cer's

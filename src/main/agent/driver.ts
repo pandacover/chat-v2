@@ -35,7 +35,7 @@ export interface AgentDeps {
    * computer chat's shell commands start here too.
    */
   cwd: string
-  /** "chat-v2/<version>", sent with every request. */
+  /** "tomo/<version>", sent with every request. */
   clientApp: string
   /** The Claude Code binary, where the SDK can't find it (a packaged app keeps it outside app.asar). */
   executable?: string
@@ -223,7 +223,7 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
     settingSources: [],
     strictMcpConfig: true,
     // A title of its own stops Claude Code naming the session with a model call of its own.
-    title: 'chat-v2',
+    title: 'Tomo',
     ...(deps.executable ? { pathToClaudeCodeExecutable: deps.executable } : {}),
     ...(deps.spawn ? { spawnClaudeCodeProcess: deps.spawn } : {})
   })

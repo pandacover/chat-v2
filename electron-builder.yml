@@ -1,7 +1,7 @@
 # Installers for Windows (NSIS .exe) and macOS (.dmg). CI builds and publishes them on
 # every push to main (.github/workflows/release.yml); the app updates itself from there.
 appId: com.pandacover.chatv2
-productName: chat-v2
+productName: Tomo
 copyright: Copyright © pandacover
 directories:
   output: dist
@@ -28,7 +28,8 @@ win:
   target:
     - target: nsis
       arch: [x64]
-  artifactName: ${productName}-${version}-setup.${ext}
+  # A literal chat-v2- prefix: the update feed (latest.yml) and earlier releases name the files so.
+  artifactName: chat-v2-${version}-setup.${ext}
 
 nsis:
   # Per-user install without admin rights, so updates install silently on restart.
@@ -55,9 +56,9 @@ mac:
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
-    NSMicrophoneUsageDescription: chat-v2 uses the microphone for voice input.
+    NSMicrophoneUsageDescription: Tomo uses the microphone for voice input.
     # Computer use drives other apps through System Events (osascript) on macOS.
-    NSAppleEventsUsageDescription: chat-v2 uses other apps for you when you turn on computer use in a chat.
+    NSAppleEventsUsageDescription: Tomo uses other apps for you when you turn on computer use in a chat.
   # One build per architecture: a universal app carries both and is twice the size. Apps from
   # before the split download "-universal.dmg": release.yml uploads the Intel DMG under that name
   # too (it runs on both through Rosetta, and the next update moves Apple silicon to arm64).
@@ -69,7 +70,8 @@ mac:
     # Squirrel.Mac installs updates from the zips, which also carry latest-mac.yml.
     - target: zip
       arch: [arm64, x64]
-  artifactName: ${productName}-${version}-${arch}.${ext}
+  # A literal chat-v2- prefix, not ${productName}: ad-hoc signed apps open the DMG by this name.
+  artifactName: chat-v2-${version}-${arch}.${ext}
 
 # Installers are published as releases of this (public) repository.
 publish:

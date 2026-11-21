@@ -48,7 +48,7 @@ const fakeBrowser = (log: string[]) =>
       elementAt: () => Effect.succeed(null),
       screencast: () => Effect.void,
       startRecording: Effect.sync(() => void log.push('record start')),
-      stopRecording: Effect.sync(() => (log.push('record stop'), { path: 'C:\\Videos\\chat-v2\\recording-1.webm', seconds: 7 })),
+      stopRecording: Effect.sync(() => (log.push('record stop'), { path: 'C:\\Videos\\Tomo\\recording-1.webm', seconds: 7 })),
       recordReply: () => Effect.void,
       status: (label) => Effect.sync(() => void log.push(`status ${label}`)),
       release: Effect.sync(() => void log.push('release'))
@@ -91,7 +91,7 @@ const setup = (
   const fake = fakeQuery(script)
   const paths = AppPaths.layer(dir)
   const base = Layer.mergeAll(Db.layer(join(dir, 'chat.db')), SettingsStore.layer({ encrypt: (s) => s, decrypt: (s) => s }).pipe(Layer.provide(paths)), paths)
-  const agent = Agent.layer({ query: fake.query, configDir: join(dir, 'claude'), cwd: dir, clientApp: 'chat-v2/test' })
+  const agent = Agent.layer({ query: fake.query, configDir: join(dir, 'claude'), cwd: dir, clientApp: 'tomo/test' })
   const facts: string[] = []
   const computerUse = ComputerUse.layer({ ...computer, remember: async (fact) => void facts.push(fact) })
   const providers = Layer.mergeAll(agent, Attachments.layer, computerUse).pipe(Layer.provideMerge(base))
@@ -166,7 +166,7 @@ describe('replies', () => {
         settingSources: [],
         strictMcpConfig: true,
         includePartialMessages: true,
-        title: 'chat-v2',
+        title: 'Tomo',
         cwd: t.dir
       })
       expect(call.options.resume).toBeUndefined()
@@ -181,7 +181,7 @@ describe('replies', () => {
         CLAUDE_CONFIG_DIR: join(t.dir, 'claude'),
         ENABLE_TOOL_SEARCH: 'true',
         ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
-        CLAUDE_AGENT_SDK_CLIENT_APP: 'chat-v2/test'
+        CLAUDE_AGENT_SDK_CLIENT_APP: 'tomo/test'
       })
       expect(call.options.env!.ANTHROPIC_API_KEY).toBeUndefined()
       expect(typeof call.options.env!.CLAUDE_SECURESTORAGE_CONFIG_DIR).toBe('string')
@@ -737,11 +737,11 @@ describe('browser', () => {
     await t.waitForDone(1)
     expect(contents[0]).toEqual([{ type: 'image', data: 'AAAA', mimeType: 'image/jpeg' } as never])
     expect(contents[1]![0]!.text).toMatch(/^Saved as screenshot-\d{6}\.png and attached to your reply\.$/)
-    expect(contents[3]![0]!.text).toBe('Recording stopped after 7s and saved to C:\\Videos\\chat-v2\\recording-1.webm')
+    expect(contents[3]![0]!.text).toBe('Recording stopped after 7s and saved to C:\\Videos\\Tomo\\recording-1.webm')
     const message = (await t.run(Chat.use((c) => c.view(s.id)))).path[1]!.message
     expect(message.attachments.map((a) => a.mime)).toEqual(['image/png'])
     expect(t.events.some((e) => e.type === 'attachment')).toBe(true)
-    expect(message.content).toContain(stepLine({ tool: 'browser_record', label: 'Recorded 7s of the browser', ok: true, detail: 'C:\\Videos\\chat-v2\\recording-1.webm' }))
+    expect(message.content).toContain(stepLine({ tool: 'browser_record', label: 'Recorded 7s of the browser', ok: true, detail: 'C:\\Videos\\Tomo\\recording-1.webm' }))
     expect(log).toContain('record stop')
     await t.runtime.dispose()
   })

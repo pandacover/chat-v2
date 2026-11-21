@@ -5,8 +5,9 @@
   import type { Attachment } from '@shared/types'
   import { isMac, modKey, shortcut } from '@/lib/keys'
   import { fade, pop } from '@/lib/motion'
-  import { startRecording, type Recording } from '@/lib/recorder'
+  import { orb } from '@/lib/orb'
   import { app } from '@/lib/store.svelte'
+  import { clock, voice } from '@/lib/voice.svelte'
   import { applyEdit, listEditing } from '@/lib/textarea'
   import AttachmentChip from './AttachmentChip.svelte'
   import Icon from './Icon.svelte'
@@ -15,6 +16,8 @@
 
   let {
     placeholder = 'Message',
+    tall = false,
+    inChat = true,
     model,
     onmodel,
     browserEnabled = false,
@@ -23,6 +26,10 @@
     oncomputer
   }: {
     placeholder?: string
+    /** Home: a taller box. */
+    tall?: boolean
+    /** In a chat the orb takes the mic's place while it listens; on Home the orb is in the middle. */
+    inChat?: boolean
     model: string
     onmodel: (id: string) => void
     browserEnabled?: boolean
@@ -38,16 +45,12 @@
   let textarea: HTMLTextAreaElement | undefined = $state()
   let fileInput: HTMLInputElement | undefined = $state()
 
-  // Push-to-talk: hold the mic to talk, or click once to start and again to stop.
-  let recording = $state<Recording | null>(null)
-  let held = $state(false)
-  let elapsed = $state(0)
-  let transcribing = $state(false)
+  // Push-to-talk (lib/voice.svelte.ts): hold the mic to talk, or click once to start and again to stop.
   let pressedAt = 0
-  let startedAt = 0
-  // Set while the mic is opening, which includes any permission prompt.
-  let starting = false
-  let tick: ReturnType<typeof setInterval> | undefined
+  let micButton: HTMLButtonElement | undefined = $state()
+  const listening = $derived(voice.phase === 'recording' || voice.phase === 'starting' || voice.phase === 'transcribing')
+  /** The composer shows the listening line in place of the text (in a chat; Home has the stage). */
+  const listenLine = $derived(inChat && listening)
 
   const busy = $derived(app.streaming)
   const canSend = $derived((text.trim() !== '' || app.draftAttachments.length > 0) && uploading === 0 && app.analyzing.size === 0 && !busy)
@@ -74,6 +77,11 @@
   }
 
   const oninput = fit
+  // Home's taller box and the docked one: the textarea's fitted height follows.
+  $effect(() => {
+    void tall
+    queueMicrotask(fit)
+  })
 
   // Each chat keeps its own unsent text and attachments ('' is the new chat).
   const key = $derived(app.view?.session.id ?? '')
@@ -169,97 +177,73 @@
     }
   }
 
-  const beginRecording = async () => {
-    if (recording || transcribing || starting) return
-    if (!app.settings?.hasElevenLabsKey) {
-      app.toast('Add an ElevenLabs key in Settings to use voice input.')
-      app.settingsOpen = true
-      return
-    }
-    starting = true
-    try {
-      if (!(await window.api.stt.microphone())) {
-        app.toast('Microphone access is off for chat-v2. Turn it on in System Settings → Privacy & Security → Microphone.')
-        return
-      }
-      recording = await startRecording()
-      startedAt = Date.now()
-      elapsed = 0
-      tick = setInterval(() => (elapsed = Math.floor((Date.now() - startedAt) / 1000)), 250)
-    } catch (e) {
-      app.toast(`Microphone unavailable: ${e instanceof Error ? e.message : e}`)
-    } finally {
-      starting = false
-    }
+  // The transcript joins the draft; the voice stage can also clear it (Esc to start over).
+  voice.onTranscript = (transcript) => {
+    text = text.trim() ? `${text.trimEnd()} ${transcript}` : transcript
+    queueMicrotask(() => {
+      fit()
+      textarea?.focus()
+    })
   }
-
-  const finishRecording = async () => {
-    const r = recording
-    if (!r) return
-    recording = null
-    held = false
-    clearInterval(tick)
-    transcribing = true
-    try {
-      const audio = await r.stop()
-      const transcript = await app.attempt(() => window.api.stt.transcribe(audio.data, audio.mime))
-      if (transcript) {
-        text = text.trim() ? `${text.trimEnd()} ${transcript}` : transcript
-        queueMicrotask(() => {
-          fit()
-          textarea?.focus()
-        })
-      } else if (transcript === '') {
-        app.toast('No speech detected.', 'info')
-      }
-    } finally {
-      transcribing = false
-    }
+  voice.onClear = () => {
+    text = ''
+    queueMicrotask(fit)
   }
-
-  const cancelRecording = () => {
-    recording?.cancel()
-    recording = null
-    held = false
-    clearInterval(tick)
-  }
+  voice.hasText = () => text.trim() !== ''
 
   const micDown = async (e: PointerEvent) => {
     if (e.button !== 0) return
-    if (recording) {
-      void finishRecording()
+    if (voice.recording) {
+      void voice.finish()
       pressedAt = 0
       return
     }
     pressedAt = Date.now()
-    await beginRecording()
+    await voice.start()
     // Still pressed once the mic opened: this is push-to-talk.
-    if (pressedAt && recording) held = true
+    if (pressedAt && voice.recording) voice.held = true
   }
 
   const micUp = () => {
-    if (pressedAt && recording && Date.now() - pressedAt > 400) void finishRecording()
-    else held = false
+    if (pressedAt && voice.recording && Date.now() - pressedAt > 400) void voice.finish()
+    else voice.held = false
     pressedAt = 0
   }
 
   const onWindowKey = (e: KeyboardEvent) => {
+    if (app.settingsOpen || app.findOpen) return
     // Cmd+M on a Mac, Ctrl+M elsewhere.
     if (modKey(e) && e.key.toLowerCase() === 'm') {
       e.preventDefault()
       // Holding the keys down must not flip the mic on and off.
       if (e.repeat) return
-      if (recording) void finishRecording()
-      else void beginRecording()
+      voice.toggle()
     }
-    if (e.key === 'Escape' && recording) {
-      e.preventDefault()
-      cancelRecording()
+    if (e.key === 'Escape' && !e.defaultPrevented) {
+      if (voice.recording || voice.phase === 'starting') {
+        e.preventDefault()
+        voice.cancel()
+      } else if (voice.home === 'ready' && voice.phase === 'idle') {
+        e.preventDefault()
+        voice.startOver()
+      }
     }
   }
 
+  // A ring leaves the mic's orb on each spike in the voice.
+  $effect(() => {
+    void voice.spikes
+    const host = untrack(() => micButton)
+    if (!host || !untrack(() => listenLine) || untrack(() => voice.spikes) === 0) return
+    const ring = document.createElement('span')
+    ring.className = 'ripple'
+    ring.style.setProperty('--rs', '30px')
+    ring.style.setProperty('--rg', '1.9')
+    host.append(ring)
+    ring.addEventListener('animationend', () => ring.remove())
+  })
+
   const hasFiles = (e: DragEvent) => [...(e.dataTransfer?.types ?? [])].includes('Files')
-  const clock = $derived(`${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`)
 </script>
 
 <svelte:window
@@ -289,15 +273,11 @@
   </div>
 {/if}
 
-<div
-  class="rounded-lg bg-surface shadow-float transition-shadow duration-150 {focused || recording
-    ? 'shadow-[0_0_0_1px_var(--muted),var(--shadow)]'
-    : 'shadow-[0_0_0_1px_var(--line),var(--shadow)]'}"
->
+<div class="composer relative z-0 w-full rounded-[20px] text-left transition-shadow duration-200" class:focused>
   {#if app.draftAttachments.length > 0 || uploading > 0}
     <div class="flex flex-wrap items-center gap-1.5 px-3 pt-3">
       {#each app.draftAttachments as a (a.id)}<AttachmentChip attachment={a} onremove={() => removeAttachment(a)} />{/each}
-      {#if uploading > 0}<span class="px-1 text-[12px] text-muted" in:fade>Uploading…</span>{/if}
+      {#if uploading > 0}<span class="px-1 text-[12px] text-fg-3" in:fade>Uploading…</span>{/if}
       {#if app.analyzing.size > 0}<span class="thinking px-1 text-[12px]" in:fade>Finding the beat…</span>{/if}
     </div>
   {/if}
@@ -314,25 +294,24 @@
       onblur={() => (focused = false)}
       rows="1"
       placeholder={app.teaching ? 'Tell it what happened, or press Done' : placeholder}
-      class="block max-h-[240px] w-full resize-none bg-transparent px-4 pt-3.5 pb-1.5 text-[15px] leading-relaxed outline-none placeholder:text-muted {recording || transcribing
-        ? 'opacity-0'
+      class="block max-h-[220px] w-full resize-none bg-transparent px-[18px] pt-[15px] pb-1 text-[15px] leading-normal outline-none placeholder:text-fg-4 {tall ? 'min-h-[78px]' : 'min-h-[52px]'} {listenLine
+        ? 'invisible'
         : ''}"
     ></textarea>
-    {#if recording || transcribing}
-      <div class="absolute inset-0 flex items-center gap-2.5 px-4 pt-2 text-[14px]" in:fade={{ duration: 120 }}>
-        {#if recording}
-          <span class="size-2 rounded-full bg-accent [animation:rec-pulse_1.2s_ease-in-out_infinite]"></span>
-          <span class="font-mono text-[13px] tabular-nums">{clock}</span>
-          <span class="text-muted">{held ? 'Release to transcribe' : 'Listening. Click the mic to finish, Esc to cancel'}</span>
-        {:else}
-          <span class="thinking">Transcribing</span>
+    {#if listenLine}
+      <!-- Voice in a chat: the orb takes the mic's place, and this line the text's. -->
+      <div class="absolute inset-0 flex items-start gap-2.5 px-[18px] pt-[15px] text-[15px]" in:fade={{ duration: 120 }}>
+        <span class="thinking">{voice.phase === 'transcribing' ? 'Transcribing' : 'Listening'}</span>
+        {#if voice.phase !== 'transcribing'}
+          <span class="font-label text-[12.5px] leading-[22px] font-medium text-fg-3 tabular-nums">{clock(voice.elapsed)}</span>
+          <kbd class="studio-kbd ml-auto leading-[22px]">{voice.held ? 'Release to transcribe' : 'Esc to cancel'}</kbd>
         {/if}
       </div>
     {/if}
   </div>
 
   <!-- A container, so the row can drop labels when the composer itself is narrow. -->
-  <div class="@container flex items-center gap-0.5 px-2 pb-2">
+  <div class="@container flex items-center gap-1 pt-1.5 pr-2 pb-2 pl-2.5">
     <input
       bind:this={fileInput}
       type="file"
@@ -343,53 +322,60 @@
         void addFiles([...(input.files ?? [])]).then(() => (input.value = ''))
       }}
     />
-    <button class="icon-btn" use:tip={'Attach files'} onclick={() => fileInput?.click()}><Icon name="paperclip" size={17} /></button>
-    <button
-      class="icon-btn select-none {recording ? '!bg-accent !text-on-accent' : ''}"
-      use:tip={{ text: 'Voice: hold to talk, or click to start and stop', kbd: shortcut('M') }}
-      disabled={transcribing}
-      onpointerdown={micDown}
-      onpointerup={micUp}
-      onpointerleave={micUp}
-    >
-      <Icon name="mic" size={17} />
-    </button>
+    <button class="icon-btn size-8" use:tip={'Attach files'} onclick={() => fileInput?.click()}><Icon name="paperclip" size={16} /></button>
 
     <button
-      class="flex h-7 items-center gap-1.5 rounded-full px-[7px] text-[12.5px] transition-colors {browserEnabled
-        ? 'bg-fg text-bg'
-        : 'text-fg-2 hover:bg-hover hover:text-fg'}"
+      class="toggle"
       role="switch"
       aria-checked={browserEnabled}
       aria-label="Browser"
       use:tip={browserEnabled ? 'The assistant can use the browser in this chat' : 'Let the assistant use the browser in this chat'}
       onclick={onbrowser}
     >
-      <Icon name="globe" size={14} /><span class="hidden @sm:inline">Browser</span>
+      <Icon name="globe" size={15} /><span class="hidden @sm:inline">Browser</span>
     </button>
     {#if app.computerSupported}
       <button
-        class="flex h-7 items-center gap-1.5 rounded-full px-[7px] text-[12.5px] transition-colors {computerEnabled
-          ? 'bg-fg text-bg'
-          : 'text-fg-2 hover:bg-hover hover:text-fg'}"
+        class="toggle"
         role="switch"
         aria-checked={computerEnabled}
         aria-label="Computer"
         use:tip={computerEnabled ? 'The assistant can see your screen and use your apps in this chat' : 'Let the assistant see your screen and use your apps in this chat'}
         onclick={oncomputer}
       >
-        <Icon name="monitor" size={14} /><span class="hidden @sm:inline">Computer</span>
+        <Icon name="monitor" size={15} /><span class="hidden @sm:inline">Computer</span>
       </button>
       {#if computerOn}<PointButton onadded={() => textarea?.focus()} />{/if}
     {/if}
     <span class="ml-auto"></span>
     <ModelPicker placement="up" value={model} onchange={onmodel} />
     <button
-      class="ml-1 grid size-8 place-items-center rounded-full transition-[background-color,color,transform] duration-150 active:scale-95 {stopping
-        ? 'bg-fg text-bg'
-        : canSend || answering
-          ? 'bg-accent text-on-accent'
-          : 'bg-hover text-muted'}"
+      bind:this={micButton}
+      class="relative grid size-[34px] shrink-0 place-items-center rounded-full text-fg-2 transition-colors select-none hover:bg-wash {!inChat && listening
+        ? '!bg-solid !text-on-solid'
+        : ''}"
+      aria-label={voice.recording ? 'Finish talking' : 'Talk'}
+      data-tip-no-label
+      use:tip={{ text: 'Voice: hold to talk, or click to start and stop', kbd: shortcut('M') }}
+      disabled={voice.phase === 'transcribing'}
+      onpointerdown={micDown}
+      onpointerup={micUp}
+      onpointerleave={micUp}
+    >
+      {#if listenLine}
+        <span
+          class="orb"
+          style="--s: 32px; --pk: 0.22; --lvl: {voice.level.toFixed(3)}"
+          use:orb={{ state: voice.phase === 'transcribing' ? 'thinking' : 'listening', level: voice.recording ? voice.level : undefined }}
+        ></span>
+      {:else}
+        <Icon name="mic" size={18} />
+      {/if}
+    </button>
+    <button
+      class="ml-0.5 grid size-[34px] shrink-0 place-items-center rounded-full transition-[background-color,color,transform] duration-150 active:scale-[0.94] {stopping || canSend || answering
+        ? 'bg-solid text-on-solid hover:bg-solid-hover'
+        : 'bg-wash text-fg-4'}"
       use:tip={stopping
         ? computerOn
           ? { text: 'Stop. Works from any app too', kbd: stopShortcutLabel(isMac) }
@@ -399,9 +385,70 @@
       onclick={() => (stopping ? app.stop() : submit())}
     >
       {#key stopping}
-        <span in:pop={{ duration: 160 }}><Icon name={stopping ? 'stop' : 'arrowUp'} size={16} stroke={stopping ? 2.4 : 2} /></span>
+        <span in:pop={{ duration: 160 }}><Icon name={stopping ? 'stop' : 'arrowUp'} size={17} stroke={2} /></span>
       {/key}
       <span class="sr-only">{stopping ? 'Stop' : 'Send'}</span>
     </button>
   </div>
 </div>
+
+<style>
+  /*
+   * Glass, as app.css .glass-float, but the frosting is on a layer behind the content rather than on
+   * the box itself: a box with a backdrop filter stops its children's own backdrop filters seeing
+   * past it, and the model list (glass too) opens outside the composer.
+   */
+  .composer {
+    box-shadow:
+      inset 0 1px 0 var(--glass-edge),
+      0 0 0 1px var(--glass-ring),
+      var(--shadow-float);
+  }
+  .composer::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    backdrop-filter: blur(24px) saturate(180%);
+  }
+  /* Focused, its ring firms up and a soft halo joins it. */
+  .composer.focused {
+    box-shadow:
+      inset 0 1px 0 var(--glass-edge),
+      0 0 0 1px var(--ring-2),
+      0 0 0 4px var(--wash),
+      var(--shadow-float);
+  }
+  .toggle {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    margin-left: 2px;
+    padding: 0 11px 0 9px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--fg-3);
+    transition:
+      background-color 150ms,
+      color 150ms;
+  }
+  .toggle:hover {
+    background: var(--wash);
+    color: var(--fg);
+  }
+  .toggle[aria-checked='true'] {
+    background: var(--solid);
+    color: var(--on-solid);
+  }
+  @container (width < 24rem) {
+    .toggle {
+      padding: 0 8px;
+    }
+  }
+</style>
