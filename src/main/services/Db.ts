@@ -15,7 +15,7 @@ import type {
 import type { ComputerMode } from '@shared/computer'
 import { DbError, NotFound, errorMessage } from '../errors'
 import { BOTS_AND_JOBS_MIGRATION, BOT_MODULES_MIGRATION, makeJobsDb } from './jobsDb'
-import { stuckStore } from './stuckStore'
+import { PROGRESS_NOTES_MIGRATION, stuckStore } from './stuckStore'
 import { MEMORY_RECORDS_MIGRATION, makeMemoryStore } from './memoryStore'
 import { usageRows } from '../usage/rows'
 import { RECONCILER_MIGRATION, makeReconcilerDb } from './reconcilerDb'
@@ -187,7 +187,9 @@ export const MIGRATIONS: string[] = [
   // The daily reconciler's runs and the jobs it has read (see reconcilerDb.ts).
   RECONCILER_MIGRATION,
   // Rules (agent/rules.ts): the computer and browser switches of each chat become the primary bot's modules.
-  BOT_MODULES_MIGRATION
+  BOT_MODULES_MIGRATION,
+  // Checkpoints' progress notes become job notes (stuckStore.ts): progress_notes moves into them and goes.
+  PROGRESS_NOTES_MIGRATION
 ]
 
 interface SessionRow {
@@ -828,7 +830,7 @@ export const makeDb = (file: string) => {
         return rows.map((r) => r.path).filter((p) => !one('select 1 from attachments where path = ?', p))
       }),
     ...memory,
-    ...stuckStore(run, all),
+    ...stuckStore(run, all, memory.writeCheckpointNote),
     ...usageRows({ all, one, run }),
     ...makeReconcilerDb({ all, one, run, transaction, getSession, activePath }),
     close: () => db.close()
