@@ -60,6 +60,34 @@ export const parseContent = (content: string): ContentBlock[] => {
   return blocks.filter((b) => b.type === 'artifact' || b.content.trim() !== '')
 }
 
+const parsed = new Map<string, readonly ContentBlock[]>()
+/** At most this many messages' blocks are kept, and at most about this many characters of them. */
+const PARSED_MAX = 300
+const PARSED_CHARS = 4_000_000
+let parsedChars = 0
+
+/**
+ * parseContent, remembered by content: the chat view, the artifact panel and its toggle each
+ * parse the same messages, and did again for every message on every streamed line.
+ * The blocks are shared, so don't change them.
+ */
+export const parseContentCached = (content: string): readonly ContentBlock[] => {
+  let blocks = parsed.get(content)
+  if (blocks) {
+    parsed.delete(content)
+  } else {
+    blocks = /<artifact/i.test(content) ? parseContent(content) : /\S/.test(content) ? [{ type: 'text', content }] : []
+    parsedChars += content.length
+    for (const key of parsed.keys()) {
+      if (parsed.size < PARSED_MAX && parsedChars <= PARSED_CHARS) break
+      parsed.delete(key)
+      parsedChars -= key.length
+    }
+  }
+  parsed.set(content, blocks)
+  return blocks
+}
+
 export const ARTIFACT_INSTRUCTIONS = `You can create interactive artifacts that the user's app renders live in a sandboxed panel.
 Use an artifact for self-contained, interactive or visual output (apps, games, visualizations, UI mockups, charts, simulations) that is longer than a few lines. Do not use artifacts for short code snippets or plain explanations.
 

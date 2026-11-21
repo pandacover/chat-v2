@@ -1,5 +1,5 @@
 import { SvelteMap, SvelteSet } from 'svelte/reactivity'
-import { parseContent, type ArtifactBlock } from '@shared/artifacts'
+import { parseContentCached, type ArtifactBlock } from '@shared/artifacts'
 import type { ComputerDoing, ComputerMode, ComputerWait } from '@shared/computer'
 import type { UpdateState } from '@shared/types'
 import type {
@@ -43,6 +43,13 @@ const loadDrafts = (): Array<[string, Draft]> => {
   } catch {
     return []
   }
+}
+
+/** The new chat has no title yet; its draft's first line stands in. */
+export const draftTitle = (text: string) => {
+  // The start is enough for 60 characters: a pasted draft can be megabytes.
+  const line = text.trimStart().slice(0, 400).replace(/\s+/g, ' ').trim()
+  return line.length > 60 ? `${line.slice(0, 57).trimEnd()}…` : line || 'New chat'
 }
 
 /** Cleans up the "Error invoking remote method" noise Electron sometimes adds. */
@@ -129,18 +136,25 @@ class AppState {
   // re-scan (and for artifacts, re-parse) the whole conversation on every streamed line.
   streaming = $derived(this.view?.path.some((n) => n.message.status === 'streaming') ?? false)
 
+  private lastVersions: Array<{ messageId: string; block: ArtifactBlock }> = []
   /** Every complete version of the open artifact along the visible branch. */
   artifactVersions = $derived.by(() => {
     const open = this.artifact
-    if (!open || !this.view) return []
+    if (!open || !this.view) return (this.lastVersions = [])
     const out: Array<{ messageId: string; block: ArtifactBlock }> = []
     for (const { message } of this.view.path) {
       if (message.role !== 'assistant') continue
-      for (const b of parseContent(message.content)) {
+      for (const b of parseContentCached(message.content)) {
         if (b.type === 'artifact' && b.complete && b.identifier === open.identifier) out.push({ messageId: message.id, block: b })
       }
     }
-    return out
+    // The same versions as before (a streamed line that changed none of them): the same array, so
+    // nothing that shows them updates.
+    const last = this.lastVersions
+    const same =
+      out.length === last.length &&
+      out.every((v, i) => v.messageId === last[i]!.messageId && v.block.content === last[i]!.block.content && v.block.title === last[i]!.block.title)
+    return same ? last : (this.lastVersions = out)
   })
 
   /** The open chat's settings, or what has been picked for the new chat. */
@@ -166,7 +180,7 @@ class AppState {
     for (let i = path.length - 1; i >= 0; i--) {
       const m = path[i]!.message
       if (m.role !== 'assistant' || !/<artifact/i.test(m.content)) continue
-      const found = parseContent(m.content).findLast((b) => b.type === 'artifact' && b.complete)
+      const found = parseContentCached(m.content).findLast((b) => b.type === 'artifact' && b.complete)
       if (found && found.type === 'artifact') return { identifier: found.identifier, messageId: m.id }
     }
     return null
@@ -249,14 +263,28 @@ class AppState {
   setDraft(key: string, text: string) {
     const prev = this.drafts.get(key)
     if (prev?.text === text) return
-    if (text.trim() === '') {
+    if (!/\S/.test(text)) {
       if (!prev) return
       this.drafts.delete(key)
+    } else if (prev && this.newestDraft() === key && (key !== '' || draftTitle(prev.text) === draftTitle(text))) {
+      // Typing on: the sidebar shows nothing new (the row is there, first among drafts, and the
+      // new chat's title is the same), so the draft changes in place. Setting it re-rendered the
+      // whole chat list on every key.
+      prev.text = text
+      prev.at = Date.now()
     } else {
       this.drafts.set(key, { text, at: Date.now() })
     }
     clearTimeout(this.draftsTimer)
     this.draftsTimer = setTimeout(() => this.saveDrafts(), 300)
+  }
+
+  /** The draft edited last, which the sidebar lists first. */
+  private newestDraft(): string | null {
+    let key: string | null = null
+    let at = -Infinity
+    for (const [k, d] of this.drafts) if (d.at > at) [key, at] = [k, d.at]
+    return key
   }
 
   saveDrafts() {

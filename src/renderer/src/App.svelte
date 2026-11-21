@@ -27,13 +27,15 @@
 
   const reduce = matchMedia('(prefers-reduced-motion: reduce)')
   /**
-   * Opens the panel by growing its width, so the chat column narrows in step
-   * instead of jumping. The contents keep their final width throughout.
+   * Opens the panel by sliding it in from the right edge. The chat column takes its new width at
+   * once, and the panel glides into the room it left. Growing the panel's width instead narrowed
+   * the chat a little every frame, re-laying out and repainting the whole conversation each time
+   * (about 30 ms a frame on a long chat), so the panel stuttered in and out.
    */
   const reveal = (_node: Element, { width }: { width: number }) => ({
     duration: reduce.matches ? 0 : 450,
     easing: ease,
-    css: (t: number) => `width: ${t * width}px; opacity: ${Math.min(1, t * 1.5)}`
+    css: (t: number) => `transform: translateX(${(1 - t) * width}px); opacity: ${Math.min(1, t * 1.5)}`
   })
 
   onMount(async () => {

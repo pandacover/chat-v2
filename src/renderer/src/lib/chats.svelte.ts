@@ -1,7 +1,9 @@
 // The chat list, as the sidebar and the search modal both show it: saved chats, and the new chat
 // while it has a draft, grouped as unsent drafts first, then pinned, then by day.
 import type { Session } from '@shared/types'
-import { app } from './store.svelte'
+import { app, draftTitle } from './store.svelte'
+
+export { draftTitle }
 
 const DAY = 24 * 60 * 60 * 1000
 
@@ -15,12 +17,6 @@ export interface Entry {
 
 export type Group = 'Drafts' | 'Pinned' | 'Today' | 'Yesterday' | 'This week' | 'Earlier'
 export const GROUPS: Group[] = ['Drafts', 'Pinned', 'Today', 'Yesterday', 'This week', 'Earlier']
-
-/** The new chat has no title yet; its draft's first line stands in. */
-export const draftTitle = (text: string) => {
-  const line = text.replace(/\s+/g, ' ').trim()
-  return line.length > 60 ? `${line.slice(0, 57).trimEnd()}…` : line || 'New chat'
-}
 
 export const entries = (): Entry[] => {
   const list: Entry[] = app.sessions.map((s) => ({ key: s.id, title: s.title, session: s, draft: app.hasDraft(s.id) }))

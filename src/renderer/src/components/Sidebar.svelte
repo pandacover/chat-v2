@@ -1,10 +1,10 @@
 <script lang="ts">
   import { tip } from '@/lib/tooltip'
-  import { flip } from 'svelte/animate'
+  import { untrack } from 'svelte'
   import { SvelteSet } from 'svelte/reactivity'
   import type { Session } from '@shared/types'
-  import { entries, grouped, openEntry, type Entry } from '@/lib/chats.svelte'
-  import { ease, fade } from '@/lib/motion'
+  import { draftTitle, entries, grouped, openEntry, type Entry } from '@/lib/chats.svelte'
+  import { fade } from '@/lib/motion'
   import { shortcut } from '@/lib/keys'
   import { app } from '@/lib/store.svelte'
   import { theme, type ThemePref } from '@/lib/theme.svelte'
@@ -29,14 +29,82 @@
 
   // Headers and chats in one keyed list, so a header moves with the same flip as the chats around it.
   type Row = { key: string; label: string; open: boolean; entry?: undefined } | { key: string; entry: Entry }
+  /**
+   * What a row shows. The new chat's title isn't here: its row reads it as you type, so typing
+   * doesn't make a new list.
+   */
+  const sameRow = (a: Row, b: Row) =>
+    a.entry && b.entry
+      ? a.entry.draft === b.entry.draft &&
+        (a.entry.session === null
+          ? b.entry.session === null
+          : b.entry.session !== null &&
+            a.entry.title === b.entry.title &&
+            a.entry.session.pinnedAt === b.entry.session.pinnedAt &&
+            a.entry.session.forkedFromSessionId === b.entry.session.forkedFromSessionId)
+      : !a.entry && !b.entry && a.open === b.open
+  /**
+   * The list is worked out again whenever anything it reads changes (a keystroke in a draft, the
+   * open chat, a refreshed chat list), but each new array makes the keyed list below measure every
+   * row for its flip, which with hundreds of chats forced a layout of the whole window on every
+   * key and chat switch. Unchanged rows keep their objects, and an unchanged list its array.
+   */
+  let lastRows: Row[] = []
   const rows = $derived.by(() => {
+    const before = new Map(lastRows.map((r) => [r.key, r]))
     const out: Row[] = []
+    const add = (row: Row) => {
+      const prev = before.get(row.key)
+      out.push(prev && sameRow(prev, row) ? prev : row)
+    }
     for (const [label, items] of groups) {
       const open = !collapsed.has(label)
-      out.push({ key: `group:${label}`, label, open })
-      if (open) for (const e of items) out.push({ key: `chat:${e.key}`, entry: e })
+      add({ key: `group:${label}`, label, open })
+      if (open) for (const e of items) add({ key: `chat:${e.key}`, entry: e })
+    }
+    if (out.length === lastRows.length && out.every((r, i) => r === lastRows[i])) return lastRows
+    return (lastRows = out)
+  })
+
+  /*
+   * Rows glide to their new places when the list changes (FLIP), by hand: Svelte's animate:flip
+   * measured every row on every pass over the list, and while a glide was still running each
+   * measure forced a layout of the window, row by row. That restarted every row's glide, so
+   * typing a new chat's first words took seconds a key. Here positions are read for all rows
+   * first and written after, only when the rows really change, and only rows in view move.
+   */
+  let nav: HTMLElement | undefined = $state()
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)')
+  let tops = new Map<string, number>()
+  const rowTops = () => {
+    const out = new Map<string, number>()
+    for (const el of nav?.children ?? []) {
+      const key = (el as HTMLElement).dataset.row
+      if (key) out.set(key, (el as HTMLElement).offsetTop)
     }
     return out
+  }
+  $effect.pre(() => {
+    void rows
+    tops = untrack(rowTops)
+  })
+  $effect(() => {
+    void rows
+    const el = nav
+    if (!el || reduceMotion.matches) return
+    const before = tops
+    const after = rowTops()
+    const top = el.scrollTop - 40
+    const bottom = el.scrollTop + el.clientHeight + 40
+    for (const child of el.children) {
+      const row = child as HTMLElement
+      const key = row.dataset.row
+      const from = key === undefined ? undefined : before.get(key)
+      const to = key === undefined ? undefined : after.get(key)
+      if (from === undefined || to === undefined || from === to) continue
+      if (Math.max(from, to) < top || Math.min(from, to) > bottom) continue
+      row.animate([{ transform: `translateY(${from - to}px)` }, { transform: 'none' }], { duration: 200, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' })
+    }
   })
 
   const startRename = (s: Session) => {
@@ -147,9 +215,10 @@
       <Icon name="search" size={16} />Search<kbd class="studio-kbd ml-auto">{shortcut('K')}</kbd>
     </button>
 
-    <nav class="relative -mx-1 min-h-0 flex-1 overflow-y-auto px-1 pb-2 [scrollbar-width:none]">
+    <nav bind:this={nav} class="relative -mx-1 min-h-0 flex-1 overflow-y-auto px-1 pb-2 [scrollbar-width:none]">
       {#each rows as row (row.key)}
-        <div class={row.entry ? 'mt-[3px]' : ''} animate:flip={{ duration: 200, easing: ease }} transition:fade={{ duration: 120 }}>
+        <!-- A row that goes leaves at once, so the rows after it glide up in its place. -->
+        <div class="row {row.entry ? 'mt-[3px]' : 'head'}" data-row={row.key} in:fade={{ duration: 120 }}>
           {#if !row.entry}
             <button
               class="group/label mono-label mt-3.5 mb-0.5 flex items-center gap-1 rounded-lg px-2.5 py-1.5 whitespace-nowrap transition-colors hover:text-fg"
@@ -200,7 +269,7 @@
                     {@const parent = app.sessions.find((x) => x.id === s.forkedFromSessionId)}
                     <span class="grid shrink-0 place-items-center text-fg-3" use:tip={parent ? `Forked from “${parent.title}”` : 'Forked chat'}><Icon name="branch" size={13} /></span>
                   {/if}
-                  <span class="min-w-0 flex-1 truncate text-left {s ? '' : 'italic'}">{e.title}</span>
+                  <span class="min-w-0 flex-1 truncate text-left {s ? '' : 'italic'}">{s ? e.title : draftTitle(app.draftText(''))}</span>
                 </button>
                 <!-- Over the title rather than beside it, so the title runs to the row's edge; it fades out under the actions. -->
                 <div class="acts pointer-events-none absolute top-1 right-1 flex rounded-r-lg pl-4 opacity-0 transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100 {active ? 'on' : ''}">
@@ -256,6 +325,20 @@
 </aside>
 
 <style>
+  /*
+   * A row out of view skips style, layout and paint. With hundreds of chats, anything that touched
+   * the whole list (the sidebar's inert switch as it opens and closes, a theme change) restyled
+   * thousands of elements in one frame. Rows are a fixed height, so the list's length is right
+   * before they are first shown; the margin leaves room for the open row's ring and shadow.
+   */
+  .row {
+    content-visibility: auto;
+    contain-intrinsic-block-size: auto 34px;
+    overflow-clip-margin: 6px;
+  }
+  .row.head {
+    contain-intrinsic-block-size: auto 44px;
+  }
   .nav-item {
     display: flex;
     flex: none;

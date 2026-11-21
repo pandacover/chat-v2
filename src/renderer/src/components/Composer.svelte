@@ -53,9 +53,11 @@
   const listenLine = $derived(inChat && listening)
 
   const busy = $derived(app.streaming)
-  const canSend = $derived((text.trim() !== '' || app.draftAttachments.length > 0) && uploading === 0 && app.analyzing.size === 0 && !busy)
+  // A test, not text.trim(): that copied the whole draft on every key, and a paste can be megabytes.
+  const hasText = $derived(/\S/.test(text))
+  const canSend = $derived((hasText || app.draftAttachments.length > 0) && uploading === 0 && app.analyzing.size === 0 && !busy)
   // While a Show-me step waits, a message answers it (the reply goes on); attachments stay in the draft.
-  const answering = $derived(app.teaching && text.trim() !== '')
+  const answering = $derived(app.teaching && hasText)
   const computerOn = $derived(computerEnabled && app.computerSupported)
   const stopping = $derived(busy && !answering)
 
@@ -70,19 +72,6 @@
     textarea.scrollTop = textarea.scrollHeight
   }
 
-  const fit = () => {
-    if (!textarea) return
-    textarea.style.height = 'auto'
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`
-  }
-
-  const oninput = fit
-  // Home's taller box and the docked one: the textarea's fitted height follows.
-  $effect(() => {
-    void tall
-    queueMicrotask(fit)
-  })
-
   // Each chat keeps its own unsent text and attachments ('' is the new chat).
   const key = $derived(app.view?.session.id ?? '')
   let loaded: string | null = null
@@ -94,7 +83,6 @@
       loaded = next
       text = app.draftText(next)
       app.unparkAttachments(next)
-      queueMicrotask(fit)
     })
   })
   $effect(() => {
@@ -105,10 +93,7 @@
   $effect(() => {
     const stored = app.drafts.get(key)
     untrack(() => {
-      if (!stored && loaded === key && text.trim() !== '') {
-        text = ''
-        queueMicrotask(fit)
-      }
+      if (!stored && loaded === key && hasText) text = ''
     })
   })
 
@@ -141,7 +126,6 @@
   const answer = async () => {
     const body = text
     text = ''
-    queueMicrotask(fit)
     if (!(await app.send(body, []))) text = body
   }
 
@@ -152,13 +136,11 @@
     const files = app.draftAttachments
     text = ''
     app.draftAttachments = []
-    queueMicrotask(fit)
     const ok = await app.send(body, files)
     if (!ok) {
       // Put the draft back so nothing is lost.
       text = body
       app.draftAttachments = files
-      queueMicrotask(fit)
     }
   }
 
@@ -179,17 +161,13 @@
 
   // The transcript joins the draft; the voice stage can also clear it (Esc to start over).
   voice.onTranscript = (transcript) => {
-    text = text.trim() ? `${text.trimEnd()} ${transcript}` : transcript
-    queueMicrotask(() => {
-      fit()
-      textarea?.focus()
-    })
+    text = hasText ? `${text.trimEnd()} ${transcript}` : transcript
+    queueMicrotask(() => textarea?.focus())
   }
   voice.onClear = () => {
     text = ''
-    queueMicrotask(fit)
   }
-  voice.hasText = () => text.trim() !== ''
+  voice.hasText = () => hasText
 
   const micDown = async (e: PointerEvent) => {
     if (e.button !== 0) return
@@ -287,14 +265,13 @@
       bind:this={textarea}
       bind:value={text}
       use:listEditing
-      {oninput}
       {onkeydown}
       {onpaste}
       onfocus={() => (focused = true)}
       onblur={() => (focused = false)}
       rows="1"
       placeholder={app.teaching ? 'Tell it what happened, or press Done' : placeholder}
-      class="block max-h-[220px] w-full resize-none bg-transparent px-[18px] pt-[15px] pb-1 text-[15px] leading-normal outline-none placeholder:text-fg-4 {tall ? 'min-h-[78px]' : 'min-h-[52px]'} {listenLine
+      class="fit block max-h-[220px] w-full resize-none bg-transparent px-[18px] pt-[15px] pb-1 text-[15px] leading-normal outline-none placeholder:text-fg-4 {tall ? 'min-h-[78px]' : 'min-h-[52px]'} {listenLine
         ? 'invisible'
         : ''}"
     ></textarea>
@@ -421,6 +398,13 @@
       0 0 0 1px var(--ring-2),
       0 0 0 4px var(--wash),
       var(--shadow-float);
+  }
+  /*
+   * The box grows with its text up to its max-height. Script measured it on every key (height
+   * auto, then read scrollHeight), a forced layout of the window each time.
+   */
+  .fit {
+    field-sizing: content;
   }
   .toggle {
     display: inline-flex;

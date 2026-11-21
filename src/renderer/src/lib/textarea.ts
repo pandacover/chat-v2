@@ -28,7 +28,12 @@ export const applyEdit = (el: HTMLTextAreaElement, edit: TextEdit) => {
   el.setSelectionRange(edit.start, edit.end)
 }
 
-const lineCount = (s: string) => s.split('\n').length
+/** Lines in `s`, counted without splitting it (a pasted draft can be megabytes). */
+const lineCount = (s: string) => {
+  let n = 1
+  for (let i = s.indexOf('\n'); i !== -1; i = s.indexOf('\n', i + 1)) n++
+  return n
+}
 
 /**
  * `use:listEditing` on a textarea: Shift+Enter continues a Markdown list (and ends it on an
@@ -48,12 +53,15 @@ export const listEditing = (el: HTMLTextAreaElement) => {
     applyEdit(el, edit)
   }
 
-  const onbeforeinput = () => (linesBefore = lineCount(el.value))
+  // Only deletions are looked at, so typing doesn't count the lines of the draft on every key.
+  const onbeforeinput = (e: InputEvent) => {
+    linesBefore = e.inputType.startsWith('delete') ? lineCount(el.value) : 0
+  }
 
   const oninput = (e: Event) => {
     // Only deletions that removed whole lines; undo, redo and typing stay as they are.
     const type = e instanceof InputEvent ? e.inputType : ''
-    if (!type.startsWith('delete') || lineCount(el.value) >= linesBefore) return
+    if (!type.startsWith('delete') || linesBefore === 0 || lineCount(el.value) >= linesBefore) return
     // After the deletion finishes, so the fix is its own undo step.
     queueMicrotask(() => {
       const edit = renumberList(el.value, el.selectionStart, el.selectionEnd)

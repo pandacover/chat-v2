@@ -33,17 +33,91 @@
   const model = $derived(isClaudeModel(app.chat.model) ? app.chat.model : (app.settings?.settings.defaultModel ?? ''))
   const hasOverride = $derived(app.chat.systemPrompt != null)
 
-  // Keep the newest line in view unless the user scrolled up to read.
+  /**
+   * Scroll to end glides to the end and keeps chasing it until it gets there: messages far up the
+   * chat take their real height as they come into view (app.css .msg.far), so the end moves while it
+   * glides. A wheel or a press on the thread hands the scroll back.
+   */
+  let chasing = false
+  let seenTop = 0
+  let seenHeight = 0
+  /**
+   * Keep the newest line in view unless the user scrolled up to read. Only a move up lets go of
+   * the end: the browser also scrolls when the thread gets shorter (the view is clamped) and to
+   * keep what's on screen in place while messages above it are laid out, and neither is the user.
+   */
   const onscroll = () => {
-    if (!scroller) return
-    pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80
+    const el = scroller
+    if (!el) return
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    const up = el.scrollTop < seenTop && el.scrollHeight >= seenHeight
+    seenTop = el.scrollTop
+    seenHeight = el.scrollHeight
+    if (chasing && !near) return
+    chasing = false
+    if (near) pinned = true
+    else if (up) pinned = false
   }
 
   const toBottom = (behavior: ScrollBehavior = 'auto') => scroller?.scrollTo({ top: scroller.scrollHeight, behavior })
+  const scrollToEnd = () => {
+    pinned = true
+    chasing = true
+    toBottom('smooth')
+  }
 
+  /*
+   * A chat opens with its last messages, and the earlier ones are added above them while the
+   * window is idle, a chunk at a time. Making every message of a long chat at once held the
+   * window for a quarter of a second at 60 turns, longer the longer the chat. Pinned to the end,
+   * the view stays there as they arrive; scrolled up, what you read stays in place.
+   */
+  const FIRST = 24
+  const CHUNK = 40
+  let mounted = $state<{ id: string; from: number } | null>(null)
+  /** Index of the first message on screen. */
+  const from = $derived.by(() => {
+    if (!view) return 0
+    if (mounted?.id === view.session.id) return mounted.from
+    return Math.max(0, view.path.length - FIRST)
+  })
   $effect(() => {
-    void view?.path.map((n) => n.message.content.length).join()
-    if (pinned) void tick().then(() => toBottom())
+    const id = view?.session.id
+    const start = from
+    if (!id) return
+    if (untrack(() => mounted?.id) !== id) mounted = { id, from: start }
+    if (start === 0) return
+    const idle = requestIdleCallback(
+      async () => {
+        const el = scroller
+        // Scrolled up: the message that was first stays where it was on screen. The browser's own
+        // scroll anchoring does this, but not at the very top, where what you read would be pushed
+        // down by all that was added; whatever it already moved is counted.
+        const first = !pinned ? (thread?.firstElementChild as HTMLElement | null | undefined) : null
+        const was = first?.getBoundingClientRect().top
+        mounted = { id, from: Math.max(0, start - CHUNK) }
+        if (!el || !first || was === undefined) return
+        await tick()
+        if (first.isConnected) el.scrollTop += first.getBoundingClientRect().top - was
+      },
+      { timeout: 400 }
+    )
+    return () => cancelIdleCallback(idle)
+  })
+  const shown = $derived(view ? (from > 0 ? view.path.slice(from) : view.path) : [])
+
+  // The thread grows (a streamed line, an image loading, a message laid out for the first time as
+  // it scrolls into view): follow it while pinned. Watching its size rather than every message's
+  // text also scrolls before the frame paints, not a tick after.
+  let thread: HTMLDivElement | undefined = $state()
+  $effect(() => {
+    const el = thread
+    if (!el) return
+    const observer = new ResizeObserver(() => {
+      if (pinned) toBottom()
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
   })
 
   // The column narrows when the artifact panel opens; stay on the newest line while it does.
@@ -54,12 +128,21 @@
       if (pinned) toBottom()
     })
     observer.observe(el)
-    return () => observer.disconnect()
+    // The user scrolls (a wheel, the scrollbar): Scroll to end stops chasing the end.
+    const takeOver = () => (chasing = false)
+    el.addEventListener('wheel', takeOver, { passive: true })
+    el.addEventListener('pointerdown', takeOver)
+    return () => {
+      observer.disconnect()
+      el.removeEventListener('wheel', takeOver)
+      el.removeEventListener('pointerdown', takeOver)
+    }
   })
 
   $effect(() => {
     void view?.session.id
     pinned = true
+    seenTop = seenHeight = 0
     untrack(() => voice.leaveHome())
     composer?.focus()
   })
@@ -215,9 +298,10 @@
     <div class="relative min-h-0 flex-1">
       <!-- The thread runs on under the composer's glass, and fades out in the strip below it. -->
       <div bind:this={scroller} {onscroll} class="h-full overflow-y-auto thread-fade">
-        <div class="mx-auto flex max-w-[760px] flex-col gap-6 px-8 pt-4" style="padding-bottom: {dockH + 24}px">
-          {#each view.path as node, i (node.message.id)}
-            <MessageItem {node} last={i === view.path.length - 1} />
+        <div bind:this={thread} class="mx-auto flex max-w-[760px] flex-col gap-6 px-8 pt-4" style="padding-bottom: {dockH + 24}px">
+          {#each shown as node, i (node.message.id)}
+            <!-- The last few always render, so a chat opens at its true end. -->
+            <MessageItem {node} last={from + i === view.path.length - 1} far={from + i < view.path.length - 4} />
           {/each}
         </div>
       </div>
@@ -226,7 +310,7 @@
         <!-- Centred by a wrapper so the fly transition's transform doesn't fight the centring. -->
         <!-- Under the composer's layer, so the composer's popovers (the model list) cover it. -->
         <div class="pointer-events-none absolute inset-x-0 z-[2] flex justify-center" style="bottom: {dockH + 12}px" transition:fly={{ y: 6, duration: 160 }}>
-          <button class="btn glass-float pointer-events-auto !shadow-[inset_0_1px_0_var(--glass-edge),0_0_0_1px_var(--glass-ring),var(--shadow-float)]" onclick={() => toBottom('smooth')}>
+          <button class="btn glass-float pointer-events-auto !shadow-[inset_0_1px_0_var(--glass-edge),0_0_0_1px_var(--glass-ring),var(--shadow-float)]" onclick={scrollToEnd}>
             <Icon name="arrowDown" size={14} /> Scroll to end
           </button>
         </div>

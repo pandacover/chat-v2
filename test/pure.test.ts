@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { parseContent } from '../src/shared/artifacts'
+import { parseContent, parseContentCached } from '../src/shared/artifacts'
 import { makeLineBuffer } from '../src/shared/lines'
 import { splitSteps, stepLine, summarizeSteps } from '../src/shared/steps'
 import { normalizeSettings, DEFAULT_SETTINGS } from '../src/main/services/SettingsStore'
@@ -165,6 +165,12 @@ describe('steps', () => {
     expect(segments.map((s) => s.type)).toEqual(['text', 'steps', 'text'])
     expect(segments[1]).toMatchObject({ steps: [{ label: 'Opened example.com' }, { label: 'Clicked “Buy”' }] })
     expect(summarizeSteps(content)).toBe('Let me look.\n[Used the browser: Opened example.com; Clicked “Buy”]\nDone.')
+  })
+
+  test('text without steps is one segment, and blank text none', () => {
+    expect(splitSteps('Line one\n\nLine two')).toEqual([{ type: 'text', content: 'Line one\n\nLine two' }])
+    expect(splitSteps(' \n ')).toEqual([])
+    expect(splitSteps('')).toEqual([])
   })
 })
 

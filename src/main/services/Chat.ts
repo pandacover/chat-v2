@@ -585,9 +585,7 @@ export class Chat extends Context.Service<
       })
 
       const linesSince = Effect.fn('Chat.linesSince')(function* (messageId: string, fromIndex: number) {
-        const message = yield* db.require('Message', (d) => d.getMessage(messageId))
-        const lines = message.lineCount === 0 ? [] : message.content.split('\n').slice(Math.max(0, fromIndex))
-        return { lines, status: message.status }
+        return yield* db.require('Message', (d) => d.linesSince(messageId, fromIndex))
       })
 
       return Chat.of({
