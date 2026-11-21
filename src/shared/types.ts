@@ -3,8 +3,11 @@ import type { ComputerDoing, ComputerMode, ComputerWait } from './computer'
 
 export type Role = 'root' | 'system' | 'user' | 'assistant'
 
-/** Lifecycle of an assistant message. `interrupted` means the app stopped mid-stream. */
-export type MessageStatus = 'complete' | 'streaming' | 'interrupted' | 'stopped' | 'error'
+/**
+ * Lifecycle of an assistant message. `interrupted` means the app stopped mid-stream; `paused`,
+ * that the reply seemed stuck (its `error` says why, in plain words) and waits for Continue.
+ */
+export type MessageStatus = 'complete' | 'streaming' | 'interrupted' | 'stopped' | 'paused' | 'error'
 
 export type AttachmentKind = 'image' | 'pdf' | 'text' | 'audio'
 

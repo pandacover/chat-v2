@@ -8,12 +8,13 @@
 // resumes the session of the reply it answers (see history.ts).
 import { existsSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import type { CanUseTool, Options, SDKAssistantMessageError, SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { CanUseTool, HookCallback, HookJSONOutput, Options, SDKAssistantMessageError, SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { Context, Layer } from 'effect'
 import type { Step } from '@shared/steps'
 import type { Effort, NewAttachmentInput, Usage } from '@shared/types'
 import { errorMessage } from '../errors'
 import type { RunContext, ToolModule, ToolModuleFactory } from './module'
+import type { Pause, Watch, WatchControl } from './watch'
 
 /** `query` from the SDK, or a stand-in in tests. */
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => AsyncIterable<SDKMessage>
@@ -65,6 +66,8 @@ export interface ReplyRequest {
   session: SessionPlan
   modules: readonly ToolModuleFactory[]
   auth: Auth
+  /** Watches the reply for being stuck (watch.ts): it nudges the model, or pauses the reply. */
+  watch?: (control: WatchControl) => Watch
 }
 
 export interface ReplyHooks {
@@ -79,8 +82,8 @@ export interface ReplyResult {
   usage: Usage | null
   /** Claude Code's running total for the session afterwards, in dollars. */
   sessionCost: number | null
-  /** The reply stopped at MAX_TURNS model calls. */
-  maxTurns: boolean
+  /** The reply was paused because it seemed stuck; Continue resumes it. */
+  paused: Pause | null
 }
 
 export interface AskRequest {
@@ -92,8 +95,8 @@ export interface AskRequest {
 
 export class AgentError extends Error {}
 
-/** Model calls one reply may make before it stops and asks whether to go on. */
-export const MAX_TURNS = 40
+/** How long an interrupted (paused) reply gets to end on its own before it is aborted. */
+const INTERRUPT_GRACE_MS = 5000
 
 const once = async function* (content: PromptBlock[]): AsyncGenerator<SDKUserMessage> {
   yield { type: 'user', message: { role: 'user', content: content as SDKUserMessage['message']['content'] }, parent_tool_use_id: null }
@@ -188,6 +191,31 @@ const usageOf = (r: SDKResultMessage, cost: number | null): Usage => {
   }
 }
 
+/**
+ * Tool results reach the watch as soon as Claude Code has them, before the model sees them: a
+ * nudge rides along with the result (additionalContext), and a pause stops the reply right there
+ * (continue: false). A subagent's calls are its own.
+ */
+const watchHooks = (watch: Watch): Options['hooks'] => {
+  const answer = (a: ReturnType<Watch['hook']>, event: 'PostToolUse' | 'PostToolUseFailure'): HookJSONOutput =>
+    a.stop
+      ? { continue: false, stopReason: a.stop.reason }
+      : a.context
+        ? { hookSpecificOutput: { hookEventName: event, additionalContext: a.context } }
+        : {}
+  const after: HookCallback = async (input) => {
+    if (input.hook_event_name !== 'PostToolUse' || input.agent_id) return {}
+    const r = input.tool_response as { isError?: unknown } | null
+    const failed = !!r && typeof r === 'object' && r.isError === true
+    return answer(watch.hook(input.tool_use_id, input.tool_name, input.tool_input, input.tool_response, failed), 'PostToolUse')
+  }
+  const failure: HookCallback = async (input) => {
+    if (input.hook_event_name !== 'PostToolUseFailure' || input.agent_id || input.is_interrupt) return {}
+    return answer(watch.hook(input.tool_use_id, input.tool_name, input.tool_input, input.error, true), 'PostToolUseFailure')
+  }
+  return { PostToolUse: [{ hooks: [after] }], PostToolUseFailure: [{ hooks: [failure] }] }
+}
+
 /** Asks each tool set whether a call may run; calls no set owns are refused. */
 const permit =
   (modules: readonly ToolModule[]): CanUseTool =>
@@ -263,6 +291,29 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
       attach: (file) => hooks.attach(file)
     }
     const modules: ToolModule[] = []
+    // A pause away from a hook: the query is interrupted (aborted if that fails or takes too
+    // long), and the reply ends paused with everything it did kept.
+    let pausing: Pause | null = null
+    let running: { interrupt?: () => Promise<unknown> } | null = null
+    let grace: ReturnType<typeof setTimeout> | null = null
+    const control: WatchControl = {
+      stop: (p) => {
+        if (pausing || abort.signal.aborted) return
+        pausing = p
+        const interrupt = running?.interrupt
+        if (typeof interrupt !== 'function') return abort.abort()
+        grace = setTimeout(() => abort.abort(), INTERRUPT_GRACE_MS)
+        interrupt.call(running).catch(() => abort.abort())
+      }
+    }
+    const watch = req.watch?.(control) ?? null
+    /** The reply's pause, if the watch paused it (and the user didn't stop it meanwhile). */
+    const pausedResult = (result: SDKResultMessage | null): ReplyResult | null => {
+      const p = watch?.paused ?? pausing
+      if (!p || signal.aborted) return null
+      const sessionCost = result?.total_cost_usd ?? null
+      return { usage: result ? usageOf(result, Math.max(0, result.total_cost_usd - req.session.baseCost)) : null, sessionCost, paused: p }
+    }
     try {
       for (const make of req.modules) modules.push(make(ctx))
       const system = [req.instructions, ...modules.map((m) => m.instructions), req.profile]
@@ -282,7 +333,8 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
         mcpServers: Object.fromEntries(modules.map((m) => [m.name, m.server])),
         canUseTool: permit(modules),
         includePartialMessages: true,
-        maxTurns: MAX_TURNS,
+        // No cap on model calls: the watch pauses a reply that is stuck instead.
+        ...(watch ? { hooks: watchHooks(watch) } : {}),
         abortController: abort,
         ...(resume
           ? { resume: resume.session, resumeSessionAt: resume.at, ...(resume.fork ? { forkSession: true, sessionId: req.session.id } : {}) }
@@ -293,19 +345,29 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
       // Built-in tool calls waiting for their result, with the step line each gets then.
       const builtinCalls = new Map<string, Step>()
       try {
-        for await (const m of deps.query({ prompt: once(req.prompt), options })) {
+        const stream = deps.query({ prompt: once(req.prompt), options })
+        running = stream as { interrupt?: () => Promise<unknown> }
+        for await (const m of stream) {
           if (abort.signal.aborted) break
           // A subagent's messages; the reply is the main thread's.
           if ('parent_tool_use_id' in m && m.parent_tool_use_id) continue
           if (m.type === 'stream_event') {
             const e = m.event
+            // Once paused, what still streams in before the query ends isn't kept.
+            if (pausing || watch?.paused) continue
             if (e.type === 'content_block_start' && e.content_block.type === 'text' && wroteText) text(endsWithNewline ? '\n' : '\n\n')
-            else if (e.type === 'content_block_delta' && e.delta.type === 'text_delta') text(e.delta.text)
+            else if (e.type === 'content_block_delta' && e.delta.type === 'text_delta') {
+              text(e.delta.text)
+              watch?.text(e.delta.text)
+            }
           } else if (m.type === 'assistant') {
             hooks.checkpoint(m.uuid)
+            // One model call can come as several assistant messages, all with its message id.
+            watch?.step((m.message as { id?: string }).id ?? m.uuid)
             if (m.error) failure = { kind: m.error, text: textOf(m.message.content) }
             for (const b of m.message.content) {
               if (b.type !== 'tool_use') continue
+              watch?.call(b.id, b.name, b.input)
               const owner = modules.find((x) => x.builtins?.includes(b.name))
               const step = owner?.stepFor?.(b.name, (b.input ?? {}) as Record<string, unknown>)
               if (step) builtinCalls.set(b.id, step)
@@ -316,6 +378,7 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
             if (uuid) hooks.checkpoint(uuid)
             const content = m.message.content
             for (const b of Array.isArray(content) ? content : []) {
+              if (b.type === 'tool_result') watch?.result(b.tool_use_id, b.content, b.is_error ?? false)
               const step = b.type === 'tool_result' ? builtinCalls.get(b.tool_use_id) : undefined
               if (!step || b.type !== 'tool_result') continue
               builtinCalls.delete(b.tool_use_id)
@@ -324,20 +387,26 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
           } else if (m.type === 'result') result = m
         }
       } catch (e) {
+        // Paused: however the query ended, the work so far is kept and Continue resumes it.
+        const p = pausedResult(result)
+        if (p) return p
         if (abort.signal.aborted) throw abortError()
         throw new AgentError(explain(failure, errorMessage(e), req.auth, req.model))
       }
+      const p = pausedResult(result)
+      if (p) return p
       if (abort.signal.aborted) throw abortError()
       if (!result) throw new AgentError(failure ? explain(failure, '', req.auth, req.model) : 'Claude Code ended before the reply did.')
       const sessionCost = result.total_cost_usd
       const usage = usageOf(result, Math.max(0, sessionCost - req.session.baseCost))
-      if (result.subtype === 'error_max_turns') return { usage, sessionCost, maxTurns: true }
       if (result.subtype !== 'success' || result.is_error) {
         throw new AgentError(explain(failure, result.subtype === 'success' ? result.result : result.errors.join(' '), req.auth, req.model))
       }
-      return { usage, sessionCost, maxTurns: false }
+      return { usage, sessionCost, paused: null }
     } finally {
       signal.removeEventListener('abort', stop)
+      if (grace) clearTimeout(grace)
+      watch?.end()
       // The tool sets' signal: the reply has ended, however it ended.
       abort.abort()
       await Promise.allSettled(modules.map((m) => m.end?.()))
