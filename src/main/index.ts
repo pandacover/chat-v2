@@ -25,6 +25,7 @@ import { type Bitmap, type Pointer, makePointer } from './computer/point'
 import { isSensitive } from './memory'
 import { Db } from './services/Db'
 import { Usage } from './usage/Usage'
+import { Jobs } from './services/Jobs'
 import { ElevenLabs } from './services/ElevenLabs'
 import { type SecretCipher, SettingsStore } from './services/SettingsStore'
 
@@ -195,7 +196,7 @@ const computerLayer = Layer.unwrap(
     const remember = async (fact: string, ctx: RunContext) => {
       if (!(await Effect.runPromise(settings.get)).memoryModel) throw new Error('Memory is off in Settings, so nothing was saved.')
       if (isSensitive(fact)) throw new Error("That looks like a password, key or account number, which memory doesn't keep.")
-      const saved = await Effect.runPromise(db.use((d) => d.changeMemory({ add: [fact], update: [], remove: [] }, { kind: 'learned', writer: 'bot', sessionId: ctx.sessionId })))
+      const saved = await Effect.runPromise(db.use((d) => d.changeMemory({ add: [fact], update: [], remove: [] }, { kind: 'learned', writer: 'bot', sessionId: ctx.sessionId, jobId: ctx.jobId ?? null })))
       if (saved) broadcaster.send({ type: 'memory', sessionId: ctx.sessionId, added: saved.added, removed: saved.removed })
     }
     // CHAT_V2_FAKE_COMPUTER (tests only): a module whose `platform` stands in for the real one,
@@ -255,7 +256,13 @@ const makeRuntime = () => {
     Layer.provide(Layer.mergeAll(providers, computer, usage)),
     Layer.provide(Layer.succeed(Broadcaster, broadcaster))
   )
-  return ManagedRuntime.make(Layer.mergeAll(chat, providers, computer, usage))
+  // The primary bot's conversation and its jobs, over Chat.
+  const jobs = Jobs.layer.pipe(
+    Layer.provideMerge(chat),
+    Layer.provide(Layer.merge(providers, computer)),
+    Layer.provide(Layer.succeed(Broadcaster, broadcaster))
+  )
+  return ManagedRuntime.make(Layer.mergeAll(jobs, providers, computer, usage))
 }
 
 let runtime: ManagedRuntime.ManagedRuntime<MainServices | AppPaths, unknown> | null = null

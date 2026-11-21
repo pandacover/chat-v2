@@ -9,10 +9,11 @@
   import { app } from '@/lib/store.svelte'
   import { theme, type ThemePref } from '@/lib/theme.svelte'
   import Icon, { type IconName } from './Icon.svelte'
-  import logo from '@/assets/logo.png'
   import ModelPicker from './ModelPicker.svelte'
   import UsageSettings from './UsageSettings.svelte'
   import { meter } from '@/lib/meter.svelte'
+  import BotAvatar from './BotAvatar.svelte'
+  import { mascotUrl } from './Mascot.svelte'
 
   let form = $state<Settings>({ ...app.settings!.settings })
   let keys = $state({ anthropicKey: '', elevenLabsKey: '' })
@@ -60,11 +61,44 @@
     savedTimer = setTimeout(() => (status = 'idle'), 1600)
   }
 
+  // The primary bot's model, thinking and instructions: what Tomo answers with. They started as
+  // Settings' own, and are the bot's now (each job can still pick its own model or instructions).
+  const primary = app.primaryBot
+  let bot = $state({
+    model: primary?.model ?? form.defaultModel,
+    effort: primary?.effort ?? form.effort,
+    instructions: primary?.instructions ?? form.systemPrompt
+  })
+  let botTimer: ReturnType<typeof setTimeout> | undefined
+  let firstBot = true
+  $effect(() => {
+    const snapshot = $state.snapshot(bot)
+    if (firstBot) {
+      firstBot = false
+      return
+    }
+    clearTimeout(botTimer)
+    botTimer = setTimeout(() => void persistBot(snapshot), 450)
+  })
+  const persistBot = async (patch: typeof bot) => {
+    botTimer = undefined
+    if (!primary) return
+    status = 'saving'
+    if (!(await app.updateBot(primary.id, patch))) return void (status = 'idle')
+    status = 'saved'
+    clearTimeout(savedTimer)
+    savedTimer = setTimeout(() => (status = 'idle'), 1600)
+  }
+
   onDestroy(() => {
     // Leaving mid-debounce still saves.
     if (timer) {
       clearTimeout(timer)
       void persist($state.snapshot(form))
+    }
+    if (botTimer) {
+      clearTimeout(botTimer)
+      void persistBot($state.snapshot(bot))
     }
   })
 
@@ -123,10 +157,16 @@
     if (await app.editMemory(() => window.api.memory.purge(id))) app.toast('Deleted it and its history', 'info')
   }
 
-  /** Opens the chat a version came from, over Settings. */
+  /**
+   * Opens where a version came from, over Settings: a source is a job's thread (what was said there,
+   * or to Tomo about that job), or Tomo's own conversation.
+   */
   const openSource = (sessionId: string) => {
     close()
-    void app.open(sessionId)
+    const job = app.jobByThread.get(sessionId)
+    if (job) void app.openJob(job)
+    else if (sessionId === app.primaryId) void app.openPrimary()
+    else void app.open(sessionId)
   }
 
   // [[Links]] read as the names they are.
@@ -352,18 +392,27 @@
       {#if tab === 'model'}
         <section id="settings-model">
           <h3 class="mt-1.5 mb-1 font-display text-[22px] leading-[1.2] font-normal tracking-[-0.02em]">Model</h3>
-          <p class="mb-5 text-fg-3">The default for new chats. Each chat can pick its own in the composer.</p>
-          <div class="group-card">
+          <p class="mb-5 text-fg-3">How {primary?.name ?? 'Tomo'} answers. Each job can pick its own model in the composer.</p>
+          <div class="group-card" data-primary-bot>
+            <div class="srow !justify-start !gap-3.5">
+              <BotAvatar bot={primary} size={44} />
+              <div class="l">
+                <b>{primary?.name ?? 'Tomo'}</b>
+                <span>Your primary bot. It hears everything you say without picking a job (typed, or with <span class="whitespace-nowrap">{shortcut('M')}</span>), and opens a job for each topic.</span>
+              </div>
+            </div>
             <div class="srow">
-              <div class="l"><b>Default model</b><span>New chats start with this model</span></div>
-              <div class="w-[200px] shrink-0"><ModelPicker block value={form.defaultModel} onchange={(id) => (form.defaultModel = id)} /></div>
+              <div class="l"><b>Model</b><span>Replies run on this unless a job picks its own</span></div>
+              <div class="w-[200px] shrink-0"><ModelPicker block value={bot.model} onchange={(id) => (bot.model = id)} /></div>
             </div>
             <div class="srow !flex-col !items-stretch !gap-2.5">
-              <div class="l"><b>Thinking</b><span>{efforts.find((e) => e.id === form.effort)?.hint} Models that don't think ignore this.</span></div>
-              <div>{@render segmented(efforts, form.effort, (v) => (form.effort = v as Settings['effort']))}</div>
+              <div class="l"><b>Thinking</b><span>{efforts.find((e) => e.id === bot.effort)?.hint} Models that don't think ignore this.</span></div>
+              <div>{@render segmented(efforts, bot.effort, (v) => (bot.effort = v as Settings['effort']))}</div>
             </div>
+          </div>
+          <div class="group-card">
             <div class="srow">
-              <div class="l"><b>Title model</b><span>Names each new chat from its first message. Haiku is enough, and a title costs a fraction of a cent.</span></div>
+              <div class="l"><b>Small model</b><span>Names jobs, picks the job each message belongs to, and keeps each job's one-line summary. Haiku is enough, at a fraction of a cent a call. With none, a message stays in the current job.</span></div>
               <div class="w-[200px] shrink-0"><ModelPicker block value={form.titleModel} onchange={(id) => (form.titleModel = id)} noneLabel="None: use the first message" /></div>
             </div>
             <div class="srow">
@@ -380,9 +429,9 @@
                     Open config.json <Icon name="external" size={11} />
                   </button>
                 </div>
-                <span>Sent with every chat. A chat can replace them with its own from the button at its top right.</span>
+                <span>{primary?.name ?? 'Tomo'}'s instructions, sent with every reply. A job can replace them with its own from the button at its top right.</span>
                 <textarea
-                  bind:value={form.systemPrompt}
+                  bind:value={bot.instructions}
                   rows="5"
                   aria-label="System instructions"
                   class="mt-2.5 block min-h-[84px] w-full resize-y rounded-[10px] bg-transparent px-3 py-2.5 text-[13.5px] shadow-[inset_0_0_0_1px_var(--line)] outline-none focus:shadow-[inset_0_0_0_1px_var(--line-2)]"
@@ -498,7 +547,7 @@
                               <span class="font-label text-[11px] text-fg-4">{when(v.createdAt)}</span>
                               <span>
                                 {WRITERS[v.writer]}{#if v.sourceSessionId}{' '}{v.writer === 'user' ? 'from' : 'in'}
-                                  {#if v.sourceTitle}<button class="text-fg-2 underline decoration-fg-4 underline-offset-2 hover:text-fg" use:tip={'Open this chat'} onclick={() => openSource(v.sourceSessionId!)}>{v.sourceTitle}</button>{:else}a chat that has since been deleted{/if}{/if}{#if v.sourceJobId}{' '}on a job{/if}
+                                  {#if v.sourceTitle}<button class="text-fg-2 underline decoration-fg-4 underline-offset-2 hover:text-fg" use:tip={'Open this job'} onclick={() => openSource(v.sourceSessionId!)}>{v.sourceTitle}</button>{:else}a job that has since been deleted{/if}{:else if v.sourceJobId}{' '}on a job that has since been deleted{/if}
                               </span>
                               {#if v.removedRev === null}<span class="mono-label ml-auto">Current</span>{/if}
                             </div>
@@ -620,7 +669,7 @@
         <section id="settings-about">
           <h3 class="mt-1.5 mb-1 font-display text-[22px] leading-[1.2] font-normal tracking-[-0.02em]">About</h3>
           <div class="mt-4 mb-5 flex items-center gap-4">
-            <img src={logo} alt="" width="56" height="56" class="size-14 shrink-0 select-none" draggable="false" />
+            <img src={mascotUrl} alt="" width="56" height="56" class="size-14 shrink-0 select-none" draggable="false" />
             <p class="text-fg-3">Tomo {u?.current ?? ''}</p>
           </div>
           <div class="group-card">

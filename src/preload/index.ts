@@ -21,6 +21,19 @@ const api: Api = {
     update: (id, patch) => call('sessions:update', id, patch),
     fork: (sessionId, messageId) => call('sessions:fork', sessionId, messageId)
   },
+  bots: {
+    list: () => call('bots:list'),
+    update: (id, patch) => call('bots:update', id, patch)
+  },
+  jobs: {
+    list: () => call('jobs:list'),
+    primary: () => call('jobs:primary'),
+    send: (input) => call('jobs:send', input),
+    move: (input) => call('jobs:move', input),
+    setStatus: (id, status) => call('jobs:setStatus', id, status),
+    rename: (id, title) => call('jobs:rename', id, title),
+    remove: (id) => call('jobs:remove', id)
+  },
   memory: {
     get: () => call('memory:get'),
     add: (fact) => call('memory:add', fact),

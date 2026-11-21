@@ -4,7 +4,12 @@ import type { ComputerDoing, ComputerMode, ComputerWait } from '@shared/computer
 import type { UpdateState } from '@shared/types'
 import type {
   Attachment,
+  Bot,
+  BotPatch,
   BrowserEvent,
+  Job,
+  JobStatus,
+  JobTarget,
   MemoryView,
   Message,
   Session,
@@ -58,7 +63,33 @@ const describe = (e: unknown) => (e instanceof Error ? e.message : String(e)).re
 
 class AppState {
   sessions = $state<Session[]>([])
+  /** The open conversation: the primary bot's (kind 'primary'), or a job's thread. */
   view = $state<SessionView | null>(null)
+
+  // Bots and jobs. The user talks to the primary bot; each message goes to a job's thread.
+  bots = $state<Bot[]>([])
+  jobs = $state<Job[]>([])
+  primaryBot = $derived(this.bots.find((b) => b.isPrimary) ?? null)
+  /** The id of the primary bot's conversation, once loaded. */
+  primaryId = $state<string | null>(null)
+  /** The primary bot's conversation is open (rather than a job's thread). */
+  isPrimary = $derived(this.view?.session.kind === 'primary')
+  /** Each job by its thread, for labelling turns and finding a thread's job. */
+  jobByThread = $derived(new Map(this.jobs.flatMap((j) => (j.threadId ? [[j.threadId, j] as const] : []))))
+  /** Where the next message to the primary goes; the job chip sets it, and it is 'auto' again after a send. */
+  target = $state<JobTarget>('auto')
+  /** A message sent to the primary that is still being routed, shown until its turn lands. */
+  pending = $state<{ text: string; attachments: Attachment[] } | null>(null)
+  /** The job the open conversation is on: the thread's, or in the primary's the one picked or last used. */
+  currentJob = $derived.by<Job | null>(() => {
+    const view = this.view
+    if (!view) return null
+    if (!this.isPrimary) return this.jobByThread.get(view.session.id) ?? null
+    const t = this.target
+    if (typeof t === 'object') return this.jobs.find((j) => j.id === t.jobId) ?? null
+    const last = view.path.at(-1)?.message
+    return last ? (this.jobByThread.get(last.sessionId) ?? null) : null
+  })
   settings = $state<SettingsView | null>(null)
   artifact = $state<OpenArtifact | null>(null)
   /** Settings is a modal over the chat; the chat stays mounted so drafts and scroll survive. */
@@ -118,7 +149,11 @@ class AppState {
   /** The mode each running computer reply works in, by message id: doing it, or showing how. */
   computerModes = new SvelteMap<string, ComputerMode>()
   /** A Show-me step of the open chat waits: a message sent now answers it. */
-  teaching = $derived(this.computerWait?.kind === 'teach' && this.computerWait.sessionId === this.view?.session.id)
+  teaching = $derived(
+    this.computerWait?.kind === 'teach' &&
+      (this.computerWait.sessionId === this.view?.session.id ||
+        (this.isPrimary && this.view!.path.some((n) => n.message.sessionId === this.computerWait!.sessionId)))
+  )
   /** Point is under way: the user is marking part of the screen for their next message. */
   pointing = $state(false)
   /** Bumped each time a finished Point adds its attachments, so the composer can take focus. */
@@ -160,7 +195,8 @@ class AppState {
 
   /** The open chat's settings, or what has been picked for the new chat. */
   chat = $derived({
-    model: this.view ? this.view.session.model : (this.fresh.model ?? null),
+    // The primary's conversation runs on its bot's model.
+    model: this.view ? (this.isPrimary ? (this.primaryBot?.model ?? null) : this.view.session.model) : (this.fresh.model ?? null),
     systemPrompt: this.view ? this.view.session.systemPrompt : (this.fresh.systemPrompt ?? null),
     browserEnabled: this.view ? this.view.session.browserEnabled : (this.fresh.browserEnabled ?? false),
     computerEnabled: this.view ? this.view.session.computerEnabled : (this.fresh.computerEnabled ?? false)
@@ -341,12 +377,85 @@ class AppState {
     void api.computer.waiting().then((w) => (this.computerWait = w))
     void api.updates.get().then((s) => (this.update = s))
     addEventListener('beforeunload', () => this.saveDrafts())
-    await Promise.all([this.refreshSessions(), this.loadSettings()])
+    const [, , , primary] = await Promise.all([this.refreshSessions(), this.loadSettings(), this.loadBots(), this.attempt(() => api.jobs.primary())])
+    // The new chat's unsent draft (from before bots) is now said to the primary.
+    const loose = this.drafts.get('')
+    if (loose && primary && !this.drafts.has(primary.session.id)) this.drafts.set(primary.session.id, loose)
     // Drafts of chats that are gone (deleted elsewhere, or empty ones cleared at startup).
-    for (const key of [...this.drafts.keys()]) if (key && !this.sessions.some((s) => s.id === key)) this.setDraft(key, '')
-    // An unsent new chat is where the user left off; otherwise reopen the latest chat.
-    const first = this.sessions[0]
-    if (first && !this.drafts.has('')) await this.open(first.id)
+    for (const key of [...this.drafts.keys()])
+      if (key !== primary?.session.id && !this.sessions.some((s) => s.id === key)) this.setDraft(key, '')
+    // Tomo opens on the primary bot's conversation: everything said there goes to the right job.
+    if (primary) this.setView(primary)
+  }
+
+  async loadBots() {
+    const bots = await this.attempt(() => api.bots.list())
+    if (bots) this.bots = bots
+  }
+
+  async updateBot(id: string, patch: BotPatch) {
+    const bots = await this.attempt(() => api.bots.update(id, patch))
+    if (bots) this.bots = bots
+    return bots !== undefined
+  }
+
+  private jobsTimer: ReturnType<typeof setTimeout> | undefined
+  async refreshJobs() {
+    clearTimeout(this.jobsTimer)
+    const jobs = await this.attempt(() => api.jobs.list())
+    if (jobs) this.jobs = jobs
+  }
+
+  /** Opens the primary bot's conversation; `target` picks where its next message goes. */
+  async openPrimary(target: JobTarget = 'auto') {
+    this.target = target
+    if (this.isPrimary) return void (await this.reloadPrimary())
+    const view = await this.attempt(() => api.jobs.primary())
+    if (view) this.setView(view)
+  }
+
+  private async reloadPrimary() {
+    const view = await this.attempt(() => api.jobs.primary())
+    if (view && this.isPrimary) this.setView(view)
+  }
+
+  /** Opens a job's thread. */
+  async openJob(job: Job) {
+    if (job.threadId) await this.open(job.threadId)
+  }
+
+  /** Puts the primary's last turn in another job (or a new one): a wrong guess put right. */
+  async moveLast(target: 'new' | { jobId: string }) {
+    const last = this.isPrimary ? this.view?.path.findLast((n) => n.message.role === 'user')?.message : undefined
+    if (!last) return
+    const view = await this.attempt(() => api.jobs.move({ messageId: last.id, target: $state.snapshot(target) as typeof target }))
+    if (!view) return
+    const reply = view.path.at(-1)?.message
+    if (reply?.status === 'streaming') this.liveIds.add(reply.id)
+    this.setView(view)
+    await this.refreshSessions()
+  }
+
+  async setJobStatus(id: string, status: JobStatus) {
+    await this.attempt(() => api.jobs.setStatus(id, status))
+    await this.refreshJobs()
+  }
+
+  async renameJob(id: string, title: string) {
+    await this.attempt(() => api.jobs.rename(id, title))
+    const job = this.jobs.find((j) => j.id === id)
+    if (job?.threadId && this.view?.session.id === job.threadId) this.view.session.title = title
+    await this.refreshSessions()
+  }
+
+  async removeJob(id: string) {
+    const job = this.jobs.find((j) => j.id === id)
+    if (job?.threadId) this.discardDraft(job.threadId)
+    const open = !!job?.threadId && this.view?.session.id === job.threadId
+    await this.attempt(() => api.jobs.remove(id))
+    await this.refreshSessions()
+    if (open) await this.openPrimary()
+    else if (this.isPrimary) await this.reloadPrimary()
   }
 
   toast(text: string, kind: Toast['kind'] = 'error') {
@@ -370,7 +479,7 @@ class AppState {
   }
 
   async refreshSessions() {
-    const list = await this.attempt(() => api.sessions.list())
+    const [list] = await Promise.all([this.attempt(() => api.sessions.list()), this.refreshJobs()])
     if (list) this.sessions = list
   }
 
@@ -387,6 +496,7 @@ class AppState {
 
   /** Installs a fresh view and catches up any replies that are still streaming. */
   setView(view: SessionView) {
+    if (view.session.kind === 'primary') this.primaryId = view.session.id
     if (this.view?.session.id !== view.session.id) this.artifact = null
     this.view = view
     for (const node of view.path) {
@@ -399,14 +509,9 @@ class AppState {
     if (view) this.setView(view)
   }
 
-  /**
-   * Opens the new chat. It is saved when its first message is sent; until then the sidebar
-   * lists it only while its composer holds a draft.
-   */
+  /** A new topic: the primary's conversation, with its next message going to a new job. */
   newSession() {
-    if (!this.view) return
-    this.view = null
-    this.artifact = null
+    void this.openPrimary('new')
   }
 
   async rename(id: string, title: string) {
@@ -420,15 +525,14 @@ class AppState {
     await this.refreshSessions()
   }
 
+  /** Deletes a thread's job (and so the thread). */
   async remove(id: string) {
+    const job = this.jobByThread.get(id)
+    if (job) return this.removeJob(job.id)
     this.discardDraft(id)
     await this.attempt(() => api.sessions.remove(id))
     await this.refreshSessions()
-    if (this.view?.session.id === id) {
-      this.view = null
-      const next = this.sessions[0]
-      if (next) await this.open(next.id)
-    }
+    if (this.view?.session.id === id) await this.openPrimary()
   }
 
   async updateSession(patch: SessionPatch) {
@@ -438,19 +542,55 @@ class AppState {
       this.fresh = { ...this.fresh, ...patch }
       return
     }
+    // In the primary's conversation the model is its bot's; its toggles are its own, and go with each message to its job.
+    const { model, ...rest } = patch
+    if (this.isPrimary && model !== undefined && this.primaryBot) {
+      await this.updateBot(this.primaryBot.id, { model })
+      if (Object.keys(rest).length === 0) return
+      patch = rest
+    }
     await this.attempt(() => api.sessions.update(view.session.id, patch))
-    await this.open(view.session.id)
+    if (this.isPrimary) await this.reloadPrimary()
+    else await this.open(view.session.id)
+  }
+
+  /** The thread a message is in: in the primary's conversation, each turn is in its job's. */
+  private sessionOf(messageId: string) {
+    return this.find(messageId)?.sessionId ?? this.view?.session.id ?? ''
   }
 
   private async afterTurn(view: SessionView | undefined) {
     if (!view) return
     const last = view.path.at(-1)?.message
     if (last?.status === 'streaming') this.liveIds.add(last.id)
-    this.setView(view)
+    // An action on a turn of the primary's conversation answers with its thread; the conversation stays open.
+    if (this.isPrimary && view.session.kind !== 'primary') {
+      for (const n of view.path) if (n.message.status === 'streaming') this.liveIds.add(n.message.id)
+      await this.reloadPrimary()
+    } else this.setView(view)
     await this.refreshSessions()
   }
 
+  /** A message to the primary bot: routed to a job (or the one the chip picked). */
+  private async sendToPrimary(text: string, attachments: Attachment[]) {
+    const target = $state.snapshot(this.target) as JobTarget
+    this.pending = { text, attachments }
+    try {
+      const view = await this.attempt(() => api.jobs.send({ text, attachmentIds: attachments.map((a) => a.id), target }))
+      if (!view) return false
+      this.target = 'auto'
+      const reply = view.path.at(-1)?.message
+      if (reply?.status === 'streaming') this.liveIds.add(reply.id)
+      if (this.isPrimary) this.setView(view)
+      await this.refreshSessions()
+      return true
+    } finally {
+      this.pending = null
+    }
+  }
+
   async send(text: string, attachments: Attachment[]) {
+    if (this.isPrimary) return this.sendToPrimary(text, attachments)
     let view = this.view
     // The new chat gets its row now, with whatever was picked for it.
     const created = !view
@@ -478,23 +618,23 @@ class AppState {
   async edit(messageId: string, text: string, attachmentIds: string[]) {
     const view = this.view
     if (!view) return
-    await this.afterTurn(await this.attempt(() => api.chat.edit({ sessionId: view.session.id, messageId, text, attachmentIds })))
+    await this.afterTurn(await this.attempt(() => api.chat.edit({ sessionId: this.sessionOf(messageId), messageId, text, attachmentIds })))
   }
 
   async regenerate(assistantId: string) {
     const view = this.view
     if (!view) return
-    await this.afterTurn(await this.attempt(() => api.chat.regenerate({ sessionId: view.session.id, assistantId })))
+    await this.afterTurn(await this.attempt(() => api.chat.regenerate({ sessionId: this.sessionOf(assistantId), assistantId })))
   }
 
   async continueReply(assistantId: string) {
     const view = this.view
     if (!view) return
-    await this.afterTurn(await this.attempt(() => api.chat.continue({ sessionId: view.session.id, assistantId })))
+    await this.afterTurn(await this.attempt(() => api.chat.continue({ sessionId: this.sessionOf(assistantId), assistantId })))
   }
 
   async stop() {
-    const id = this.view?.path.find((n) => n.message.status === 'streaming')?.message.id
+    const id = this.view?.path.findLast((n) => n.message.status === 'streaming')?.message.id
     if (id) await this.attempt(() => api.chat.stop(id))
   }
 
@@ -510,24 +650,24 @@ class AppState {
   async setComputerMode(messageId: string, mode: ComputerMode) {
     const view = this.view
     if (!view) return
-    await this.attempt(() => api.computer.setMode(view.session.id, messageId, mode))
+    await this.attempt(() => api.computer.setMode(this.sessionOf(messageId), messageId, mode))
   }
 
   async switchBranch(messageId: string) {
     const view = this.view
     if (!view) return
-    const next = await this.attempt(() => api.chat.switchBranch({ sessionId: view.session.id, messageId }))
+    const next = await this.attempt(() => api.chat.switchBranch({ sessionId: this.sessionOf(messageId), messageId }))
     if (next) this.setView(next)
   }
 
   async fork(messageId: string) {
     const view = this.view
     if (!view) return
-    const next = await this.attempt(() => api.sessions.fork(view.session.id, messageId))
+    const next = await this.attempt(() => api.sessions.fork(this.sessionOf(messageId), messageId))
     if (!next) return
     this.setView(next)
     await this.refreshSessions()
-    this.toast('Forked into a new session', 'info')
+    this.toast('Forked into a new job', 'info')
   }
 
   private find(messageId: string): Message | undefined {
@@ -591,6 +731,12 @@ class AppState {
   }
 
   private onEvent(e: StreamEvent) {
+    if (e.type === 'jobs') {
+      // Summaries and usage land in bursts after each reply: one reload for them all.
+      clearTimeout(this.jobsTimer)
+      this.jobsTimer = setTimeout(() => void this.refreshJobs(), 120)
+      return
+    }
     if (e.type === 'memory') {
       if (this.memory) void this.loadMemory()
       const quote = (fact: string) => `“${fact.replace(/\.$/, '')}”`
@@ -630,6 +776,8 @@ class AppState {
     if (e.type === 'title') {
       const session = this.sessions.find((s) => s.id === e.sessionId)
       if (session) session.title = e.title
+      const job = this.jobByThread.get(e.sessionId)
+      if (job) job.title = e.title
       if (this.view?.session.id === e.sessionId) this.view.session.title = e.title
       return
     }

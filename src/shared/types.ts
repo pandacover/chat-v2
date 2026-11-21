@@ -80,6 +80,8 @@ export interface Message {
   createdAt: number
   attachments: Attachment[]
   usage: Usage | null
+  /** The bot that wrote an assistant reply; null for the user's turns. */
+  authorBotId: string | null
 }
 
 export interface Session {
@@ -103,7 +105,73 @@ export interface Session {
   pinnedAt: number | null
   createdAt: number
   updatedAt: number
+  /** The bot whose conversation this is. */
+  botId: string | null
+  /** The job a thread belongs to; null for a bot's own conversation. */
+  jobId: string | null
+  /**
+   * primary: the primary bot's conversation, which never branches, forks or ends (its turns live
+   * in job threads). shared: a job's thread, which the user and its bot both write in. worker: a
+   * worker bot's thread (later phases).
+   */
+  kind: SessionKind
 }
+
+export type SessionKind = 'primary' | 'shared' | 'worker'
+
+/** A persistent agent. The primary bot (Tomo) hears all untargeted input; primary is a setting, not a kind of bot. */
+export interface Bot {
+  id: string
+  name: string
+  /** 'mascot' is Tomo's fox; null shows the name's initial. */
+  avatar: string | null
+  instructions: string | null
+  model: string | null
+  effort: Effort | null
+  /** Tool modules it may use ('browser', 'computer'). */
+  modules: string[]
+  /** Permission rules (later phases). */
+  rules: Record<string, unknown>
+  playbook: string | null
+  isPrimary: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export interface BotPatch {
+  name?: string
+  instructions?: string | null
+  model?: string | null
+  effort?: Effort | null
+}
+
+export type JobStatus = 'open' | 'done'
+
+/** What a job's replies used, summed. */
+export interface JobUsage {
+  cost: number
+  tokens: number
+  replies: number
+}
+
+/** One piece of work: what the user switches between (jobs replace chats). */
+export interface Job {
+  id: string
+  title: string
+  status: JobStatus
+  ownerBotId: string | null
+  parentJobId: string | null
+  /** One line on where the job stands, kept fresh after replies. */
+  summary: string | null
+  usage: JobUsage | null
+  createdAt: number
+  updatedAt: number
+  /** The job's thread (its first), which opens when the job does. */
+  threadId: string | null
+}
+
+/** Where a message to the primary bot goes: Tomo decides (auto), a new job, or a job by id. */
+export type JobTarget = 'auto' | 'new' | { jobId: string }
 
 /** What a profile or playbook record is about. */
 export type MemoryRecordType = 'preference' | 'person' | 'project' | 'procedure'
@@ -269,6 +337,8 @@ export type StreamEvent =
   | { type: 'computerDoing'; messageId: string; doing: ComputerDoing | null }
   /** The mode a running computer reply works in: decided from the message, or switched by the user. */
   | { type: 'computerMode'; messageId: string; mode: ComputerMode }
+  /** Jobs changed (a new one, a title, a summary, a status): reload the list. */
+  | { type: 'jobs' }
   /** Point: the user is marking part of the screen (active), or finished; a finished mark brings its image and note for the next message. */
   | { type: 'point'; active: boolean; attachments: Attachment[]; error?: string }
 
@@ -314,6 +384,22 @@ export interface Api {
     remove(id: string): Promise<void>
     update(id: string, patch: SessionPatch): Promise<void>
     fork(sessionId: string, messageId: string): Promise<SessionView>
+  }
+  bots: {
+    list(): Promise<Bot[]>
+    update(id: string, patch: BotPatch): Promise<Bot[]>
+  }
+  jobs: {
+    list(): Promise<Job[]>
+    /** The primary bot's conversation: its turns from every job thread, oldest first. */
+    primary(): Promise<SessionView>
+    /** A message to the primary bot, routed to a job (see JobTarget); returns the primary view. */
+    send(input: { text: string; attachmentIds: string[]; target: JobTarget }): Promise<SessionView>
+    /** Moves the primary's last turn (a wrong guess) to another job, or a new one. */
+    move(input: { messageId: string; target: 'new' | { jobId: string } }): Promise<SessionView>
+    setStatus(id: string, status: JobStatus): Promise<void>
+    rename(id: string, title: string): Promise<void>
+    remove(id: string): Promise<void>
   }
   memory: {
     get(): Promise<MemoryView>

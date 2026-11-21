@@ -2,7 +2,8 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { BrowserWindow, app, dialog, ipcMain, shell, systemPreferences } from 'electron'
 import { Cause, Effect, type ManagedRuntime } from 'effect'
-import type { AudioAnalysis, IpcResult, MemoryView, NewAttachmentInput, RecordReply, SessionPatch, SettingsPatch } from '@shared/types'
+import type { AudioAnalysis, BotPatch, IpcResult, JobTarget, MemoryView, NewAttachmentInput, RecordReply, SessionPatch, SettingsPatch } from '@shared/types'
+import { isClaudeModel } from '@shared/models'
 import { errorMessage } from './errors'
 import { checkForUpdates, downloadUpdate, installUpdate, updateState } from './updater'
 import { publishArtifact } from './protocols'
@@ -14,10 +15,28 @@ import { ComputerUse } from './computer'
 import { Db, type DbApi } from './services/Db'
 import { isSensitive } from './memory'
 import { ElevenLabs } from './services/ElevenLabs'
+import { Jobs } from './services/Jobs'
 import { SettingsStore } from './services/SettingsStore'
 import { Usage } from './usage/Usage'
 
-export type MainServices = Db | Chat | Attachments | SettingsStore | Agent | ElevenLabs | Browser | ComputerUse | Usage
+export type MainServices = Db | Chat | Jobs | Attachments | SettingsStore | Agent | ElevenLabs | Browser | ComputerUse | Usage
+
+/** Where a message to the primary goes, as the renderer sent it. */
+const jobTarget = (v: unknown): JobTarget =>
+  v === 'new' ? 'new' : v && typeof v === 'object' && typeof (v as { jobId?: unknown }).jobId === 'string' ? { jobId: (v as { jobId: string }).jobId } : 'auto'
+
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/** A change to a bot from Settings: blank instructions or an unknown model or effort are refused rather than saved. */
+const botPatch = (v: unknown): BotPatch => {
+  const p = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>
+  return {
+    ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name.trim().slice(0, 40) } : {}),
+    ...(typeof p.instructions === 'string' ? { instructions: p.instructions } : {}),
+    ...(typeof p.model === 'string' && isClaudeModel(p.model) ? { model: p.model } : {}),
+    ...(EFFORTS.find((e) => e === p.effort) ? { effort: p.effort as BotPatch['effort'] } : {})
+  }
+}
 
 type Handler = (...args: any[]) => Effect.Effect<unknown, { readonly _tag: string; readonly message: string }, MainServices>
 
@@ -85,13 +104,12 @@ export const pinWindow = (win: BrowserWindow, on: boolean) => {
 
 const handlers: Record<string, Handler> = {
   'sessions:list': () => Db.use((db) => db.use((d) => d.listSessions())),
+  // A new job's thread, owned by the primary bot.
   'sessions:create': () =>
     Effect.gen(function* () {
       const db = yield* Db
-      const session = yield* db.use((d) =>
-        d.createSession({ title: NEW_SESSION_TITLE, model: null, systemPrompt: null, forkedFromSessionId: null })
-      )
-      return yield* (yield* Chat).view(session.id)
+      const { thread } = yield* db.use((d) => d.createJob({ title: NEW_SESSION_TITLE, botId: d.primaryBot().id }))
+      return yield* (yield* Chat).view(thread.id)
     }),
   'sessions:get': (id) => Chat.use((chat) => chat.view(str(id, 'id'))),
   'sessions:rename': (id, title) =>
@@ -122,9 +140,26 @@ const handlers: Record<string, Handler> = {
   'sessions:fork': (sessionId, messageId) =>
     Effect.gen(function* () {
       const db = yield* Db
-      const fork = yield* db.use((d) => d.forkSession(str(sessionId, 'sessionId'), str(messageId, 'messageId')))
+      // A fork is a job of its own, a child of the one it came from.
+      const fork = yield* db.use((d) => d.forkThread(str(sessionId, 'sessionId'), str(messageId, 'messageId')))
       return yield* (yield* Chat).view(fork.id)
     }),
+
+  'bots:list': () => Db.use((db) => db.use((d) => d.listBots())),
+  'bots:update': (id, patch) => Db.use((db) => db.use((d) => (d.updateBot(str(id, 'id'), botPatch(patch)), d.listBots()))),
+
+  'jobs:list': () => Db.use((db) => db.use((d) => d.listJobs())),
+  'jobs:primary': () => Jobs.use((j) => j.primary),
+  'jobs:send': (input) =>
+    Jobs.use((j) => j.send({ text: str(input.text, 'text'), attachmentIds: ids(input.attachmentIds), target: jobTarget(input.target) })),
+  'jobs:move': (input) =>
+    Jobs.use((j) => {
+      const target = jobTarget(input.target)
+      return j.move({ messageId: str(input.messageId, 'messageId'), target: target === 'auto' ? 'new' : target })
+    }),
+  'jobs:setStatus': (id, status) => Jobs.use((j) => j.setStatus(str(id, 'id'), status === 'done' ? 'done' : 'open')),
+  'jobs:rename': (id, title) => Db.use((db) => db.use((d) => d.renameJob(str(id, 'id'), str(title, 'title').trim() || NEW_SESSION_TITLE))),
+  'jobs:remove': (id) => Jobs.use((j) => j.remove(str(id, 'id'))),
 
   'memory:get': () => memoryView,
   'memory:add': (fact) => editMemory((d) => d.changeMemory({ add: [typedFact(fact)], update: [], remove: [] }, { kind: 'edited' })),

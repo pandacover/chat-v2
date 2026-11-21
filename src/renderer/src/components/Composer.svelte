@@ -55,11 +55,13 @@
   const busy = $derived(app.streaming)
   // A test, not text.trim(): that copied the whole draft on every key, and a paste can be megabytes.
   const hasText = $derived(/\S/.test(text))
-  const canSend = $derived((hasText || app.draftAttachments.length > 0) && uploading === 0 && app.analyzing.size === 0 && !busy)
+  // Talking to Tomo, a reply running in one job doesn't hold up a message for another: nothing pauses.
+  const sendsWhileBusy = $derived(app.isPrimary && (hasText || app.draftAttachments.length > 0))
+  const canSend = $derived((hasText || app.draftAttachments.length > 0) && uploading === 0 && app.analyzing.size === 0 && (!busy || sendsWhileBusy))
   // While a Show-me step waits, a message answers it (the reply goes on); attachments stay in the draft.
   const answering = $derived(app.teaching && hasText)
   const computerOn = $derived(computerEnabled && app.computerSupported)
-  const stopping = $derived(busy && !answering)
+  const stopping = $derived(busy && !answering && !sendsWhileBusy)
 
   export const focus = () => textarea?.focus()
 

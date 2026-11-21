@@ -58,6 +58,8 @@ export interface ReplyRequest {
   /** The chat and the assistant message being written, for the tool sets. */
   sessionId: string
   messageId: string
+  /** The job the chat is a thread of, for tool sets that keep job notes. */
+  jobId?: string | null
   model: string
   effort: Effort
   /** The system prompt; each tool set's section follows it, then `profile` (what memory knows). */
@@ -287,6 +289,7 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
     const ctx: RunContext = {
       sessionId: req.sessionId,
       messageId: req.messageId,
+      jobId: req.jobId ?? null,
       signal: abort.signal,
       step: async (step) => {
         if (abort.signal.aborted) return
