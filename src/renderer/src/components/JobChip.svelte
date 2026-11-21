@@ -9,6 +9,8 @@
   import { pop } from '@/lib/motion'
   import { shortcut } from '@/lib/keys'
   import { app } from '@/lib/store.svelte'
+  import { meter } from '@/lib/meter.svelte'
+  import { jobUsageLine, sharesLine } from '@shared/usage'
   import Icon from './Icon.svelte'
 
   let open = $state(false)
@@ -35,6 +37,18 @@
           : 'Tomo picks a job for each message'
         : 'Your next message goes here'
   )
+
+  // What the job has used, after the hint: its tokens and API-equivalent cost, and on a Claude plan
+  // its estimated share of the windows (lib/meter.svelte.ts reads it again as usage moves).
+  $effect(() => {
+    if (job) void meter.loadJob(job.id)
+  })
+  const used = $derived.by(() => {
+    if (!job || (target === 'new' && primary)) return ''
+    const parts = [job.usage && job.usage.replies > 0 ? jobUsageLine(job.usage) : '', sharesLine((meter.shares.get(job.id) ?? []).filter((s) => s.percent > 0))]
+    const line = parts.filter(Boolean).join(', ')
+    return line ? ` · Used ${line}${parts[1] ? ' (an estimate)' : ''}` : ''
+  })
 
   const RECENT_OPEN = 8
   const RECENT_DONE = 5
@@ -103,7 +117,7 @@
       class="glass inline-flex h-7 max-w-[340px] min-w-0 items-center gap-1.5 rounded-full pr-2 pl-2.5 text-[12.5px] font-medium transition-colors {open ? 'text-fg' : 'text-fg-2 hover:text-fg'}"
       aria-haspopup="menu"
       aria-expanded={open}
-      use:tip={open ? null : hint}
+      use:tip={open ? null : hint + used}
       onclick={toggle}
     >
       <Icon name={target === 'new' && primary ? 'compose' : primary && target === 'auto' ? 'sparkle' : 'chat'} size={13} class="shrink-0 text-fg-3" />

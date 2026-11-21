@@ -1,7 +1,8 @@
 // Usage, end to end in the built app, hidden (CHAT_V2_HEADLESS=1), on a scripted model
 // (smoke-query.ts): the sidebar meter and its popover, the quiet warning before extra usage, a
-// reply paused at the 5-hour limit that continues by itself after the reset, Cancel on a second
-// pause, and Settings › Usage in light and dark. Captures go to <outDir>.
+// reply in Tomo's conversation (run in its job's thread) paused at the 5-hour limit that continues
+// by itself after the reset, Cancel on a second pause, the job's use and share on its chip and in
+// Settings › Usage, in light and dark. Captures go to <outDir>.
 //
 //   bun run build
 //   node test/usage/smoke.mjs <playwright-core dir> [outDir]
@@ -107,6 +108,17 @@ try {
   await until(async () => (await pauseCard.count()) === 0, 'Cancel ends the pause')
   ok((await lastReply().innerText()).includes('Stopped.') && (await lastReply().getByRole('button', { name: 'Continue' }).count()) === 1, 'the reply stays stopped, with Continue')
 
+  // The job chip says what the job used, and its share.
+  // Both messages were said to Tomo, who put them in one job (the fake router keeps the current one).
+  const jobTitle = (await page.locator('[data-job-chip]').innerText()).trim()
+  ok(jobTitle.length > 0 && (await page.locator('[data-reply-scope]').count()) === 2, `Tomo's conversation is on the job the messages went to (${jobTitle})`)
+  await page.locator('[data-job-chip] button').first().hover()
+  const chipTip = page.locator('.app-tooltip')
+  await until(async () => (await chipTip.count()) > 0 && /Used .*tokens · \$.*of this 5-hour window.*\(an estimate\)/.test(await chipTip.first().innerText()), "the job chip's tooltip gives the job's use and estimated share")
+  console.log(`   tooltip: ${await chipTip.first().innerText()}`)
+  await capture('job-chip-light')
+  await page.mouse.move(800, 300)
+
   // Settings › Usage, from the meter.
   await meterRow.click()
   const usage = page.locator('#settings-usage')
@@ -115,9 +127,13 @@ try {
   const text = await usage.innerText()
   ok(/max plan/i.test(text) && /extra usage/i.test(text) && text.includes('$12.40 of $50.00 this month'), 'with the plan and extra usage')
   ok(!text.includes('Past it, work moves onto extra usage'), 'no extra-usage warning once a limit was hit without it')
-  await until(async () => (await usage.locator('[data-usage-share]').count()) === 2, "and this chat's estimated share of the 5-hour window and the week")
+  // Tomo's conversation is on the job the messages went to: its use, and its share, estimated.
+  await until(async () => (await usage.locator('[data-usage-job]').count()) === 1, 'Settings › Usage shows the current job')
+  ok((await usage.locator('[data-usage-job]').innerText()).includes(jobTitle), 'the one on the job chip')
+  ok(/tokens · \$[\d.]+ over \d+ repl/.test(await usage.locator('[data-usage-job]').innerText()), 'with its tokens and cost')
+  await until(async () => (await usage.locator('[data-usage-share]').count()) === 2, "and the job's estimated share of the 5-hour window and the week")
   const shareText = await usage.locator('[data-usage-share="five_hour"]').innerText()
-  // The 5-hour window rose to 85 and 100 while this chat's replies ran: most of it is theirs.
+  // The 5-hour window rose to 85 and 100 while the job's replies ran (in its thread): it's theirs.
   ok(/^about \d+% of this 5-hour window$/.test(shareText), `labelled as an estimate (${shareText}; ${await usage.locator('[data-usage-share="seven_day"]').innerText()})`)
   await capture('settings-usage-light')
   await page.keyboard.press('Escape')

@@ -2,12 +2,17 @@
 // message with "limit" in it runs into the 5-hour limit after a warning (the first time the limit
 // resets in a few seconds, the second time in a minute), and its continuation finishes. The usage
 // meter answers as the SDK's usage control request would.
+import { ROUTER_INSTRUCTIONS } from '../../src/main/jobs'
 import { fakeQuery, type Script } from '../fakeQuery'
 
 let limited = 0
 const script: Script = async function* (t) {
   if (t.call.options.persistSession === false) {
-    yield* t.text('Usage test')
+    // Tomo's router: the first message starts a job, the rest stay with the current one.
+    const system = (t.call.options.systemPrompt as { prompt: string }).prompt
+    const lines = t.call.prompt.flatMap((b) => (b.text ?? '').split(/\r?\n/))
+    const current = lines.find((l) => /^\d+\. .*\(current\)$/.test(l))?.split('.')[0]
+    yield* t.text(system === ROUTER_INSTRUCTIONS ? (current ? `{"job": ${current}}` : '{"job": "new", "title": "Long write-up"}') : 'Usage test')
     yield t.result()
     return
   }

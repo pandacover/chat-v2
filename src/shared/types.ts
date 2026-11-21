@@ -468,6 +468,8 @@ export interface Api {
     cancelPause(messageId: string): Promise<UsageView>
     /** The estimated share of a window (default weekly) used by these chats. */
     share(keys: string[], window?: string): Promise<UsageShare>
+    /** A job's estimated share of the 5-hour window and the week (its threads' replies); none with an API key. */
+    jobShare(jobId: string): Promise<UsageShare[]>
     onEvent(listener: (event: UsageEvent) => void): () => void
   }
   updates: {

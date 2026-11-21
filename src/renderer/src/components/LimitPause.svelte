@@ -24,7 +24,7 @@
     </span>
   </span>
   <span class="flex shrink-0 items-center gap-1">
-    <button class="btn solid sm" disabled={app.streaming} onclick={() => app.continueReply(pause.messageId)}>Continue now</button>
+    <button class="btn solid sm" disabled={app.streaming} onclick={() => meter.continueNow(pause)}>Continue now</button>
     <button class="btn sm" onclick={() => meter.cancel(pause.messageId)}>Cancel</button>
   </span>
 </div>

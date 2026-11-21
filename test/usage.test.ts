@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { Effect, Layer, ManagedRuntime } from 'effect'
 import type { StreamEvent } from '../src/shared/types'
 import type { UsageEvent } from '../src/shared/usage'
-import { extraLine, formatMoney, fullest, limitName, noticeText, resetPhrase, shareLabel, tone, whenPhrase } from '../src/shared/usage'
+import { extraLine, formatMoney, fullest, jobUsageLine, sharesLine, limitName, noticeText, resetPhrase, shareLabel, tone, whenPhrase } from '../src/shared/usage'
 import { AppPaths } from '../src/main/services/AppPaths'
 import { Attachments } from '../src/main/services/Attachments'
 import { Broadcaster, Chat } from '../src/main/services/Chat'
@@ -442,6 +442,49 @@ describe('a reply at a usage limit', () => {
     // The same database, opened again: the pause is still there, waiting for its reset.
     const again = await t.run(Db.use((db) => db.use((d) => d.usagePauses())))
     expect(again).toEqual(before)
+    await t.runtime.dispose()
+  })
+})
+
+describe('a job’s share', () => {
+  test('sums the runs of the job’s threads, not other jobs’', async () => {
+    const t = setup(async function* (turn) {
+      yield* turn.text('ok')
+      yield turn.result()
+    })
+    const now = Date.now()
+    const week = now + 3 * 24 * H
+    const ids = await t.run(
+      Db.use((db) =>
+        db.use((d) => {
+          d.seedPrimary({ systemPrompt: '', defaultModel: 'claude-sonnet-5-5', effort: 'medium' })
+          const bot = d.listBots()[0]!.id
+          const a = d.createJob({ title: 'Printer', botId: bot })
+          const b = d.createJob({ title: 'Lisbon', botId: bot })
+          // Both windows rise 10 points while each job ran once; Printer's reply cost three times Lisbon's.
+          for (const w of ['five_hour', 'seven_day']) {
+            const reset = w === 'five_hour' ? now + 2 * H : week
+            d.addUsageSample({ window: w, percent: 20, resetsAt: reset, at: now - 50 * 60_000, source: 'meter' })
+            d.addUsageSample({ window: w, percent: 30, resetsAt: reset, at: now - 10 * 60_000, source: 'meter' })
+          }
+          d.addUsageRun({ sessionId: a.thread.id, messageId: null, auth: 'login', model: 'claude-sonnet-5-5', startedAt: now - 40 * 60_000, endedAt: now - 35 * 60_000, cost: 0.3 })
+          d.addUsageRun({ sessionId: b.thread.id, messageId: null, auth: 'login', model: 'claude-sonnet-5-5', startedAt: now - 30 * 60_000, endedAt: now - 25 * 60_000, cost: 0.1 })
+          return { a: a.job.id, b: b.job.id }
+        })
+      )
+    )
+    const printer = await t.run(Usage.use((u) => u.jobShare(ids.a)))
+    expect(printer.map((s) => [s.window, Math.round(s.percent * 10) / 10, s.estimate])).toEqual([
+      ['five_hour', 7.5, true],
+      ['seven_day', 7.5, true]
+    ])
+    expect((await t.run(Usage.use((u) => u.jobShare(ids.b)))).map((s) => Math.round(s.percent * 10) / 10)).toEqual([2.5, 2.5])
+    expect(await t.run(Usage.use((u) => u.jobShare('no-such-job')))).toEqual([
+      expect.objectContaining({ percent: 0 }),
+      expect.objectContaining({ percent: 0 })
+    ])
+    expect(jobUsageLine({ tokens: 12_400, cost: 0.42 })).toBe('12.4k tokens · $0.42')
+    expect(sharesLine(printer)).toBe('about 8% of this 5-hour window, about 8% of this week')
     await t.runtime.dispose()
   })
 })

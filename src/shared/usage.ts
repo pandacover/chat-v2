@@ -170,6 +170,16 @@ export const whenPhrase = (at: number, now = Date.now()) => {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
+/** Thousands as "12.4k", millions as "1.2M". */
+const count = (v: number) =>
+  v < 1000 ? String(Math.round(v)) : v < 1_000_000 ? `${(v / 1000).toFixed(v < 100_000 ? 1 : 0).replace(/\.0$/, '')}k` : `${(v / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
+
+/** What a job's replies used: "12.4k tokens · $0.42" (API-equivalent dollars). */
+export const jobUsageLine = (u: { tokens: number; cost: number }) => `${count(u.tokens)} tokens · ${formatMoney(u.cost)}`
+
+/** A job's shares in a phrase: "about 6% of this 5-hour window, about 1% of this week". */
+export const sharesLine = (shares: readonly Pick<UsageShare, 'window' | 'percent'>[]) => shares.map(shareLabel).join(', ')
+
 /** "resets in 12 min", "resets Tue 9:00 AM". */
 export const resetPhrase = (at: number | null, now = Date.now()) => (at === null ? '' : at <= now ? 'reset' : `resets ${whenPhrase(at, now)}`)
 
