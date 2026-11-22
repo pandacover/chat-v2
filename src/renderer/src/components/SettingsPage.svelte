@@ -334,7 +334,7 @@
 {/snippet}
 
 <!-- Clear of the app bar, where the window's own buttons are. -->
-<div class="fixed inset-0 z-50 grid place-items-center p-6 pt-[calc(var(--bar-h)+8px)]" role="dialog" aria-modal="true" aria-label="Settings">
+<div class="fixed inset-0 z-50 grid place-items-center p-6 pt-[var(--card-top)]" role="dialog" aria-modal="true" aria-label="Settings">
   <button use:dimsBar class="absolute inset-0 bg-scrim backdrop-blur-[4px]" aria-label="Close settings" transition:fade={{ duration: 250 }} onclick={close}></button>
   <section
     use:focusSelf

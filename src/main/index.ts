@@ -282,7 +282,7 @@ const headless = process.env.CHAT_V2_HEADLESS === '1'
  * its right end in the same colour, with the theme's text colour (--fg-2), and the page tells the
  * window when the theme changes; a Mac keeps its traffic lights, at the bar's left end.
  */
-const BAR_HEIGHT = 40
+const BAR_HEIGHT = 36
 /** A colour under black at `alpha`, as a modal's scrim (app.css --scrim) shows it. */
 const dim = (hex: string, alpha: number) =>
   `#${[1, 3, 5].map((i) => Math.round(parseInt(hex.slice(i, i + 2), 16) * (1 - alpha)).toString(16).padStart(2, '0')).join('')}`
@@ -315,7 +315,7 @@ const createWindow = async () => {
     title: 'Tomo',
     autoHideMenuBar: true,
     ...(isMac
-      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 16, y: 13 } }
+      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 16, y: 11 } }
       : { titleBarStyle: 'hidden' as const, titleBarOverlay: barOverlay(nativeTheme.shouldUseDarkColors) }),
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),

@@ -193,10 +193,12 @@ body {
  * The app bar: the window has no title bar of its own (src/main/index.ts), so the strip of sidebar
  * colour above the cards is it. Its empty parts move the window, as a title bar's do; Windows
  * draws its window buttons over the right end, a Mac its traffic lights at the left (--bar-left
- * keeps room for them). Anything clickable in it is .app-no-drag.
+ * keeps room for them). Anything clickable in it is .app-no-drag. The cards start the usual 8px
+ * gap below it (--card-top), clear of the window's buttons.
  */
 :root {
-  --bar-h: 40px;
+  --bar-h: 36px;
+  --card-top: calc(var(--bar-h) + 8px);
   --bar-left: 0px;
 }
 :root[data-platform='mac'] {

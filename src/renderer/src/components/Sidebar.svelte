@@ -187,8 +187,9 @@
 <svelte:window onresize={() => (app.sidebarWidth = clampWidth(app.sidebarWidth))} />
 
 <!-- One spot for the sidebar toggle, open or closed, so a second click lands on it: in the app bar,
-     after a Mac's traffic lights. -->
-<div class="app-no-drag fixed top-1 z-[45] flex gap-0.5" style="left: calc(var(--bar-left) + 10px)">
+     after a Mac's traffic lights. Nothing marked app-drag may come after it over the same spot, or
+     the window takes the click for a drag. -->
+<div class="app-no-drag fixed top-0.5 z-[45] flex gap-0.5" style="left: calc(var(--bar-left) + 10px)">
   <button
     class="icon-btn size-8"
     data-sidebar-toggle
@@ -213,21 +214,16 @@
     role="separator"
     aria-orientation="vertical"
     aria-label="Resize sidebar"
-    class="group absolute inset-y-0 right-0 z-10 w-2 cursor-col-resize"
+    class="absolute right-0 bottom-0 z-10 w-2 cursor-col-resize"
+    style="top: var(--card-top)"
     use:tip={'Drag to resize · double-click to reset'}
     onpointerdown={startResize}
     ondblclick={() => setWidth(DEFAULT_WIDTH)}
-  >
-    <span class="absolute inset-y-3 right-0 w-0.5 rounded-full transition-colors group-hover:bg-line-2 {resizing ? '!bg-line-2' : ''}"></span>
-  </div>
+  ></div>
 
-  <div class="flex h-full flex-col gap-0.5 px-2.5 pb-2.5" style="width: {app.sidebarWidth}px">
-    <!-- The name, in the app bar: centred across the sidebar (beside a Mac's traffic lights and the
-         sidebar toggle, across what is left), level with the toggle. Dragging it moves the window.
-         The fox mascot is the app's icon (and in Settings › About). -->
-    <div class="app-drag mb-1.5 flex h-[var(--bar-h)] shrink-0 items-center justify-center" style="padding-left: var(--bar-left)">
-      <span class="font-display text-[17px] leading-none font-medium tracking-[-0.02em] select-none">tomo</span>
-    </div>
+  <!-- Below the app bar, level with the cards' tops. The app's name isn't repeated here: Tomo, the
+       row below, is already its name. -->
+  <div class="flex h-full flex-col gap-0.5 px-2.5 pb-2.5" style="width: {app.sidebarWidth}px; padding-top: var(--card-top)">
 
     <!-- The primary bot's conversation: everything said without picking a job goes here. -->
     <div class="chat-row group relative">
