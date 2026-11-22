@@ -68,7 +68,7 @@ For tests, `CHAT_V2_FAKE_QUERY` names a module whose `query` stands in for the S
 
 ## Releases
 
-Each push to `main` runs `.github/workflows/release.yml`. It builds a Windows installer and macOS builds for Apple silicon and Intel, then publishes them as a [GitHub release](https://github.com/pandacover/chat-v2/releases). Each build carries the Claude Code binary for its platform and processor. Installed apps check for updates on launch and every 30 minutes.
+Each push to `main` runs `.github/workflows/release.yml`. It builds a Windows installer and publishes it as a [GitHub release](https://github.com/pandacover/chat-v2/releases) once the tests pass. A separate job builds the macOS app for Apple silicon (no Intel build) and adds it to the same release when it finishes, so the slower Mac build never holds up Windows. Each build carries the Claude Code binary for its platform and processor. Installed apps check for updates on launch and every 30 minutes.
 
 The release workflow signs macOS builds with a self-signed certificate (`build/chat-v2-signing.cer`) and does not notarize them. The first open of a downloaded DMG needs **Open Anyway** in Privacy & Security settings. The `MAC_CERT_P12` and `MAC_CERT_PASSWORD` secrets hold the private key. Keep a backup of both. A new certificate resets every user's macOS permissions and stops installed apps from updating.
 

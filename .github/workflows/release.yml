@@ -2,6 +2,12 @@
 # repository, where installed apps pick them up (src/main/updater.ts).
 # Secrets: MAC_CERT_P12 and MAC_CERT_PASSWORD, the self-signed certificate every macOS release is
 # signed with (scripts/make-mac-cert.sh). Windows stays unsigned; uploads use GITHUB_TOKEN.
+#
+# Windows and macOS run apart: the release is published as soon as the tests and the Windows
+# installer are done, and the (slower) Mac build adds its files to it when it finishes. Until then,
+# and if it fails, Mac apps find no latest-mac.yml in the newest release and quietly stay on the
+# version they have. Runs don't wait for each other either (every run has its own version), so a
+# Mac build still going never holds up the next Windows release.
 name: Release
 
 on:
@@ -12,16 +18,12 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: release
-  cancel-in-progress: false
-
 env:
   # Every run gets a higher version, so installed apps always see it as newer.
   VERSION: 0.1.${{ github.run_number }}
 
 jobs:
-  # Runs beside the builds; publishing waits for both.
+  # Runs beside the builds; publishing waits for it.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -43,13 +45,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build:
+  windows:
     needs: prepare
-    strategy:
-      fail-fast: true
-      matrix:
-        os: [windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
@@ -57,73 +55,81 @@ jobs:
       - name: Set version
         run: npm pkg set version=${{ env.VERSION }}
       - run: bun run build
-      # Each Mac build ships the Claude Code binary for its own processor; bun installs only this one's.
-      - name: Install the Claude Code binary for the other Mac processor
-        if: runner.os == 'macOS'
-        run: bun scripts/claude-binaries.ts
       - name: Build and upload the Windows installer (draft release)
-        if: runner.os == 'Windows'
-        run: bunx electron-builder --publish always
+        run: bunx electron-builder --win --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # No certificate: Windows is unsigned.
           CSC_IDENTITY_AUTO_DISCOVERY: false
-      - name: Set up the signing certificate
-        if: runner.os == 'macOS'
-        run: bash scripts/ci-mac-signing.sh
-        env:
-          MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
-          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
-      - name: Build, sign and upload the macOS installers and updates (draft release)
-        if: runner.os == 'macOS'
-        run: bunx electron-builder --publish always -c.mac.identity="chat-v2 Code Signing"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Only the identity named above, never another one found on the runner.
-          CSC_IDENTITY_AUTO_DISCOVERY: false
-      # Signed with the release certificate, with the designated requirement every version shares,
-      # and the Claude Code binary signed and working (scripts/ci-mac-verify.sh). Failing here leaves
-      # the release a draft, which the cleanup job deletes. The zips are checked too: they are what
-      # Squirrel.Mac installs.
-      - name: Check the macOS signatures
-        if: runner.os == 'macOS'
-        run: |
-          bash scripts/ci-mac-verify.sh dist/mac/Tomo.app self-signed x64
-          bash scripts/ci-mac-verify.sh dist/mac-arm64/Tomo.app self-signed arm64
-          for arch in arm64 x64; do
-            unzipped="$RUNNER_TEMP/zip-$arch"
-            ditto -x -k "dist/chat-v2-${VERSION}-${arch}.zip" "$unzipped"
-            bash scripts/ci-mac-verify.sh "$unzipped/Tomo.app" self-signed "$arch"
-          done
-      # Apps from before the per-processor builds download "-universal.dmg". The Intel DMG runs on
-      # both (through Rosetta on Apple silicon), and their next update moves them to arm64. Drop
-      # this once no such installs are left.
-      - name: Upload the Intel DMG for apps that ask for the universal one
-        if: runner.os == 'macOS'
-        run: |
-          cp "dist/chat-v2-${VERSION}-x64.dmg" "dist/chat-v2-${VERSION}-universal.dmg"
-          gh release upload "v${VERSION}" "dist/chat-v2-${VERSION}-universal.dmg" --repo "${GITHUB_REPOSITORY}" --clobber
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish:
-    needs: [test, build]
+    needs: [test, windows]
     runs-on: ubuntu-latest
     steps:
-      - name: Publish the draft once every platform has uploaded
+      - name: Publish the release once the tests and Windows are done
         # The commit message comes in through the environment, not pasted into the script: quotes
         # or backticks in it would otherwise break the command (or run as shell).
+        # Runs overlap, so an older run can get here after a newer one: it is published but left
+        # behind the newer one as latest, which is the release installed apps update from.
         run: |
-          gh release edit "v${VERSION}" --repo "${GITHUB_REPOSITORY}" --draft=false --latest \
+          latest=$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName --jq .tagName 2>/dev/null || echo none)
+          newest=true
+          if [[ "$latest" =~ ^v0\.1\.([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -gt "${{ github.run_number }}" ]; then
+            newest=false
+            echo "$latest is newer: v${VERSION} is published but not marked latest."
+          fi
+          gh release edit "v${VERSION}" --repo "${GITHUB_REPOSITORY}" --draft=false --latest="$newest" \
             --notes "Built from ${GITHUB_SHA::7}: ${COMMIT_MESSAGE}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message || 'manual run' }}
 
+  # Apple silicon only. Its files go into the release whether it is still a draft or already
+  # published, and only once they are checked: a build that fails the checks never reaches anyone.
+  mac:
+    needs: prepare
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      # The runner is Apple silicon, so bun installs the arm64 Claude Code binary the app ships.
+      - run: bun install --frozen-lockfile
+      - name: Set version
+        run: npm pkg set version=${{ env.VERSION }}
+      - run: bun run build
+      - name: Set up the signing certificate
+        run: bash scripts/ci-mac-signing.sh
+        env:
+          MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+      # Not uploaded here: electron-builder won't add files to a release that's already published.
+      - name: Build and sign the macOS installer and update
+        run: bunx electron-builder --mac --publish never -c.mac.identity="chat-v2 Code Signing"
+        env:
+          # Only the identity named above, never another one found on the runner.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+      # Signed with the release certificate, with the designated requirement every version shares,
+      # and the Claude Code binary signed and working (scripts/ci-mac-verify.sh). The zip is checked
+      # too: it is what Squirrel.Mac installs.
+      - name: Check the macOS signatures
+        run: |
+          bash scripts/ci-mac-verify.sh dist/mac-arm64/Tomo.app self-signed arm64
+          unzipped="$RUNNER_TEMP/zip-arm64"
+          ditto -x -k "dist/chat-v2-${VERSION}-arm64.zip" "$unzipped"
+          bash scripts/ci-mac-verify.sh "$unzipped/Tomo.app" self-signed arm64
+      - name: Upload the macOS installer and update
+        # The DMG, the zip, their blockmaps, and latest-mac.yml (written with --publish never too).
+        run: |
+          ls "dist/chat-v2-${VERSION}-arm64.dmg" "dist/chat-v2-${VERSION}-arm64.zip" dist/latest-mac.yml
+          gh release upload "v${VERSION}" --repo "${GITHUB_REPOSITORY}" --clobber \
+            dist/chat-v2-"${VERSION}"-arm64.* dist/latest-mac.yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   # A run that fails or is cancelled deletes its draft, so half-uploaded drafts don't pile up.
-  # Only a draft: a published release is never touched.
+  # Only a draft: a published release is never touched (one whose Mac build failed keeps Windows).
   cleanup:
-    needs: [prepare, test, build, publish]
+    needs: [prepare, test, windows, publish, mac]
     if: ${{ always() && (failure() || cancelled()) }}
     runs-on: ubuntu-latest
     steps:

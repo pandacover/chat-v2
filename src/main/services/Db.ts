@@ -291,6 +291,12 @@ const toListed = (r: ListedRow): ListedSession => ({
 /** How a reply ending makes its thread unread: an interrupted one (the app quit) doesn't. */
 const ENDED: ReadonlySet<MessageStatus> = new Set(['complete', 'stopped', 'paused', 'error'])
 
+/**
+ * Sets a thread's news time (bind: now). Always after its last read, even within the same
+ * millisecond, so news that comes after the user opened the thread is never taken as seen.
+ */
+const NEWS_AT = 'activity_at = max(?, coalesce(read_at, 0) + 1)'
+
 const toAttachment = (r: AttachmentRow): StoredAttachment => ({
   id: r.id,
   messageId: r.message_id,
@@ -477,7 +483,7 @@ export const makeDb = (file: string) => {
     run('update messages set active_child_id = ? where id = ?', id, m.parentId)
     run('update sessions set updated_at = ? where id = ?', now, m.sessionId)
     // A bot reporting back is news in the thread until the user opens it.
-    if (m.post?.kind === 'report') run('update sessions set activity_at = ? where id = ?', now, m.sessionId)
+    if (m.post?.kind === 'report') run(`update sessions set ${NEWS_AT} where id = ?`, now, m.sessionId)
     return getMessage(id)!
   }
 
@@ -660,7 +666,8 @@ export const makeDb = (file: string) => {
       ).map(toListed),
     /** The user opened a thread, or saw a reply end in it. */
     markRead: (id: string) => {
-      run('update sessions set read_at = ? where id = ?', Date.now(), id)
+      // Never before news already there, even news from this same millisecond.
+      run('update sessions set read_at = max(?, coalesce(activity_at, 0)) where id = ?', Date.now(), id)
     },
     /**
      * Deletes chats that never got a message (left over from when "New chat" saved a row
@@ -758,7 +765,7 @@ export const makeDb = (file: string) => {
         )
         // A reply that ended is news in its thread until the user sees it.
         if (ENDED.has(status))
-          run(`update sessions set activity_at = ? where id = (select session_id from messages where id = ? and role = 'assistant')`, Date.now(), messageId)
+          run(`update sessions set ${NEWS_AT} where id = (select session_id from messages where id = ? and role = 'assistant')`, Date.now(), messageId)
       }),
     setUsage: (messageId: string, usage: Usage) => {
       run('update messages set usage = ? where id = ?', JSON.stringify(usage), messageId)

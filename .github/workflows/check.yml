@@ -27,20 +27,18 @@ jobs:
       # leaves no child process behind (hidden: no window is shown).
       - name: Quit the app
         run: bun scripts/quit-smoke.ts
-      # The installers' app bundles, unpublished, to check each is signed and ships the Claude
-      # Code binary for its processor. Ad-hoc: branches and forks have no access to the release
+      # The installer's app bundle (Apple silicon only), unpublished, to check it is signed and
+      # ships the Claude Code binary. Ad-hoc: branches and forks have no access to the release
       # certificate (release.yml checks the self-signed signature).
       - name: Package the app (no installers)
-        run: bun scripts/claude-binaries.ts && bunx electron-builder --mac dir --arm64 --x64 --publish never
+        run: bunx electron-builder --mac dir --arm64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
           # electron-builder skips signing on pull-request builds by default; this one is ad-hoc
           # and needs no secrets, so sign it like any other build.
           CSC_FOR_PULL_REQUEST: true
-      - name: Check the packaged apps
-        run: |
-          bash scripts/ci-mac-verify.sh dist/mac/Tomo.app adhoc x64
-          bash scripts/ci-mac-verify.sh dist/mac-arm64/Tomo.app adhoc arm64
+      - name: Check the packaged app
+        run: bash scripts/ci-mac-verify.sh dist/mac-arm64/Tomo.app adhoc arm64
 
   # Linux computer use against a real X display: a virtual screen (Xvfb) with a window manager,
   # driving real xterm windows (test/computer/linux.test.ts). Without a display those tests skip.
