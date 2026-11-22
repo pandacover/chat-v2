@@ -146,7 +146,8 @@ describe('the move of progress_notes into job notes', () => {
     db.addProgressNote('j1', note({ sessionId: 's1', step: 60 }))
     expect(db.jobNotes('j1').map((n) => n.title)).toEqual(['Checkpoint at step 30', 'Checkpoint at step 45', 'Checkpoint at step 60'])
     db.close()
-    const check = new DatabaseSync(file, { readOnly: true })
+    // Not read-only: on macOS a read-only open of a WAL database fails once its -shm file is gone.
+    const check = new DatabaseSync(file)
     expect(check.prepare(`select count(*) as n from sqlite_master where name = 'progress_notes'`).get()).toEqual({ n: 0 })
     check.close()
   })
