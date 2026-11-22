@@ -4,6 +4,7 @@
   import { entries, groupOf, openEntry, type Entry } from '@/lib/chats.svelte'
   import { fade, pop } from '@/lib/motion'
   import { shortcut } from '@/lib/keys'
+  import { dimsBar } from '@/lib/theme.svelte'
   import { app } from '@/lib/store.svelte'
   import Icon from './Icon.svelte'
 
@@ -64,7 +65,7 @@
 </script>
 
 <div class="fixed inset-0 z-[55] flex items-start justify-center pt-[14vh]" role="dialog" aria-modal="true" aria-label="Search jobs">
-  <button class="absolute inset-0 bg-scrim backdrop-blur-[4px]" aria-label="Close search" tabindex="-1" transition:fade={{ duration: 200 }} onclick={close}></button>
+  <button use:dimsBar class="absolute inset-0 bg-scrim backdrop-blur-[4px]" aria-label="Close search" tabindex="-1" transition:fade={{ duration: 200 }} onclick={close}></button>
   <div class="glass-strong relative w-[min(620px,90vw)] overflow-hidden rounded-[20px]" transition:pop={{ duration: 220 }}>
     <div class="flex h-14 items-center gap-3 border-b border-line pr-4 pl-[18px] text-fg-3">
       <Icon name="search" size={18} />

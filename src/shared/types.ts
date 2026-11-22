@@ -550,6 +550,10 @@ export interface Api {
     jobShare(jobId: string): Promise<UsageShare[]>
     onEvent(listener: (event: UsageEvent) => void): () => void
   }
+  /** The window around the page: its buttons in the app bar follow the page's theme, dimmed under a modal's scrim. */
+  appWindow: {
+    setTheme(theme: 'light' | 'dark', dimmed: boolean): void
+  }
   updates: {
     get(): Promise<UpdateState>
     check(): Promise<UpdateState>

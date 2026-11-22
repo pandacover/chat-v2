@@ -44,7 +44,7 @@
    */
   const leaveLayout = (e: Event) => {
     const el = e.currentTarget as HTMLElement
-    Object.assign(el.style, { position: 'absolute', top: '8px', bottom: '8px', right: '8px' })
+    Object.assign(el.style, { position: 'absolute', top: 'var(--bar-h)', bottom: '8px', right: '8px' })
   }
   /** Opened again before it finished closing (the same element slides back): it takes its room beside the chat back. */
   const rejoinLayout = (e: Event) => {
@@ -124,11 +124,14 @@
   </div>
 {/snippet}
 
+<!-- The app bar: the strip above the cards moves the window where nothing clickable sits (app.css). -->
+<div class="app-drag fixed inset-x-0 top-0 h-[var(--bar-h)]" aria-hidden="true"></div>
+
 {#if ready}
   <!-- Behind a modal nothing takes focus or clicks. -->
   <div class="flex h-full {resizing ? 'cursor-col-resize select-none' : ''}" inert={app.settingsOpen || app.findOpen} in:fade={{ duration: 200 }}>
     <Sidebar />
-    <main class="relative flex min-w-0 flex-1 py-2 pr-2 transition-[padding] duration-[350ms] ease-out {app.sidebarOpen ? 'pl-0' : 'pl-2'}">
+    <main class="relative flex min-w-0 flex-1 pt-[var(--bar-h)] pr-2 pb-2 transition-[padding] duration-[350ms] ease-out {app.sidebarOpen ? 'pl-0' : 'pl-2'}">
       <div class="flex min-w-0 flex-1" inert={app.page !== 'chat'}>
         <ChatView />
         {#if app.panelOpen}
@@ -171,7 +174,7 @@
     <!-- The sidebar toggle mirrored: one spot whether the panel is open or shut, and it is the
          panel's close control too. The chat's top bar and the panel's header keep room for it. -->
     <button
-      class="icon-btn fixed top-[18px] right-5 z-[45] size-8"
+      class="icon-btn fixed top-[calc(var(--bar-h)+10px)] right-5 z-[45] size-8"
       aria-pressed={app.panelOpen}
       data-panel-toggle
       use:tip={app.panelOpen ? 'Hide panel' : app.latestArtifact ? 'Show artifact' : 'Show panel'}

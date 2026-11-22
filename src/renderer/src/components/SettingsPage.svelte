@@ -7,7 +7,7 @@
   import { CODE_FONTS, READING_FONTS, READING_SIZES, UI_FONTS, appearance, type FontOption, type ReadingSize } from '@/lib/appearance.svelte'
   import { fade, pop } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
-  import { theme, type ThemePref } from '@/lib/theme.svelte'
+  import { dimsBar, theme, type ThemePref } from '@/lib/theme.svelte'
   import Icon, { type IconName } from './Icon.svelte'
   import ModelPicker from './ModelPicker.svelte'
   import UsageSettings from './UsageSettings.svelte'
@@ -333,8 +333,9 @@
   </div>
 {/snippet}
 
-<div class="fixed inset-0 z-50 grid place-items-center p-6" role="dialog" aria-modal="true" aria-label="Settings">
-  <button class="absolute inset-0 bg-scrim backdrop-blur-[4px]" aria-label="Close settings" transition:fade={{ duration: 250 }} onclick={close}></button>
+<!-- Clear of the app bar, where the window's own buttons are. -->
+<div class="fixed inset-0 z-50 grid place-items-center p-6 pt-[calc(var(--bar-h)+8px)]" role="dialog" aria-modal="true" aria-label="Settings">
+  <button use:dimsBar class="absolute inset-0 bg-scrim backdrop-blur-[4px]" aria-label="Close settings" transition:fade={{ duration: 250 }} onclick={close}></button>
   <section
     use:focusSelf
     tabindex="-1"

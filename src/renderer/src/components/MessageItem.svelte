@@ -213,11 +213,7 @@
     {#if message.content || editing}
       <!-- The same box switches between text and textarea, so editing does not move anything. -->
       <div
-        class="min-w-0 rounded-[18px_18px_6px_18px] bg-bubble transition-shadow duration-150 {editing
-          ? 'w-full shadow-[0_0_0_1px_var(--ring-2)]'
-          : busy
-            ? 'max-w-[80%]'
-            : 'max-w-[80%] cursor-text hover:shadow-[0_0_0_1px_var(--ring)]'}"
+        class="min-w-0 rounded-[18px_18px_6px_18px] bg-bubble transition-shadow duration-150 {editing ? 'w-full shadow-[0_0_0_1px_var(--ring-2)]' : 'max-w-[80%]'}"
       >
         {#if editing}
           <textarea
@@ -245,25 +241,8 @@
             }}
           ></textarea>
         {:else}
-          <div
-            role="button"
-            tabindex={busy ? -1 : 0}
-            aria-label="Edit message"
-            class="px-4 py-2.5 text-[15px] leading-normal break-words whitespace-pre-wrap text-fg outline-none"
-            onclick={() => {
-              // Selecting text to copy should not flip the message into edit mode.
-              if (!getSelection()?.isCollapsed) return
-              if (!busy && !primary) startEdit()
-            }}
-            onkeydown={(e) => {
-              if ((e.key === 'Enter' || e.key === ' ') && !busy && !primary) {
-                e.preventDefault()
-                startEdit()
-              }
-            }}
-          >
-            {message.content}
-          </div>
+          <!-- Plain text: editing is the Edit button beside it, never a click on the bubble. -->
+          <div class="px-4 py-2.5 text-[15px] leading-normal break-words whitespace-pre-wrap text-fg" data-user-text>{message.content}</div>
         {/if}
       </div>
     {/if}

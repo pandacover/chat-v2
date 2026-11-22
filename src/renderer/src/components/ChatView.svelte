@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tip } from '@/lib/tooltip'
+  import { dimsBar } from '@/lib/theme.svelte'
   import { tick, untrack } from 'svelte'
   import { isClaudeModel } from '@shared/models'
   import { fade, fly, pop } from '@/lib/motion'
@@ -291,11 +292,11 @@
   style="background: var(--canvas-glow), var(--canvas)"
   class:voice={stage}
 >
-  <!-- The top bar keeps room for the fixed toggles: the sidebar's at the left while the sidebar is
-       shut, and the panel's at the right while the panel is shut. -->
+  <!-- The top bar keeps room for the panel's fixed toggle at the right while the panel is shut (the
+       sidebar's sits in the app bar above). -->
   <header
-    class="topbar flex h-[52px] shrink-0 items-center gap-1 transition-[opacity,padding] duration-300 ease-out"
-    style="padding-left: {app.sidebarOpen ? 16 : 86}px; padding-right: {app.panelToggle && !app.panelOpen ? 46 : 12}px"
+    class="topbar flex h-[52px] shrink-0 items-center gap-1 pl-4 transition-[opacity,padding] duration-300 ease-out"
+    style="padding-right: {app.panelToggle && !app.panelOpen ? 46 : 12}px"
   >
     {#if app.isPrimary}<BotAvatar bot={app.primaryBot} size={22} class="ml-1" />{/if}
     {#if worker && app.currentBot}
@@ -454,7 +455,7 @@
 
 {#if promptOpen}
   <div class="fixed inset-0 z-50 grid place-items-center p-6" role="dialog" aria-modal="true" aria-label="Chat instructions">
-    <button class="absolute inset-0 bg-scrim backdrop-blur-[4px]" aria-label="Close" transition:fade={{ duration: 150 }} onclick={() => (promptOpen = false)}></button>
+    <button use:dimsBar class="absolute inset-0 bg-scrim backdrop-blur-[4px]" aria-label="Close" transition:fade={{ duration: 150 }} onclick={() => (promptOpen = false)}></button>
     <div class="glass-strong relative w-full max-w-lg rounded-[20px] p-6" transition:pop>
       <h2 class="font-display text-[22px] leading-tight font-normal tracking-[-0.02em]">Instructions for this job</h2>
       <p class="mt-1 text-[13.5px] text-fg-3">Replace {app.primaryBot?.name ?? 'Tomo'}'s instructions in this job only.</p>

@@ -189,6 +189,26 @@ body {
     color 200ms var(--ease-out);
 }
 
+/*
+ * The app bar: the window has no title bar of its own (src/main/index.ts), so the strip of sidebar
+ * colour above the cards is it. Its empty parts move the window, as a title bar's do; Windows
+ * draws its window buttons over the right end, a Mac its traffic lights at the left (--bar-left
+ * keeps room for them). Anything clickable in it is .app-no-drag.
+ */
+:root {
+  --bar-h: 40px;
+  --bar-left: 0px;
+}
+:root[data-platform='mac'] {
+  --bar-left: 72px;
+}
+.app-drag {
+  -webkit-app-region: drag;
+}
+.app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
 ::selection {
   background: var(--blue-wash);
   color: var(--fg);

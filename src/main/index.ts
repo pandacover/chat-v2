@@ -3,7 +3,7 @@ import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { query } from '@anthropic-ai/claude-agent-sdk'
-import { BrowserWindow, type WebContents, WebContentsView, app, autoUpdater as nativeUpdater, nativeTheme, safeStorage, session, shell, webContents } from 'electron'
+import { BrowserWindow, type WebContents, WebContentsView, app, ipcMain, autoUpdater as nativeUpdater, nativeTheme, safeStorage, session, shell, webContents } from 'electron'
 import { Effect, Layer, ManagedRuntime } from 'effect'
 import { adUrlPatterns } from '@shared/blocklist'
 import type { BrowserEvent, StreamEvent } from '@shared/types'
@@ -276,6 +276,30 @@ let runtime: ManagedRuntime.ManagedRuntime<MainServices | AppPaths, unknown> | n
 // For automated testing: the window is never shown but keeps rendering, so screenshots still work.
 const headless = process.env.CHAT_V2_HEADLESS === '1'
 
+/**
+ * The window has no title bar of its own: the top strip of the page, in the sidebar's colour
+ * (app.css --side, --bar-h), is Tomo's app bar. Windows and Linux draw their window buttons over
+ * its right end in the same colour, with the theme's text colour (--fg-2), and the page tells the
+ * window when the theme changes; a Mac keeps its traffic lights, at the bar's left end.
+ */
+const BAR_HEIGHT = 40
+/** A colour under black at `alpha`, as a modal's scrim (app.css --scrim) shows it. */
+const dim = (hex: string, alpha: number) =>
+  `#${[1, 3, 5].map((i) => Math.round(parseInt(hex.slice(i, i + 2), 16) * (1 - alpha)).toString(16).padStart(2, '0')).join('')}`
+const barOverlay = (dark: boolean, dimmed = false) => {
+  const color = dark ? '#09090a' : '#f5f3f1'
+  const symbolColor = dark ? '#d6d3d1' : '#292524'
+  const scrim = dimmed ? (dark ? 0.55 : 0.3) : 0
+  return { color: dim(color, scrim), symbolColor: dim(symbolColor, scrim), height: BAR_HEIGHT }
+}
+const isMac = process.platform === 'darwin'
+ipcMain.on('window:theme', (event, theme: unknown, dimmed: unknown) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (!win || (theme !== 'dark' && theme !== 'light')) return
+  win.setBackgroundColor(barOverlay(theme === 'dark').color)
+  if (!isMac) win.setTitleBarOverlay(barOverlay(theme === 'dark', dimmed === true))
+})
+
 const createWindow = async () => {
   const pinned = runtime
     ? await runtime.runPromise(SettingsStore.use((s) => s.get)).then((s) => s.alwaysOnTop, () => false)
@@ -290,6 +314,9 @@ const createWindow = async () => {
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#09090a' : '#f5f3f1',
     title: 'Tomo',
     autoHideMenuBar: true,
+    ...(isMac
+      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 16, y: 13 } }
+      : { titleBarStyle: 'hidden' as const, titleBarOverlay: barOverlay(nativeTheme.shouldUseDarkColors) }),
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),
       contextIsolation: true,

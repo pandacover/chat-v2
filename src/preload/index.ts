@@ -82,6 +82,9 @@ const api: Api = {
   artifacts: {
     publish: (html) => call('artifacts:publish', html)
   },
+  appWindow: {
+    setTheme: (theme, dimmed) => ipcRenderer.send('window:theme', theme, dimmed)
+  },
   updates: {
     get: () => call('updates:get'),
     check: () => call('updates:check'),

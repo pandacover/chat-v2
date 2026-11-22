@@ -186,8 +186,9 @@
 
 <svelte:window onresize={() => (app.sidebarWidth = clampWidth(app.sidebarWidth))} />
 
-<!-- One spot for the sidebar toggle, open or closed, so a second click lands on it. -->
-<div class="fixed top-[18px] left-[14px] z-[45] flex gap-0.5">
+<!-- One spot for the sidebar toggle, open or closed, so a second click lands on it: in the app bar,
+     after a Mac's traffic lights. -->
+<div class="app-no-drag fixed top-1 z-[45] flex gap-0.5" style="left: calc(var(--bar-left) + 10px)">
   <button
     class="icon-btn size-8"
     data-sidebar-toggle
@@ -220,10 +221,11 @@
     <span class="absolute inset-y-3 right-0 w-0.5 rounded-full transition-colors group-hover:bg-line-2 {resizing ? '!bg-line-2' : ''}"></span>
   </div>
 
-  <div class="flex h-full flex-col gap-0.5 px-2.5 pt-4 pb-2.5" style="width: {app.sidebarWidth}px">
-    <!-- The name, centred across the sidebar, level with the sidebar toggle beside it. The fox
-         mascot is the app's icon (and in Settings › About). -->
-    <div class="mb-2 flex h-9 shrink-0 items-center justify-center">
+  <div class="flex h-full flex-col gap-0.5 px-2.5 pb-2.5" style="width: {app.sidebarWidth}px">
+    <!-- The name, in the app bar: centred across the sidebar (beside a Mac's traffic lights and the
+         sidebar toggle, across what is left), level with the toggle. Dragging it moves the window.
+         The fox mascot is the app's icon (and in Settings › About). -->
+    <div class="app-drag mb-1.5 flex h-[var(--bar-h)] shrink-0 items-center justify-center" style="padding-left: var(--bar-left)">
       <span class="font-display text-[17px] leading-none font-medium tracking-[-0.02em] select-none">tomo</span>
     </div>
 
