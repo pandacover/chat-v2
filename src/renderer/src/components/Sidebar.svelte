@@ -9,10 +9,14 @@
   import { shortcut } from '@/lib/keys'
   import { app } from '@/lib/store.svelte'
   import { theme, type ThemePref } from '@/lib/theme.svelte'
+  import BarTitle from './BarTitle.svelte'
   import BotAvatar, { PRESENCE_LABELS } from './BotAvatar.svelte'
   import Icon, { type IconName } from './Icon.svelte'
   import UpdateButton from './UpdateButton.svelte'
   import UsageMeter from './UsageMeter.svelte'
+
+  /** What the bar keeps free at its right end for its actions (BarActions: up to four buttons). */
+  const BAR_ACTIONS_ROOM = 160
 
   let renaming = $state<string | null>(null)
   let confirming = $state<string | null>(null)
@@ -286,7 +290,10 @@
 <!-- One spot for the sidebar toggle, open or closed, so a second click lands on it: in the app bar,
      after a Mac's traffic lights. Nothing marked app-drag may come after it over the same spot, or
      the window takes the click for a drag. -->
-<div class="app-no-drag bar-controls fixed top-0.5 z-[45] flex gap-0.5" style="left: calc(var(--bar-left) + 10px)">
+<div
+  class="app-no-drag bar-controls fixed top-0.5 z-[45] flex min-w-0 gap-0.5"
+  style="left: calc(var(--bar-left) + 10px); max-width: calc(100vw - var(--bar-left) - var(--bar-right) - {BAR_ACTIONS_ROOM}px)"
+>
   <button
     class="icon-btn size-8"
     data-sidebar-toggle
@@ -308,8 +315,16 @@
         <span class="truncate text-[13.5px] font-medium" data-bar-bot-name>{bot.name}</span>
       </span>
     {/if}
+    <!-- And the job, in a job's thread: Tomo › Cat page. -->
+    <BarTitle after={!!app.currentBot} />
   {/if}
 </div>
+{#if app.sidebarOpen}
+  <!-- The job's title over the left edge of the chat, where its header was. -->
+  <div class="fixed top-0.5 z-[45] flex min-w-0" style="left: {app.sidebarWidth + 20}px; right: calc(var(--bar-right) + {BAR_ACTIONS_ROOM}px)">
+    <BarTitle />
+  </div>
+{/if}
 
 <aside
   bind:this={side}

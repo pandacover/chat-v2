@@ -73,8 +73,8 @@
 
 {#if current}
   <section class="flex h-full min-w-0 flex-col" aria-label="Artifact">
-    <!-- Room at the right for the panel toggle, which is also the close control (Esc closes it too). -->
-    <header class="flex h-[52px] shrink-0 items-center gap-1 border-b border-line pr-[46px] pl-2.5">
+    <!-- The panel toggle at the right of the app bar closes it (Esc does too). -->
+    <header class="flex h-[52px] shrink-0 items-center gap-1 border-b border-line pr-2.5 pl-2.5">
       {@render tabs()}
       {#if versions.length > 1}
         <div class="flex shrink-0 items-center font-label text-[11.5px] text-fg-3 tabular-nums">

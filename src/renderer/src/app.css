@@ -200,6 +200,8 @@ body {
   --bar-h: 36px;
   --card-top: calc(var(--bar-h) + 8px);
   --bar-left: 0px;
+  /* Windows' buttons at the right end, as the window controls overlay reports them; none on a Mac. */
+  --bar-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw));
 }
 :root[data-platform='mac'] {
   --bar-left: 72px;

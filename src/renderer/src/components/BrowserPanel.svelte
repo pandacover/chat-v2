@@ -395,8 +395,8 @@
 <svelte:window {onkeydown} />
 
 <section class="flex h-full min-w-0 flex-col" aria-label="Browser">
-  <!-- Room at the right for the panel toggle, which is also the close control. -->
-  <header class="flex h-[52px] shrink-0 items-center gap-0.5 border-b border-line pr-[46px] pl-2.5">
+  <!-- The panel toggle at the right of the app bar closes it. -->
+  <header class="flex h-[52px] shrink-0 items-center gap-0.5 border-b border-line pr-2.5 pl-2.5">
     {@render tabs()}
     <button class="icon-btn size-[26px] shrink-0 !rounded-lg" use:tip={'Screenshot to message'} disabled={isBlank || busyCapture} onclick={screenshot}><Icon name="camera" size={15} /></button>
     <button

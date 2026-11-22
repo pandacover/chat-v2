@@ -1,13 +1,10 @@
 <script lang="ts">
   import { tip } from '@/lib/tooltip'
-  import { dimsBar } from '@/lib/theme.svelte'
   import { tick, untrack } from 'svelte'
   import { isClaudeModel } from '@shared/models'
-  import { fade, fly, pop } from '@/lib/motion'
+  import { fade, fly } from '@/lib/motion'
   import { shortcut } from '@/lib/keys'
   import { app } from '@/lib/store.svelte'
-  import { meter } from '@/lib/meter.svelte'
-  import { jobUsageLine, sharesLine } from '@shared/usage'
   import { clock, voice } from '@/lib/voice.svelte'
   import type { PathNode } from '@shared/types'
   import Composer from './Composer.svelte'
@@ -28,8 +25,6 @@
   let mascotHost: HTMLDivElement | undefined = $state()
   let composer: ReturnType<typeof Composer> | undefined = $state()
   let pinned = $state(true)
-  let promptOpen = $state(false)
-  let promptDraft = $state('')
 
   const view = $derived(app.view)
   // A message to Tomo shows at once, so the conversation isn't empty while it is on its way.
@@ -48,7 +43,6 @@
   const stage = $derived(empty && voice.home !== 'off')
   // A chat from before Claude keeps its old model id; it now runs on the default.
   const model = $derived(isClaudeModel(app.chat.model) ? app.chat.model : (app.settings?.settings.defaultModel ?? ''))
-  const hasOverride = $derived(app.chat.systemPrompt != null)
   /**
    * Messages sent while a reply ran, still waiting: turns after their thread's last reply (the
    * primary's conversation runs across threads, so each thread is looked at on its own). Bots'
@@ -69,17 +63,6 @@
   const jobOf = (node: PathNode) => app.jobByThread.get(node.message.sessionId) ?? (node.jobId ? (app.jobs.find((j) => j.id === node.jobId) ?? null) : null)
   /** A bot's own thread on a job. */
   const worker = $derived(view?.session.kind === 'worker')
-  /** The job the open thread is on, and what it has used (with its estimated share of your plan). */
-  const job = $derived(app.currentJob)
-  $effect(() => {
-    if (job) void meter.loadJob(job.id)
-  })
-  const jobTip = $derived.by(() => {
-    if (!job) return null
-    const parts = [job.usage && job.usage.replies > 0 ? jobUsageLine(job.usage) : '', sharesLine((meter.shares.get(job.id) ?? []).filter((s) => s.percent > 0))]
-    const line = parts.filter(Boolean).join(', ')
-    return [job.status === 'done' ? 'This job is finished; writing here opens it again' : '', line ? `Used ${line}${parts[1] ? ' (an estimate)' : ''}` : ''].filter(Boolean).join(' · ') || null
-  })
   /** Several bots write here: replies say whose they are. */
   const showAuthor = $derived(!app.isPrimary && !!view && (worker || view.path.some((n) => n.message.post)))
   /**
@@ -305,16 +288,6 @@
 
   const mascotState = $derived(voice.phase === 'recording' || voice.phase === 'starting' ? 'listening' : voice.phase === 'transcribing' ? 'thinking' : '')
   const homeVoice = $derived(empty)
-
-  const openPrompt = () => {
-    promptDraft = app.chat.systemPrompt ?? app.primaryBot?.instructions ?? app.settings?.settings.systemPrompt ?? ''
-    promptOpen = true
-  }
-
-  const savePrompt = async (value: string | null) => {
-    promptOpen = false
-    await app.updateSession({ systemPrompt: value })
-  }
 </script>
 
 <section
@@ -323,47 +296,6 @@
   style="background: var(--canvas-glow), var(--canvas)"
   class:voice={stage}
 >
-  <!-- The top bar keeps room for the panel's fixed toggle at the right while the panel is shut (the
-       sidebar's sits in the app bar above). It names the job a thread is on, never the bot: the
-       sidebar shows whose conversation is open, and the app bar does while the sidebar is shut. -->
-  <header
-    class="topbar flex h-[52px] shrink-0 items-center gap-1 pl-4 transition-[opacity,padding] duration-300 ease-out"
-    style="padding-right: {app.panelToggle && !app.panelOpen ? 46 : 12}px"
-  >
-    {#if !app.isPrimary}
-      <span class="min-w-0 truncate pl-1 font-medium" data-chat-title use:tip={jobTip ? { text: jobTip, placement: 'bottom' } : null}>{view?.session.title ?? ''}</span>
-      <!-- With several bots the job bar below says so. -->
-      {#if job?.status === 'done' && !app.team}<span class="mono-label shrink-0 pl-1.5 !text-[10px] !text-fg-4" data-job-finished>Finished</span>{/if}
-    {/if}
-    <span class="flex-1"></span>
-    <!-- The primary's instructions are its bot's, in Settings; a job's thread can have its own. -->
-    {#if !app.isPrimary}
-      <button class="icon-btn relative size-8 {hasOverride ? '!text-fg' : ''}" use:tip={'Instructions for this job'} onclick={openPrompt}>
-        <Icon name="settings" size={16} />
-        {#if hasOverride}<span class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-fg"></span>{/if}
-      </button>
-    {/if}
-    {#if app.settings}
-      {@const onTop = app.settings.settings.alwaysOnTop}
-      <button
-        class="icon-btn size-8 {onTop ? '!text-fg' : ''}"
-        aria-pressed={onTop}
-        use:tip={onTop ? 'Unpin window' : 'Keep on top of other apps'}
-        onclick={() => app.setPinned(!onTop)}
-      >
-        <Icon name="pin" size={16} class="transition-transform duration-200 {onTop ? '' : 'rotate-45'}" />
-      </button>
-    {/if}
-    <button
-      class="icon-btn relative size-8 {app.browserOpen ? '!text-fg' : ''}"
-      use:tip={app.browserOpen ? 'Hide browser' : 'Open browser'}
-      onclick={() => (app.browserOpen && app.activeTab === 'browser' ? app.closeBrowser() : app.openBrowser())}
-    >
-      <Icon name="globe" size={16} />
-      {#if app.control.active}<span class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-blue"></span>{/if}
-    </button>
-  </header>
-
   {#if app.team && !app.isPrimary && view}<JobBar />{/if}
 
   {#if empty}
@@ -387,7 +319,7 @@
     <div class="relative min-h-0 flex-1">
       <!-- The thread runs on under the composer's glass, and fades out in the strip below it. -->
       <div bind:this={scroller} {onscroll} class="h-full overflow-y-auto thread-fade">
-        <div bind:this={thread} class="mx-auto flex max-w-[760px] flex-col gap-6 px-8 pt-4" style="padding-bottom: {dockH + 24}px">
+        <div bind:this={thread} class="mx-auto flex max-w-[760px] flex-col gap-6 px-8 pt-6" style="padding-bottom: {dockH + 24}px">
           {#each shown as node, i (node.message.id)}
             <!-- The last few always render, so a chat opens at its true end. -->
             <MessageItem
@@ -444,7 +376,7 @@
   </div>
 
   {#if empty}
-    <div class="min-h-0 transition-[flex-grow] duration-500 {stage ? 'flex-[0]' : 'flex-1 pb-[52px]'}"></div>
+    <div class="min-h-0 transition-[flex-grow] duration-500 {stage ? 'flex-[0]' : 'flex-1'}"></div>
 
     <!-- The voice stage on a new chat. -->
     <div
@@ -482,31 +414,6 @@
 
 <SelectionReply {scroller} onreply={(block) => composer?.append(block)} />
 
-{#if promptOpen}
-  <div class="fixed inset-0 z-50 grid place-items-center p-6" role="dialog" aria-modal="true" aria-label="Chat instructions">
-    <button use:dimsBar class="absolute inset-0 bg-scrim backdrop-blur-[4px]" aria-label="Close" transition:fade={{ duration: 150 }} onclick={() => (promptOpen = false)}></button>
-    <div class="glass-strong relative w-full max-w-lg rounded-[20px] p-6" transition:pop>
-      <h2 class="font-display text-[22px] leading-tight font-normal tracking-[-0.02em]">Instructions for this job</h2>
-      <p class="mt-1 text-[13.5px] text-fg-3">Replace {app.primaryBot?.name ?? 'Tomo'}'s instructions in this job only.</p>
-      <!-- svelte-ignore a11y_autofocus -->
-      <textarea
-        autofocus
-        bind:value={promptDraft}
-        rows="9"
-        class="mt-4 w-full resize-y rounded-[10px] bg-[var(--glass-bg)] px-3 py-2.5 font-mono text-[12.5px] leading-relaxed shadow-[inset_0_0_0_1px_var(--line)] outline-none focus:shadow-[inset_0_0_0_1px_var(--line-2)]"
-        onkeydown={(e) => e.key === 'Escape' && (promptOpen = false)}
-      ></textarea>
-      <div class="mt-4 flex items-center gap-2">
-        {#if hasOverride}
-          <button class="btn quiet" onclick={() => savePrompt(null)}>Use {app.primaryBot?.name ?? 'Tomo'}'s</button>
-        {/if}
-        <button class="btn ml-auto" onclick={() => (promptOpen = false)}>Cancel</button>
-        <button class="btn solid" onclick={() => savePrompt(promptDraft)}>Save</button>
-      </div>
-    </div>
-  </div>
-{/if}
-
 <style>
   .fadeable {
     transition:
@@ -516,10 +423,6 @@
   .canvas.voice .fadeable {
     opacity: 0;
     transform: translateY(-8px);
-  }
-  .canvas.voice .topbar {
-    opacity: 0;
-    pointer-events: none;
   }
   /* Lines that scroll past the composer fade out in the strip below it. */
   .thread-fade {

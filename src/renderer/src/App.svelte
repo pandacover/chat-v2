@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte'
   import ArtifactPanel from './components/ArtifactPanel.svelte'
+  import BarActions from './components/BarActions.svelte'
   import BrowserPanel from './components/BrowserPanel.svelte'
   import ChatView from './components/ChatView.svelte'
   import FindModal from './components/FindModal.svelte'
@@ -10,7 +11,6 @@
   import { modKey } from './lib/keys'
   import { ease, fade, fly } from './lib/motion'
   import { app } from './lib/store.svelte'
-  import { tip } from './lib/tooltip'
 
   let ready = $state(false)
   let resizing = $state(false)
@@ -170,20 +170,9 @@
     </main>
   </div>
 
-  {#if app.panelToggle && app.page === 'chat'}
-    <!-- The sidebar toggle mirrored: one spot whether the panel is open or shut, and it is the
-         panel's close control too. The chat's top bar and the panel's header keep room for it. -->
-    <button
-      class="icon-btn fixed top-[calc(var(--card-top)+10px)] right-5 z-[45] size-8"
-      aria-pressed={app.panelOpen}
-      data-panel-toggle
-      use:tip={app.panelOpen ? 'Hide panel' : app.latestArtifact ? 'Show artifact' : 'Show panel'}
-      onclick={() => app.togglePanel()}
-      transition:fade={{ duration: 160 }}
-    >
-      <Icon name="sidebar" size={16} class="-scale-x-100" />
-    </button>
-  {/if}
+  <!-- The app bar's right end: the conversation's and the window's actions, and the panel toggle.
+       After the bar's drag strip in the page, so its buttons take clicks (app.css). -->
+  <BarActions />
 
   {#if app.page === 'settings' && app.settings}
     <SettingsPage />
