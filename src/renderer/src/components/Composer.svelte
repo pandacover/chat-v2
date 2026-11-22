@@ -48,8 +48,9 @@
   const busy = $derived(app.streaming)
   // A test, not text.trim(): that copied the whole draft on every key, and a paste can be megabytes.
   const hasText = $derived(/\S/.test(text))
-  // Talking to Tomo, a reply running in one job doesn't hold up a message for another: nothing pauses.
-  const sendsWhileBusy = $derived(app.isPrimary && (hasText || app.draftAttachments.length > 0))
+  // Nothing waits on a reply: a message sent while one runs (to Tomo, in a job or a bot's own
+  // thread) is queued and answered as soon as it ends.
+  const sendsWhileBusy = $derived((app.isPrimary || !!app.view?.session.jobId) && (hasText || app.draftAttachments.length > 0))
   const canSend = $derived((hasText || app.draftAttachments.length > 0) && uploading === 0 && app.analyzing.size === 0 && (!busy || sendsWhileBusy))
   // While a Show-me step waits, a message answers it (the reply goes on); attachments stay in the draft.
   const answering = $derived(app.teaching && hasText)

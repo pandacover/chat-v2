@@ -92,13 +92,16 @@ export const parseRoute = (reply: string, jobs: readonly Job[]): Route | null =>
 }
 
 /**
- * Whether a reply did work worth a job of its own: a step other than searching memory, an
- * artifact, or a file it made. Small talk does none of these.
+ * Whether a reply did work worth a job of its own: a step other than searching memory or handing
+ * work to the bots (that makes its own job), an artifact, or a file it made. Small talk does none
+ * of these.
  */
 export const didWork = (content: string, files = 0): boolean =>
   files > 0 ||
   /<artifact[\s>]/.test(content) ||
-  splitSteps(content).some((s) => s.type === 'steps' && s.steps.some((x) => !x.tool.startsWith('memory_') && !x.tool.startsWith('notes_')))
+  splitSteps(content).some(
+    (s) => s.type === 'steps' && s.steps.some((x) => !x.tool.startsWith('memory_') && !x.tool.startsWith('notes_') && !x.tool.startsWith('team_'))
+  )
 
 export const SUMMARY_INSTRUCTIONS = `You keep a one-line status for a job: one piece of work a user has going with their assistant. You get the job's title, its status line so far (if any), and its latest exchange. Reply with the new status line alone: one sentence of at most 20 words saying where the job stands (what was done or decided, and what is next if anything), in the conversation's language. No quotes, no lead-in like "Status:".`
 

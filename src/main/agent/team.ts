@@ -5,8 +5,12 @@
 //   start_job(bot, task)   primary only: opens a job (or a sub-task of the current one) for a bot
 //   message(text, to)      posts in a job's shared thread, to one bot or everyone; naming a bot
 //                          not on the job brings it in
-//   wait(thread, bot)      waits for a report (or any post) addressed to the caller, with a timeout
 //   list_jobs()            open jobs: title, status, owner, bots on it, one-line summary
+//
+// No one waits. The app carries what bots say between threads: a post to a bot is its next turn
+// (held while it is mid-reply), and a report or message to the primary is a turn in the primary's
+// own conversation. So a bot hands work off or asks for help, ends its reply, and the answer
+// arrives as a turn of its own.
 //
 // Workers never open jobs and post only in the job they were given, so every job sits one level
 // under the primary. There are no side channels: everything bots say to each other is a post in
@@ -17,10 +21,6 @@ import type { Step } from '@shared/steps'
 import type { Bot } from '@shared/types'
 import { MODULES } from '@shared/rules'
 import type { RunContext, ToolModuleFactory } from './module'
-
-/** How long `wait` waits by default, and at most. */
-export const WAIT_DEFAULT_S = 600
-export const WAIT_MAX_S = 3600
 
 /** What a tool call comes to: the text the model gets, and the step line the user sees. */
 export interface TeamResult {
@@ -35,11 +35,10 @@ export interface TeamDeps {
   readonly who: (ctx: RunContext) => { me: Bot; primary: Bot; bots: Bot[] }
   readonly startJob: (ctx: RunContext, input: { bot: string; task: string; title?: string | undefined; subTask?: boolean | undefined }) => Promise<TeamResult>
   readonly message: (ctx: RunContext, input: { text: string; to?: string | undefined; thread?: string | undefined }, signal: AbortSignal) => Promise<TeamResult>
-  readonly wait: (ctx: RunContext, input: { thread?: string | undefined; bot?: string | undefined; timeoutSeconds?: number | undefined }, signal: AbortSignal) => Promise<TeamResult>
   readonly listJobs: (ctx: RunContext) => Promise<TeamResult>
 }
 
-const LOAD = 'ToolSearch "select:mcp__team__start_job,mcp__team__message,mcp__team__wait,mcp__team__list_jobs"'
+const LOAD = 'ToolSearch "select:mcp__team__start_job,mcp__team__message,mcp__team__list_jobs"'
 
 /** One line per bot for the prompt: its name, what it is for (its instructions' first line), its tool modules. */
 export const rosterLines = (bots: readonly Bot[], me: Bot) =>
@@ -56,17 +55,17 @@ export const rosterLines = (bots: readonly Bot[], me: Bot) =>
 export const teamInstructions = (me: Bot, primary: Bot, bots: readonly Bot[]) =>
   me.isPrimary
     ? `You lead a team of bots who work for the user. Load the team tools with ${LOAD}.
-- start_job(bot, task, title): opens a new job for one of your bots and hands it the task (sub_task: true makes it part of the job you are in). The bot works on it in its own thread, in parallel, and reports back. Hand over any task that suits a bot better or will take long, write work included; you don't need to ask the user first.
-- message(text, to, thread): posts in a job's shared thread, to one bot or to everyone on it. Naming a bot not on the job brings it in.
-- wait(thread, bot): waits for a bot's report. Wait when you need the result to answer the user; otherwise tell the user who is on it and carry on: the report reaches the user as a card either way.
+- start_job(bot, task, title): opens a new job for one of your bots and hands it the task (sub_task: true makes it part of the job you are in). The bot works on it in its own thread, in parallel. Hand over any task that suits a bot better or will take long, write work included; you don't need to ask the user first.
+- message(text, to, thread): posts in a job's shared thread, to one bot or to everyone on it. Naming a bot not on the job brings it in. In your conversation with the user, name the job with thread (its job_id).
 - list_jobs(): the open jobs, their bots and where each stands.
+Once you hand work off you don't track it or wait for it: tell the user who is on it and carry on with them. When a bot reports back or writes to you, it arrives in your conversation with the user as a turn of its own, a <from_bot> message naming the bot, whether it is a report or a message, and its job. The user sees it there as a card just above your reply, so don't repeat it: tell them the outcome in a sentence or two and anything they need to do or decide, and if the task calls for a next step, take it.
 Everything bots say to each other is in the job's shared thread, which you and the user can read. Give each bot a whole, self-contained task: it can't see this conversation.
 Your bots:
 ${rosterLines(bots, me)}`
     : `You are ${me.name}, one of the user's bots. ${primary.name}, the primary bot, hands you work on a job; this conversation is your own thread on it, where ${primary.name}, other bots and the user may write to you. Your reply to each message is your report: it goes back to whoever wrote to you, and the user sees it, so make it complete and say what is left. Load the team tools with ${LOAD}.
 - message(text, to): posts in your job's shared thread, to one bot or to everyone on it; naming a bot not on the job brings it in. Use it to ask another bot for help or to tell ${primary.name} how it's going.
-- wait(bot): waits for a bot to answer you.
 - list_jobs(): the user's open jobs.
+No one waits on anyone. When you ask another bot for something, end your reply there: its answer arrives as your next turn, and your reply to that is your report. Anything written to you while you work comes as a turn after your reply.
 You can't open jobs, and you post only in the job you were given: if the work needs a job of its own, say so to ${primary.name}. A request to a bot that can do more than you waits for the user's OK first.
 The other bots:
 ${rosterLines(bots, me)}`
@@ -89,7 +88,7 @@ export const teamModule =
     const { me, primary, bots } = deps.who(ctx)
     const startJob = tool(
       'start_job',
-      `Primary only. Opens a job for one of the user's bots and hands it a task; the bot starts on it at once, in its own thread, and reports back.`,
+      `Primary only. Opens a job for one of the user's bots and hands it a task; the bot starts on it at once, in its own thread, and its report arrives in your conversation with the user when it is done.`,
       {
         bot: z.string().describe("The bot's name"),
         task: z.string().describe('The whole task, self-contained: the bot sees nothing else'),
@@ -101,7 +100,7 @@ export const teamModule =
     )
     const message = tool(
       'message',
-      "Posts in a job's shared thread, addressed to one bot or to everyone on the job. Naming a bot not on the job brings it in.",
+      "Posts in a job's shared thread, addressed to one bot or to everyone on the job. Naming a bot not on the job brings it in. The answer arrives as a turn of its own after your reply: don't wait for it.",
       {
         text: z.string().describe('The message'),
         to: z.string().optional().describe('The bot it is for, by name, or "everyone" (the default)'),
@@ -109,17 +108,6 @@ export const teamModule =
       },
       (a) => guarded(ctx, () => deps.message(ctx, { text: a.text, to: a.to, thread: a.thread }, ctx.signal)),
       { searchHint: 'message: post to a bot, ask another bot, reply in the shared thread of a job' }
-    )
-    const wait = tool(
-      'wait',
-      `Waits for a report or message addressed to you in a job's shared thread, and returns it. Returns at once with anything that came since you last looked; otherwise waits up to the timeout (default ${WAIT_DEFAULT_S} s).`,
-      {
-        thread: z.string().optional().describe('The job, by its id; the one this conversation is on when left out'),
-        bot: z.string().optional().describe('Only from this bot, by name'),
-        timeout_seconds: z.number().optional().describe(`How long to wait, at most ${WAIT_MAX_S}`)
-      },
-      (a) => guarded(ctx, () => deps.wait(ctx, { thread: a.thread, bot: a.bot, timeoutSeconds: a.timeout_seconds }, ctx.signal)),
-      { searchHint: 'wait: wait for a bot to report back, get the result of a job', annotations: { readOnlyHint: true } }
     )
     const listJobs = tool(
       'list_jobs',
@@ -131,6 +119,6 @@ export const teamModule =
     return {
       name: 'team',
       instructions: teamInstructions(me, primary, bots),
-      server: createSdkMcpServer({ name: 'team', version: '1.0.0', tools: [startJob, message, wait, listJobs] })
+      server: createSdkMcpServer({ name: 'team', version: '1.0.0', tools: [startJob, message, listJobs] })
     }
   }

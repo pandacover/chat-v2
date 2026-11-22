@@ -344,6 +344,8 @@ export interface PathNode {
   message: Message
   siblingIds: string[]
   siblingIndex: number
+  /** In the primary's conversation: the job a bot's report or message there (and the answer to it) is about. */
+  jobId?: string | null
 }
 
 export interface SessionView {

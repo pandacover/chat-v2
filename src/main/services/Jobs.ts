@@ -120,22 +120,22 @@ export class Jobs extends Context.Service<
           return made
         })
 
-      /** Puts a turn in a job's thread (made for it when the route is new), or the primary's own, and starts its reply. */
+      /**
+       * Puts a turn in a job's thread (made for it when the route is new), or the primary's own, and
+       * starts its reply; while a reply still runs there, the turn waits and is answered after it.
+       */
       const deliver = (primarySession: Session, route: Route, input: { text: string; attachmentIds: string[] }) =>
         Effect.gen(function* () {
           const target = yield* db.use((d) => {
-            // No job: the primary's own conversation, unless a reply still runs there (then it gets a job).
-            if (route.kind === 'chat' && d.streamingIds(primarySession.id).length === 0)
-              return { thread: primarySession, created: null as string | null, title: primarySession.title }
+            // No job: the primary's own conversation.
+            if (route.kind === 'chat') return { thread: primarySession, created: null as string | null }
             const job = route.kind === 'job' ? d.getJob(route.jobId) : undefined
             const thread = job?.threadId ? d.getSession(job.threadId) : undefined
-            if (thread) return { thread, created: null as string | null, title: job!.title }
+            if (thread) return { thread, created: null as string | null }
             const title = (route.kind === 'new' && route.title ? cleanTitle(route.title) : null) ?? NEW_SESSION_TITLE
             const made = d.createJob({ title, botId: d.primaryBot().id })
-            return { thread: made.thread, created: made.job.id, title }
+            return { thread: made.thread, created: made.job.id }
           })
-          const busy = yield* db.use((d) => d.streamingIds(target.thread.id).length > 0)
-          if (busy) return yield* new InvalidInput({ message: `Still answering in “${target.title}”. Wait for that reply or stop it, then send again.` })
           const parentId = yield* db.use((d) => d.activePath(target.thread).at(-1)?.message.id ?? target.thread.rootId)
           const view = yield* chat.send({ sessionId: target.thread.id, parentId, text: input.text, attachmentIds: input.attachmentIds }).pipe(
             // A job made for a message that didn't go through isn't left behind empty.
@@ -191,18 +191,24 @@ export class Jobs extends Context.Service<
                 return job?.threadId ? (d.getSession(job.threadId) ?? null) : null
               })
             : null
+        // A message still waiting for its answer (held while a reply ran) moves alone, and is
+        // answered where it lands; the reply it waited for goes on.
+        const child = message.activeChildId ? yield* db.use((d) => d.getMessage(message.activeChildId!) ?? null) : null
+        const held = !child || !!child.post
         if (typeof input.target === 'object') {
           if (!into) return yield* new InvalidInput({ message: 'That job is gone.' })
           const busy = yield* db.use((d) => d.streamingIds(into.id).length > 0)
-          if (busy) return yield* new InvalidInput({ message: `Still answering in “${into.title}”. Wait for that reply or stop it, then move your message.` })
+          if (busy && !held) return yield* new InvalidInput({ message: `Still answering in “${into.title}”. Wait for that reply or stop it, then move your message.` })
         }
         // A reply still running stops where it is, and moves as it is.
-        for (const id of yield* db.use((d) => d.streamingIds(from.id))) yield* chat.stop(id)
+        if (!held) for (const id of yield* db.use((d) => d.streamingIds(from.id))) yield* chat.stop(id)
         // Stopping it may have filed it as a job already (fileWork): moved from where it is now.
         const at = yield* db.require('Session', (d) => d.getSession(d.getMessage(message.id)?.sessionId ?? from.id))
         if (at.id === into?.id) return yield* primary
-        yield* fileTurn(message.id, at, into ?? (yield* jobFor(message.content)).thread)
-        yield* resummarize(message.id)
+        const dest = into ?? (yield* jobFor(message.content)).thread
+        yield* fileTurn(message.id, at, dest)
+        if (held) yield* chat.drain(dest.id).pipe(Effect.ignore)
+        else yield* resummarize(message.id)
         return yield* primary
       })
 
@@ -331,12 +337,15 @@ export class Jobs extends Context.Service<
             const thread = reply ? d.getSession(reply.sessionId) : undefined
             if (!reply?.parentId || thread?.kind !== 'primary' || !didWork(reply.content, reply.attachments.length)) return null
             const user = d.getMessage(reply.parentId)
-            if (user?.role !== 'user' || d.activePath(thread).at(-1)?.message.id !== reply.id) return null
+            // The primary's answer to a bot's report is about that bot's job already: it stays here.
+            if (user?.role !== 'user' || user.authorBotId || d.activePath(thread).at(-1)?.message.id !== reply.id) return null
             return { thread, user }
           })
           if (!info) return
           const made = yield* jobFor(info.user.content)
           yield* fileTurn(info.user.id, info.thread, made.thread)
+          // Messages held after the reply moved with it: answered in the job.
+          yield* chat.drain(made.thread.id).pipe(Effect.ignore)
         })
 
       const unsubscribe = chat.onReplyEnd(({ messageId, status }) => {

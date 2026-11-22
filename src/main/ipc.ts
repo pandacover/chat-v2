@@ -218,7 +218,15 @@ const handlers: Record<string, Handler> = {
     Chat.use((chat) =>
       chat.continue({ sessionId: str(input.sessionId, 'sessionId'), assistantId: str(input.assistantId, 'assistantId') })
     ),
-  'chat:stop': (messageId) => Chat.use((chat) => chat.stop(str(messageId, 'messageId'))),
+  // The user's Stop ends the reply; messages held behind it are answered next.
+  'chat:stop': (messageId) =>
+    Effect.gen(function* () {
+      const chat = yield* Chat
+      const id = str(messageId, 'messageId')
+      const sessionId = yield* (yield* Db).use((d) => d.getMessage(id)?.sessionId ?? null)
+      yield* chat.stop(id)
+      if (sessionId) yield* chat.drain(sessionId).pipe(Effect.ignore)
+    }),
   'chat:switchBranch': (input) =>
     Chat.use((chat) =>
       chat.switchBranch({ sessionId: str(input.sessionId, 'sessionId'), messageId: str(input.messageId, 'messageId') })
