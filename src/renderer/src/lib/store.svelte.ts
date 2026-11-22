@@ -94,7 +94,8 @@ class AppState {
   currentJob = $derived.by<Job | null>(() => {
     const view = this.view
     if (!view) return null
-    if (!this.isPrimary) return this.jobByThread.get(view.session.id) ?? null
+    // A job's thread, or a bot's own thread on it.
+    if (!this.isPrimary) return this.jobByThread.get(view.session.id) ?? this.jobs.find((j) => j.id === view.session.jobId) ?? null
     const t = this.target
     if (typeof t === 'object') return this.jobs.find((j) => j.id === t.jobId) ?? null
     const last = view.path.at(-1)?.message
@@ -411,6 +412,32 @@ class AppState {
     return bots !== undefined
   }
 
+  /** A new worker bot; resolves to it. */
+  async createBot(patch: BotPatch = {}) {
+    const bots = await this.attempt(() => api.bots.create(patch))
+    if (!bots) return null
+    this.bots = bots
+    return bots.at(-1) ?? null
+  }
+
+  async removeBot(id: string) {
+    const bots = await this.attempt(() => api.bots.remove(id))
+    if (bots) this.bots = bots
+    await this.refreshSessions()
+  }
+
+  async setPrimary(id: string) {
+    const bots = await this.attempt(() => api.bots.setPrimary(id))
+    if (bots) this.bots = bots
+    await this.refreshSessions()
+    if (this.isPrimary) await this.reloadPrimary()
+  }
+
+  /** A bot's latest thread of its own (on its newest job), or null when it has none yet. */
+  latestThreadOf(botId: string): Session | null {
+    return this.sessions.filter((s) => s.kind === 'worker' && s.botId === botId).sort((a, b) => b.updatedAt - a.updatedAt)[0] ?? null
+  }
+
   private jobsTimer: ReturnType<typeof setTimeout> | undefined
   async refreshJobs() {
     clearTimeout(this.jobsTimer)
@@ -511,6 +538,10 @@ class AppState {
     if (view.session.kind === 'primary') this.primaryId = view.session.id
     if (this.view?.session.id !== view.session.id) this.artifact = null
     this.view = view
+    // A job's thread, or a bot's own thread on it: the job bar shows its bots and notes.
+    const jobId = view.session.kind === 'primary' ? null : view.session.jobId
+    if (jobId !== this.jobDetail?.job.id) this.jobDetail = null
+    if (jobId && this.team) void this.loadJobDetail(jobId)
     for (const node of view.path) {
       if (node.message.status === 'streaming') void this.backfill(node.message.id)
     }
@@ -770,7 +801,8 @@ class AppState {
   async loadJobDetail(jobId: string | null) {
     if (!jobId) return void (this.jobDetail = null)
     const detail = await this.attempt(() => api.jobs.detail(jobId))
-    if (detail && (this.currentJob?.id ?? this.workerJobId) === jobId) this.jobDetail = detail
+    const open = this.view?.session
+    if (detail && open && open.kind !== 'primary' && open.jobId === jobId) this.jobDetail = detail
   }
 
   /** The job a bot's own thread is on, when one is open. */

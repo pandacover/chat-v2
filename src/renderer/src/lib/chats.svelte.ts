@@ -1,5 +1,5 @@
 // The job list, as the sidebar and the search modal both show it: jobs with an unsent draft first,
-// then pinned ones, then open jobs, then finished ones by day. (Jobs replace chats; a job opens on
+// then pinned ones, then open jobs (by owner, once there are several bots), then finished ones by day. (Jobs replace chats; a job opens on
 // its thread, which is the chat it was.)
 import type { Job, Session } from '@shared/types'
 import { app, draftTitle } from './store.svelte'
@@ -19,6 +19,8 @@ export interface Entry {
 }
 
 export type Group = 'Drafts' | 'Pinned' | 'Open' | 'Today' | 'Yesterday' | 'This week' | 'Earlier'
+/** A group's label: one of GROUPS, or with several bots, an owner's open jobs ("Open · Scout"). */
+export type GroupLabel = Group | `Open · ${string}`
 export const GROUPS: Group[] = ['Drafts', 'Pinned', 'Open', 'Today', 'Yesterday', 'This week', 'Earlier']
 
 export const entries = (): Entry[] => {
@@ -38,14 +40,21 @@ export const groupOf = (e: Entry, today = new Date().setHours(0, 0, 0, 0)): Grou
 }
 
 /** Every group with its rows, in order; empty groups left out. */
-export const grouped = (list: Entry[]): Array<[Group, Entry[]]> => {
+export const grouped = (list: Entry[]): Array<[GroupLabel, Entry[]]> => {
   const today = new Date().setHours(0, 0, 0, 0)
   const by = new Map<Group, Entry[]>(GROUPS.map((g) => [g, []]))
   for (const e of list) by.get(groupOf(e, today))!.push(e)
   const draftAt = (e: Entry) => app.drafts.get(e.key)?.at ?? Number.MAX_SAFE_INTEGER
   by.get('Drafts')!.sort((a, b) => draftAt(b) - draftAt(a))
   by.get('Pinned')!.sort((a, b) => a.session!.pinnedAt! - b.session!.pinnedAt!)
-  return GROUPS.map((g) => [g, by.get(g)!] as [Group, Entry[]]).filter(([, rows]) => rows.length > 0)
+  const groups = GROUPS.map((g) => [g, by.get(g)!] as [GroupLabel, Entry[]]).filter(([, rows]) => rows.length > 0)
+  if (!app.team) return groups
+  // Several bots: open jobs by the bot that owns them, the primary's first.
+  const owners = app.bots.flatMap((b): Array<[GroupLabel, Entry[]]> => {
+    const rows = by.get('Open')!.filter((e) => e.job.ownerBotId === b.id || (b.isPrimary && !app.bots.some((x) => x.id === e.job.ownerBotId)))
+    return rows.length ? [[`Open · ${b.name}`, rows]] : []
+  })
+  return groups.flatMap((g) => (g[0] === 'Open' ? owners : [g]))
 }
 
 /** Opens a row: its job's thread. */

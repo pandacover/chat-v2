@@ -2,10 +2,24 @@
 import { app } from './store.svelte'
 
 let wanted: string | null = null
+let wantedBot: string | null = null
 
 export const openSettingsAt = (tab: string) => {
   wanted = tab
   app.settingsOpen = true
+}
+
+/** Settings › Bots, on one bot. */
+export const openBotSettings = (botId: string) => {
+  wantedBot = botId
+  openSettingsAt('bots')
+}
+
+/** The bot Settings › Bots was asked to show, once. */
+export const takeSettingsBot = (): string | null => {
+  const id = wantedBot
+  wantedBot = null
+  return id
 }
 
 /** The tab Settings was asked to open on, once. */
