@@ -383,6 +383,39 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
       }
     })
 
+  /**
+   * Files a user turn and everything under it (its replies) at the end of another thread, as they
+   * are: nothing is answered again. The turn's replies keep their Claude Code checkpoints only
+   * when `keepCheckpoints` (the new thread then carries on from that session, as the turn's own
+   * conversation had it); otherwise the next reply there resumes the thread's own session and
+   * reads the moved turn as text. Their session is kept either way, so the thread they left forks
+   * it instead of writing over them. The job the turn lands in is open again and the newest.
+   */
+  const refileTurn = (messageId: string, threadId: string, keepCheckpoints: boolean) =>
+    transaction(() => {
+      const turn = one<{ parent_id: string | null; session_id: string }>('select parent_id, session_id from messages where id = ?', messageId)
+      const thread = getSession(threadId)
+      if (!turn?.parent_id || !thread || turn.session_id === threadId) return
+      const parentId = leafOf(thread)
+      const ids = JSON.stringify(
+        all<{ id: string }>(
+          `with recursive sub(id) as (select ? union all select m.id from messages m join sub on m.parent_id = sub.id) select id from sub`,
+          messageId
+        ).map((r) => r.id)
+      )
+      run('update messages set session_id = ? where id in (select value from json_each(?))', threadId, ids)
+      if (!keepCheckpoints) run('update messages set agent_uuid = null where id in (select value from json_each(?))', ids)
+      run('update messages set parent_id = ? where id = ?', parentId, messageId)
+      run('update messages set active_child_id = ? where id = ?', messageId, parentId)
+      // The thread it left shows its newest remaining child there, or none.
+      run(
+        `update messages set active_child_id = (select id from messages c where c.parent_id = messages.id order by c.seq desc limit 1) where id = ?`,
+        turn.parent_id
+      )
+      run('update sessions set updated_at = ? where id = ?', Date.now(), threadId)
+      if (thread.jobId) run(`update jobs set status = 'open' where id = ? and status != 'open'`, thread.jobId)
+    })
+
   /** Whether a thread has nothing in it but its root. */
   const threadEmpty = (sessionId: string) => !one(`select 1 from messages where session_id = ? and role != 'root'`, sessionId)
 
@@ -621,6 +654,7 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
       return row ? { messageId: row.id, sessionId: row.session_id, jobId: row.job_id } : null
     },
     removeTurn,
+    refileTurn,
     threadEmpty,
     /** Jobs that lost every thread (an empty one cleared at startup). */
     pruneOrphanJobs: (): number => Number(run('delete from jobs where not exists (select 1 from sessions s where s.job_id = jobs.id)').changes)

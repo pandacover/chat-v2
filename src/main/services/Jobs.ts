@@ -2,16 +2,18 @@
 //
 // The user talks to the primary bot; each message goes to a job's thread, picked by the router
 // (or by the user with the job chip), and runs there as a chat turn always has: the thread's own
-// Claude Code session, branches, artifacts. The primary's conversation is read back from those
-// turns. After each reply the job's one-line summary is brought up to date by the small model.
+// Claude Code session, branches, artifacts. Small talk goes to no job: it runs in the primary's
+// own conversation, and is filed as a new job once a reply there does work. The primary's
+// conversation is read back from all those turns. After each reply the job's one-line summary is
+// brought up to date by the small model.
 import { Cause, Context, Effect, FiberMap, Layer } from 'effect'
 import type { JobStatus, JobTarget, Session, SessionView, Settings } from '@shared/types'
 import { type ConfigError, type DbError, InvalidInput, type MissingApiKey, type NotFound, ProviderError, errorMessage } from '../errors'
 import { Agent, type Auth } from '../agent/driver'
 import { ComputerUse } from '../computer'
-import { ROUTER_INSTRUCTIONS, type Route, SUMMARY_INSTRUCTIONS, candidates, cleanSummary, parseRoute, routerPrompt, summaryPrompt } from '../jobs'
+import { ROUTER_INSTRUCTIONS, type Route, SUMMARY_INSTRUCTIONS, candidates, cleanSummary, didWork, parseRoute, routerPrompt, summaryPrompt } from '../jobs'
 import { Attachments } from './Attachments'
-import { Broadcaster, Chat, NEW_SESSION_TITLE, cleanTitle } from './Chat'
+import { Broadcaster, Chat, NEW_SESSION_TITLE, TITLE_INSTRUCTIONS, TITLE_SOURCE_CHARS, cleanTitle, titleFrom } from './Chat'
 import { Db } from './Db'
 import { SettingsStore } from './SettingsStore'
 
@@ -24,7 +26,7 @@ export class Jobs extends Context.Service<
     readonly primary: Effect.Effect<SessionView, DbError>
     /** Sends the primary a message: routes it to a job (or the one asked for) and starts the reply there. */
     readonly send: (input: { text: string; attachmentIds: string[]; target: JobTarget }) => Effect.Effect<SessionView, JobsError>
-    /** Moves the primary's newest turn to another job (or a new one), replies and all: a wrong guess put right. */
+    /** Files the primary's newest turn in another job (or a new one), replies and all, without answering it again: a wrong guess put right. */
     readonly move: (input: { messageId: string; target: 'new' | { jobId: string } }) => Effect.Effect<SessionView, JobsError>
     /** Marks a job finished (filing it in memory's archive) or open again. */
     readonly setStatus: (jobId: string, status: JobStatus) => Effect.Effect<void, DbError>
@@ -70,7 +72,8 @@ export class Jobs extends Context.Service<
 
       /**
        * Where a message to the primary goes. The job the last message went to is the current one; with
-       * no small model, or when the router fails, the message stays there.
+       * no small model, or when the router fails, the message stays there. Even with no jobs yet the
+       * router is asked, as a first "Hi" belongs to no job.
        */
       const decide = (primaryId: string, text: string, files: string[]) =>
         Effect.gen(function* () {
@@ -78,7 +81,6 @@ export class Jobs extends Context.Service<
           const currentId = last?.jobId && jobs.some((j) => j.id === last.jobId) ? last.jobId : null
           const list = candidates(jobs, currentId)
           const fallback: Route = currentId ? { kind: 'job', jobId: currentId } : { kind: 'new', title: null }
-          if (list.length === 0) return fallback
           const settings = yield* settingsStore.get.pipe(Effect.orElseSucceed(() => null))
           if (!settings?.titleModel) return fallback
           const exchange = last
@@ -96,10 +98,35 @@ export class Jobs extends Context.Service<
           return parseRoute(reply, list) ?? fallback
         })
 
-      /** Puts a turn in a job's thread (made for it when the route is new) and starts its reply. */
+      // Names a job made without a title (from the start of its first message until the small model replies).
+      const naming = yield* FiberMap.make<string>()
+      const nameJob = (threadId: string, placeholder: string, text: string) =>
+        Effect.gen(function* () {
+          const settings = yield* settingsStore.get.pipe(Effect.orElseSucceed(() => null))
+          if (!settings?.titleModel) return
+          const reply = yield* ask(settings.titleModel, TITLE_INSTRUCTIONS, `<message>\n${text.slice(0, TITLE_SOURCE_CHARS)}\n</message>`, '30 seconds')
+          const title = cleanTitle(reply)
+          if (!title || !(yield* db.use((d) => d.retitle(threadId, placeholder, title)))) return
+          broadcaster.send({ type: 'title', sessionId: threadId, title })
+          changed()
+        }).pipe(Effect.ignore)
+
+      /** A new job for a turn that is already written (moved or filed), named after its message. */
+      const jobFor = (text: string) =>
+        Effect.gen(function* () {
+          const placeholder = titleFrom(text || 'Attachment')
+          const made = yield* db.use((d) => d.createJob({ title: placeholder, botId: d.primaryBot().id }))
+          yield* FiberMap.run(naming, made.thread.id, nameJob(made.thread.id, placeholder, text))
+          return made
+        })
+
+      /** Puts a turn in a job's thread (made for it when the route is new), or the primary's own, and starts its reply. */
       const deliver = (primarySession: Session, route: Route, input: { text: string; attachmentIds: string[] }) =>
         Effect.gen(function* () {
           const target = yield* db.use((d) => {
+            // No job: the primary's own conversation, unless a reply still runs there (then it gets a job).
+            if (route.kind === 'chat' && d.streamingIds(primarySession.id).length === 0)
+              return { thread: primarySession, created: null as string | null, title: primarySession.title }
             const job = route.kind === 'job' ? d.getJob(route.jobId) : undefined
             const thread = job?.threadId ? d.getSession(job.threadId) : undefined
             if (thread) return { thread, created: null as string | null, title: job!.title }
@@ -157,22 +184,25 @@ export class Jobs extends Context.Service<
           return yield* new InvalidInput({ message: 'Only the last message you sent can be moved to another job.' })
         const from = yield* db.require('Session', (d) => d.getSession(message.sessionId))
         if (typeof input.target === 'object' && input.target.jobId === from.jobId) return yield* primary
+        const into =
+          typeof input.target === 'object'
+            ? yield* db.use((d) => {
+                const job = d.getJob((input.target as { jobId: string }).jobId)
+                return job?.threadId ? (d.getSession(job.threadId) ?? null) : null
+              })
+            : null
+        if (typeof input.target === 'object') {
+          if (!into) return yield* new InvalidInput({ message: 'That job is gone.' })
+          const busy = yield* db.use((d) => d.streamingIds(into.id).length > 0)
+          if (busy) return yield* new InvalidInput({ message: `Still answering in “${into.title}”. Wait for that reply or stop it, then move your message.` })
+        }
+        // A reply still running stops where it is, and moves as it is.
         for (const id of yield* db.use((d) => d.streamingIds(from.id))) yield* chat.stop(id)
-        const route: Route = input.target === 'new' ? { kind: 'new', title: null } : { kind: 'job', jobId: input.target.jobId }
-        // Sent again first: its attachments are copied onto the new turn before the old one goes.
-        yield* deliver(primarySession, route, { text: message.content, attachmentIds: message.attachments.map((a) => a.id) })
-        const orphans = yield* db.use((d) => {
-          const gone = d.removeTurn(message.id)
-          // A job made for this message alone goes with it.
-          if (from.jobId && d.threadEmpty(from.id)) {
-            const job = d.deleteJob(from.jobId)
-            d.forgetJob(from.jobId)
-            return { files: [...gone.files, ...job.files], agentSessions: [...gone.agentSessions, ...job.agentSessions] }
-          }
-          return gone
-        })
-        yield* forget(orphans).pipe(Effect.ignore)
-        changed()
+        // Stopping it may have filed it as a job already (fileWork): moved from where it is now.
+        const at = yield* db.require('Session', (d) => d.getSession(d.getMessage(message.id)?.sessionId ?? from.id))
+        if (at.id === into?.id) return yield* primary
+        yield* fileTurn(message.id, at, into ?? (yield* jobFor(message.content)).thread)
+        yield* resummarize(message.id)
         return yield* primary
       })
 
@@ -257,9 +287,68 @@ export class Jobs extends Context.Service<
           if (status === 'done') yield* FiberMap.run(archiving, jobId, archive(jobId))
         })
 
+      /**
+       * Files a turn at the end of another thread as it is (see refileTurn). Out of the primary's own
+       * conversation into a new job, it keeps its Claude Code session: all that came before it there
+       * was small talk, and the job carries on from what the reply did. A job left with nothing in it
+       * goes.
+       */
+      const fileTurn = (messageId: string, from: Session, into: Session) =>
+        Effect.gen(function* () {
+          const orphans = yield* db.use((d) => {
+            d.refileTurn(messageId, into.id, from.kind === 'primary' && d.threadEmpty(into.id))
+            if (from.jobId && d.threadEmpty(from.id)) {
+              const gone = d.deleteJob(from.jobId)
+              d.forgetJob(from.jobId)
+              return gone
+            }
+            if (from.jobId) d.refreshJobUsage(from.jobId)
+            return null
+          })
+          if (orphans) yield* forget(orphans).pipe(Effect.ignore)
+          changed()
+          broadcaster.send({ type: 'thread', sessionId: into.id })
+        })
+
+      /** The reply a moved turn shows, summarized again in the job it landed in. */
+      const resummarize = (userId: string) =>
+        Effect.gen(function* () {
+          const reply = yield* db.use((d) => {
+            const id = d.getMessage(userId)?.activeChildId
+            return id ? (d.getMessage(id) ?? null) : null
+          })
+          if (reply && reply.status !== 'streaming') yield* FiberMap.run(summaries, reply.sessionId, summarize(reply.id, reply.status))
+        })
+
+      /**
+       * A reply in the primary's own conversation that did work (a tool, a file, an artifact): its
+       * turn is filed as a new job, named after the message. Only the newest turn, still on show.
+       */
+      const fileWork = (replyId: string) =>
+        Effect.gen(function* () {
+          const info = yield* db.use((d) => {
+            const reply = d.getMessage(replyId)
+            const thread = reply ? d.getSession(reply.sessionId) : undefined
+            if (!reply?.parentId || thread?.kind !== 'primary' || !didWork(reply.content, reply.attachments.length)) return null
+            const user = d.getMessage(reply.parentId)
+            if (user?.role !== 'user' || d.activePath(thread).at(-1)?.message.id !== reply.id) return null
+            return { thread, user }
+          })
+          if (!info) return
+          const made = yield* jobFor(info.user.content)
+          yield* fileTurn(info.user.id, info.thread, made.thread)
+        })
+
       const unsubscribe = chat.onReplyEnd(({ messageId, status }) => {
         const thread = Effect.runSync(db.use((d) => d.getMessage(messageId)?.sessionId ?? null).pipe(Effect.orElseSucceed(() => null)))
-        if (thread) Effect.runFork(FiberMap.run(summaries, thread, summarize(messageId, status)))
+        if (!thread) return
+        const after = fileWork(messageId).pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause) ? Effect.void : Effect.logWarning(`Filing a reply as a job failed: ${errorMessage(Cause.squash(cause))}`)
+          ),
+          Effect.andThen(summarize(messageId, status))
+        )
+        Effect.runFork(FiberMap.run(summaries, thread, after))
       })
       yield* Effect.addFinalizer(() => Effect.sync(unsubscribe))
 

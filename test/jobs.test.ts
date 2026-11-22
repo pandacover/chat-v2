@@ -15,7 +15,7 @@ import { SettingsStore } from '../src/main/services/SettingsStore'
 import { Agent } from '../src/main/agent/driver'
 import { ComputerUse, noOverlay } from '../src/main/computer'
 import { Browser } from '../src/main/services/Browser'
-import { ROUTER_INSTRUCTIONS, SUMMARY_INSTRUCTIONS, candidates, cleanSummary, jobsBlock, parseRoute, routerPrompt } from '../src/main/jobs'
+import { ROUTER_INSTRUCTIONS, SUMMARY_INSTRUCTIONS, candidates, cleanSummary, didWork, jobsBlock, parseRoute, routerPrompt } from '../src/main/jobs'
 import { type Call, type Script, fakeQuery } from './fakeQuery'
 
 const dirs: string[] = []
@@ -169,6 +169,44 @@ describe('the migration to bots and jobs', () => {
     expect(db.threadEmpty(thread.id)).toBe(true)
     db.close()
   })
+
+  test('filing a turn in another thread moves it with its replies, as they are', () => {
+    const db = makeDb(join(tempDir(), 'chat.db'))
+    const a = db.createJob({ title: 'a', botId: 'tomo' })
+    const b = db.createJob({ title: 'b', botId: 'tomo' })
+    db.setJobStatus(b.job.id, 'done')
+    const say = (thread: { id: string }, parentId: string, content: string, agent: string) => {
+      const u = db.insertMessage({ sessionId: thread.id, parentId, role: 'user', content, status: 'complete' })
+      const r = db.insertMessage({ sessionId: thread.id, parentId: u.id, role: 'assistant', content: `Re ${content}`, status: 'complete' })
+      db.claimAgentSession(r.id, agent)
+      db.checkpoint(r.id, `${agent}-uuid`)
+      return { u, r }
+    }
+    const b1 = say(b.thread, b.thread.rootId, 'b one', 'sb')
+    const a1 = say(a.thread, a.thread.rootId, 'a one', 'sa')
+    const a2 = say(a.thread, a1.r.id, 'a two', 'sa')
+    const other = db.insertMessage({ sessionId: a.thread.id, parentId: a2.u.id, role: 'assistant', content: 'Re a two, again', status: 'complete' })
+
+    db.refileTurn(a2.u.id, b.thread.id, false)
+    const text = (id: string) => db.activePath(db.getSession(id)!).map((n) => n.message.content)
+    expect(text(a.thread.id)).toEqual(['a one', 'Re a one'])
+    expect(db.getMessage(a1.r.id)!.activeChildId).toBeNull()
+    expect(text(b.thread.id)).toEqual(['b one', 'Re b one', 'a two', 'Re a two, again'])
+    // Every reply of the turn went with it; none kept its checkpoint, all kept their session.
+    expect(db.getMessage(other.id)!.sessionId).toBe(b.thread.id)
+    expect(db.agentPoint(a2.r.id)).toEqual({ session: 'sa', uuid: null })
+    // So the thread it left forks its session rather than writing over the moved reply.
+    expect(db.agentTip('sa')).toBe(a2.r.id)
+    // The job it landed in is open again.
+    expect(db.getJob(b.job.id)!.status).toBe('open')
+
+    const c = db.createJob({ title: 'c', botId: 'tomo' })
+    db.refileTurn(b1.u.id, c.thread.id, true)
+    expect(db.agentPoint(b1.r.id)).toEqual({ session: 'sb', uuid: 'sb-uuid' })
+    expect(text(c.thread.id)).toEqual(['b one', 'Re b one', 'a two', 'Re a two, again'])
+    expect(db.threadEmpty(b.thread.id)).toBe(true)
+    db.close()
+  })
 })
 
 describe('routing, summaries and the job list', () => {
@@ -200,6 +238,26 @@ describe('routing, summaries and the job list', () => {
     expect(parseRoute('{"job": "NEW"}', jobs)).toEqual({ kind: 'new', title: null })
     expect(parseRoute('{"job": 9}', jobs)).toBeNull()
     expect(parseRoute('I think it is about printers', jobs)).toBeNull()
+    expect(parseRoute('{"job": "none"}', jobs)).toEqual({ kind: 'chat' })
+    expect(parseRoute('{"job": null}', jobs)).toEqual({ kind: 'chat' })
+    expect(parseRoute('{}', jobs)).toBeNull()
+  })
+
+  test('a chat outside jobs is marked so for the router', () => {
+    const prompt = routerPrompt(jobs, null, { user: 'Hi', reply: 'Hello!' }, 'make me a page')
+    expect(prompt).toContain('<last_exchange job="none">')
+    expect(routerPrompt(jobs, 'a', { user: 'Hi', reply: 'Hello!' }, 'x')).toContain('<last_exchange>\n')
+    expect(ROUTER_INSTRUCTIONS).toContain('{"job": "none"}')
+  })
+
+  test('work is a step other than memory, an artifact, or a file', () => {
+    const step = (tool: string) => `::step {"tool":"${tool}","label":"x","ok":true}`
+    expect(didWork('Hello there!')).toBe(false)
+    expect(didWork(`${step('memory_recall')}\n${step('notes_write')}\nHi`)).toBe(false)
+    expect(didWork(`${step('browser_search')}\nFound it`)).toBe(true)
+    expect(didWork(`${step('computer_click')}`)).toBe(true)
+    expect(didWork('Here:\n<artifact identifier="a" title="A">\nx\n</artifact>')).toBe(true)
+    expect(didWork('Done.', 1)).toBe(true)
   })
 
   test('summaries are one tidy line', () => {
@@ -235,6 +293,12 @@ const script = (route: string[]): Script =>
     if (query) {
       const found = yield* t.tool('mcp__memory__recall', { query })
       yield* t.text(`Recalled: ${(found.result?.content ?? []).map((c) => c.text ?? '').join('')}`)
+      yield t.result()
+      return
+    }
+    // "make: …" makes an artifact: work.
+    if (said.startsWith('make: ')) {
+      yield* t.text(`Here it is.\n<artifact identifier="page" title="Page">\n<p>${said.slice(6)}</p>\n</artifact>`)
       yield t.result()
       return
     }
@@ -275,14 +339,16 @@ const until = async (ok: () => Promise<boolean>) => {
 
 describe('talking to the primary bot', () => {
   test('routes each message to a job, keeps the conversation in order, and moves a wrong guess', async () => {
-    const t = setup(['{"job": 1}', '{"job": "new", "title": "Trip to Lisbon"}'])
-    // The first message ever: nothing to route to, so a job is made without asking.
+    const t = setup(['{"job": "new"}', '{"job": 1}', '{"job": "new", "title": "Trip to Lisbon"}', '{"job": 1}'])
+    // The first message ever: the router is asked even with no jobs yet (it could be small talk).
     let view = await t.run(send('My printer is jammed'))
     await t.settle(() => t.doneCount() >= 1)
-    expect(t.calls.filter((c) => systemOf(c) === ROUTER_INSTRUCTIONS)).toHaveLength(0)
+    const routers = () => t.calls.filter((c) => isAsk(c) && systemOf(c) === ROUTER_INSTRUCTIONS)
+    expect(routers()).toHaveLength(1)
+    expect(promptText(routers()[0]!)).toStartWith('Jobs:\n(none yet)\n\n<message>')
     expect(view.session.kind).toBe('primary')
     // It is named by the title model, and its summary written after the reply.
-    await t.settle(() => t.calls.filter(isAsk).length >= 2)
+    await t.settle(() => t.calls.filter(isAsk).length >= 3)
     await t.settle(() => t.events.filter((e) => e.type === 'jobs').length >= 3)
     let jobs = await t.run(listJobs)
     expect(jobs).toHaveLength(1)
@@ -296,7 +362,7 @@ describe('talking to the primary bot', () => {
     // A follow-up: the router says it continues the current job.
     view = await t.run(send('It still jams'))
     await t.settle(() => t.doneCount() >= 2)
-    const router = t.calls.find((c) => systemOf(c) === ROUTER_INSTRUCTIONS)!
+    const router = routers()[1]!
     expect(promptText(router)).toContain('1. [open] Named job — Summary of: My printer is jammed (current)')
     expect(promptText(router)).toContain('<message>\nIt still jams\n</message>')
     const second = t.calls.filter((c) => !isAsk(c))[1]!
@@ -326,17 +392,93 @@ describe('talking to the primary bot', () => {
     expect(view.path[4]!.message.sessionId).toBe(lisbon.threadId!)
     expect(view.path[5]!.message.authorBotId).toBe('tomo')
 
-    // A wrong guess, put right: the last message moves to the printer job, and the job made for it goes.
+    // A wrong guess, put right: the last message moves to the printer job with its reply, nothing is
+    // answered again, and the job made for it goes.
     const printer = jobs.find((j) => j.title === 'Named job')!
     const last = view.path[4]!.message
+    const lisbonReply = view.path[5]!.message
     view = await t.run(Jobs.use((j) => j.move({ messageId: last.id, target: { jobId: printer.id } })))
-    await t.settle(() => t.doneCount() >= 4)
     jobs = await t.run(listJobs)
     expect(jobs.map((j) => j.title)).toEqual(['Named job'])
     expect(view.path.map((n) => n.message.sessionId)).toEqual(Array(6).fill(printer.threadId))
     expect(view.path[4]!.message.content).toBe('Flights to Lisbon in May?')
+    expect(view.path[5]!.message.id).toBe(lisbonReply.id)
+    expect(view.path[5]!.message.content).toBe('Reply to Flights to Lisbon in May?')
+    await new Promise((r) => setTimeout(r, 100))
+    expect(t.doneCount()).toBe(3)
+    expect(replies(t.calls)).toHaveLength(3)
+
+    // The printer job carries on in its own session, reading the moved turn as text.
+    await t.run(send('Which seat?'))
+    await t.settle(() => t.doneCount() >= 4)
+    const after = replies(t.calls)[3]!
+    expect(after.options.resume).toBe(first.session)
+    expect(after.options.forkSession).toBeFalsy()
+    expect(promptText(after)).toContain('<user>\nFlights to Lisbon in May?\n</user>')
+    expect(promptText(after)).toContain('<assistant>\nReply to Flights to Lisbon in May?\n</assistant>')
+    view = await t.run(Jobs.use((j) => j.primary))
     // Only the newest turn can move.
     await expect(t.run(Jobs.use((j) => j.move({ messageId: view.path[0]!.message.id, target: 'new' })))).rejects.toThrow('Only the last message')
+    await t.runtime.dispose()
+  })
+
+  test('small talk makes no job; a reply there that does work is filed as one, keeping its session', async () => {
+    const t = setup(['{"job": "none"}', '{"job": "none"}', '{"job": 1}', '{"job": "none"}'])
+    const primaryId = (await t.run(Jobs.use((j) => j.primary))).session.id
+    let view = await t.run(send('Hi'))
+    await t.settle(() => t.doneCount() >= 1)
+    expect(await t.run(listJobs)).toHaveLength(0)
+    view = await t.run(Jobs.use((j) => j.primary))
+    expect(view.path.map((n) => n.message.sessionId)).toEqual([primaryId, primaryId])
+    const hi = replies(t.calls)[0]!
+    expect(systemOf(hi)).toContain('outside any job')
+
+    // Asked for work while chatting: the router keeps it out of jobs (a follow-up to job="none")…
+    await t.run(send('make: a haiku page'))
+    await t.settle(() => t.doneCount() >= 2)
+    const routers = t.calls.filter((c) => isAsk(c) && systemOf(c) === ROUTER_INSTRUCTIONS)
+    expect(promptText(routers[1]!)).toContain('<last_exchange job="none">')
+    // …and once the reply made something, the exchange is filed as a job named after it.
+    await until(async () => (await t.run(listJobs)).length === 1)
+    await until(async () => (await t.run(listJobs))[0]?.title === 'Named job')
+    const [made] = await t.run(listJobs)
+    expect(made).toMatchObject({ title: 'Named job', status: 'open' })
+    view = await t.run(Jobs.use((j) => j.primary))
+    expect(view.path.map((n) => [n.message.content.split('\n')[0], n.message.sessionId === primaryId])).toEqual([
+      ['Hi', true],
+      ['Reply to Hi', true],
+      ['make: a haiku page', false],
+      ['Here it is.', false]
+    ])
+    expect(view.path[3]!.message.sessionId).toBe(made!.threadId!)
+    expect(t.events.some((e) => e.type === 'thread' && e.sessionId === made!.threadId)).toBe(true)
+
+    // The job carries on from the session the work was done in.
+    const work = replies(t.calls)[1]!
+    await t.run(send('Make it longer'))
+    await t.settle(() => t.doneCount() >= 3)
+    const more = replies(t.calls)[2]!
+    expect(more.options.resume).toBe(work.session)
+    expect(more.options.forkSession).toBeFalsy()
+    expect(promptText(more)).toStartWith('<jobs>\nThis job: Named job')
+
+    // Small talk again: back in the primary's own conversation, on a fork of its session.
+    await t.run(send('Thanks!'))
+    await t.settle(() => t.doneCount() >= 4)
+    const thanks = replies(t.calls)[3]!
+    expect(thanks.options.resume).toBe(hi.session)
+    expect(thanks.options.forkSession).toBe(true)
+    view = await t.run(Jobs.use((j) => j.primary))
+    expect(view.path.map((n) => n.message.content.split('\n')[0])).toEqual(['Hi', 'Reply to Hi', 'make: a haiku page', 'Here it is.', 'Make it longer', 'Reply to Make it longer', 'Thanks!', 'Reply to Thanks!'])
+    expect(view.path.at(-1)!.message.sessionId).toBe(primaryId)
+    expect(await t.run(listJobs)).toHaveLength(1)
+
+    // A chat turn can be filed in a job by hand, as it is.
+    const thanksTurn = view.path.at(-2)!.message
+    view = await t.run(Jobs.use((j) => j.move({ messageId: thanksTurn.id, target: { jobId: made!.id } })))
+    expect(view.path.at(-2)!.message.sessionId).toBe(made!.threadId!)
+    expect(view.path.map((n) => n.message.content.split('\n')[0])).toEqual(['Hi', 'Reply to Hi', 'make: a haiku page', 'Here it is.', 'Make it longer', 'Reply to Make it longer', 'Thanks!', 'Reply to Thanks!'])
+    expect(t.doneCount()).toBe(4)
     await t.runtime.dispose()
   })
 

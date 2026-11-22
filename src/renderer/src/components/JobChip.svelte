@@ -2,8 +2,8 @@
   // The job chip above the composer: which job the conversation is on, and the one click that
   // changes it. Talking to Tomo, it shows the job the last message went to (Tomo picks each time);
   // picking a job (or New topic) sends the next message there. Moving the last message to another
-  // job (a wrong guess put right) sends it again there, so it is an item of its own, never what a
-  // plain pick does. In a job's thread it switches jobs.
+  // job (a wrong guess put right) files it there with its reply, without answering it again; it is
+  // an item of its own, never what a plain pick does. In a job's thread it switches jobs.
   import { tick } from 'svelte'
   import type { Job } from '@shared/types'
   import { tip } from '@/lib/tooltip'
@@ -23,10 +23,10 @@
   const target = $derived(app.target)
   const lastTurn = $derived(primary ? app.view?.path.findLast((n) => n.message.role === 'user')?.message : undefined)
   /** The last message can be moved: talking to Tomo, and nothing picked for the next one. */
-  const canMove = $derived(primary && target === 'auto' && !!lastTurn && !!job)
+  const canMove = $derived(primary && target === 'auto' && !!lastTurn)
   /** The menu is choosing where the last message moves to, after its Move item was picked. */
   let moving = $state(false)
-  const show = $derived(!primary || app.jobs.length > 0 || target !== 'auto')
+  const show = $derived(!primary || app.jobs.length > 0 || target !== 'auto' || canMove)
 
   const label = $derived(target === 'new' && primary ? 'New topic' : (job?.title ?? (primary ? 'Tomo picks the job' : '')))
   const hint = $derived(
@@ -37,7 +37,9 @@
       : target === 'auto'
         ? job
           ? 'Tomo picked this job for your last message, and picks one for each message'
-          : 'Tomo picks a job for each message'
+          : lastTurn
+            ? 'Your last message needed no job. Tomo picks one for each message, and files work as a job once it’s done'
+            : 'Tomo picks a job for each message'
         : 'Your next message goes here'
   )
 
@@ -160,7 +162,7 @@
       >
         <div class="mono-label px-2.5 pt-2.5 pb-1.5">{!primary ? 'Switch to' : moving ? 'Move your last message to' : 'Send your next message to'}</div>
         {#if moving}
-          <p class="px-2.5 pb-1.5 text-[12px] text-fg-3">Tomo answers it again there, and drops it from “{job?.title}”.</p>
+          <p class="px-2.5 pb-1.5 text-[12px] text-fg-3">It moves with its reply, out of {job ? `“${job.title}”` : 'your chat with Tomo'}. Nothing is done again.</p>
         {/if}
         {#if primary && target !== 'auto'}
           <button type="button" role="menuitem" class="item" onclick={() => pick('auto')}>
@@ -190,8 +192,8 @@
           <button type="button" role="menuitem" class="item" data-move-last onclick={startMove}>
             <Icon name="undo" size={15} class="text-fg-3" />
             <span class="min-w-0 flex-1">
-              <span class="block truncate">Wrong job? Move your last message</span>
-              <span class="block truncate text-[12px] text-fg-3">Tomo answers it again in the job you pick</span>
+              <span class="block truncate">{job ? 'Wrong job? Move your last message' : 'File your last message in a job'}</span>
+              <span class="block truncate text-[12px] text-fg-3">With its reply, as it is: nothing is done again</span>
             </span>
           </button>
         {/if}

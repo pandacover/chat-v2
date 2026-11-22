@@ -161,6 +161,31 @@ try {
   await sleep(600)
   await capture('4-conversation')
 
+  // Small talk makes no job: Tomo answers it in its own conversation.
+  const jobRows = (await sidebarRows()).length
+  await send('Hi there')
+  await until(() => repliesDone(6), 'small talk is answered')
+  a = await authors()
+  ok(a.at(-1).trim() === 'Tomo', `with no job on the reply (${JSON.stringify(a.at(-1))})`)
+  ok((await sidebarRows()).length === jobRows, 'and no job in the sidebar')
+  // Asked for work while chatting: answered there too, then filed as a job once it made something.
+  await send('make a page about cats')
+  await until(() => repliesDone(7), 'the work is done')
+  await until(async () => (await sidebarRows()).some((r) => r.includes('Cat page')), 'and filed as a job, named after it')
+  await until(async () => (await authors()).at(-1)?.includes('Cat page'), 'which the reply now shows')
+  ok((await authors()).at(-2).trim() === 'Tomo', 'the small talk before it stays out of jobs')
+  await sleep(400)
+  await capture('4b-filed')
+  // Filed by hand, as it is: the chip's Move item puts the cat page in the soup job, answering nothing again.
+  await chip.click()
+  await menu.locator('[data-move-last]').click()
+  ok((await menu.innerText()).includes('Nothing is done again'), 'the Move item says nothing is redone')
+  await menu.getByRole('menuitem', { name: /^Tomato soup recipe(?! \(fork)/ }).first().click()
+  await until(async () => (await authors()).at(-1)?.includes('Tomato soup recipe'), 'the moved turn shows the job it went to')
+  await until(async () => !(await sidebarRows()).some((r) => r.includes('Cat page')), 'the job made for it is gone')
+  await sleep(500)
+  ok(await repliesDone(7) && !(await repliesDone(8)), 'and it was not answered again')
+
   // A finished job's own thread: as a chat was, with its chip.
   await page.locator('aside [data-row^="chat:"]', { hasText: 'Rust lifetimes' }).locator('button').first().click()
   await until(async () => (await page.locator('[data-chat-title]').innerText()) === 'Rust lifetimes', 'a job opens on its thread')
@@ -199,7 +224,8 @@ const db = new DatabaseSync(join(data, 'chat.db'))
 const jobs = db.prepare('select title, status from jobs order by title').all()
 console.log(jobs.map((j) => `${j.status}  ${j.title}`).join('\n'))
 ok(db.prepare(`select count(*) as n from sessions where kind = 'primary'`).get().n === 1, 'one primary conversation')
-ok(db.prepare(`select count(*) as n from messages where via_session_id is not null`).get().n === 5, 'five turns sent to Tomo (the moved one counted once)')
+ok(db.prepare(`select count(*) as n from messages where via_session_id is not null`).get().n === 7, 'seven turns sent to Tomo (the moved ones counted once)')
+ok(db.prepare(`select count(*) as n from messages m join sessions s on s.id = m.session_id where s.kind = 'primary' and m.role = 'user'`).get().n === 1, 'one turn (the small talk) in no job')
 ok(db.prepare(`select instructions, effort from bots where is_primary = 1`).get().effort === 'high', "Tomo's effort came from Settings")
 ok(db.prepare(`select count(*) as n from sessions s where not exists (select 1 from jobs j where j.id = s.job_id) and s.kind != 'primary'`).get().n === 0, 'every thread has its job')
 db.close()
