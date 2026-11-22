@@ -15,7 +15,7 @@
   const ticker = setInterval(() => (now = Date.now()), 30_000)
   onDestroy(() => clearInterval(ticker))
 
-  /** The job the open conversation is on: a job's thread, or in Tomo's conversation the current one (or none). */
+  /** The job the open thread is on (none in Tomo's conversation). */
   const job = $derived(app.currentJob)
   const shares = $derived(job ? (meter.shares.get(job.id) ?? []) : [])
   const loadShare = () => (job ? meter.loadJob(job.id) : Promise.resolve())

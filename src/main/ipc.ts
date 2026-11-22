@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { BrowserWindow, app, dialog, ipcMain, shell, systemPreferences } from 'electron'
 import { Cause, Effect, type ManagedRuntime } from 'effect'
-import type { AudioAnalysis, BotPatch, IpcResult, JobTarget, MemoryView, NewAttachmentInput, RecordReply, SessionPatch, SettingsPatch } from '@shared/types'
+import type { AudioAnalysis, BotPatch, IpcResult, MemoryView, NewAttachmentInput, RecordReply, SessionPatch, SettingsPatch } from '@shared/types'
 import { isClaudeModel } from '@shared/models'
 import { cleanModules, cleanRules } from '@shared/rules'
 import { cleanAvatar } from '@shared/bots'
@@ -24,10 +24,6 @@ import { Reconciler } from './services/Reconciler'
 import { Team } from './services/Team'
 
 export type MainServices = Db | Chat | Jobs | Team | Attachments | SettingsStore | Agent | ElevenLabs | Browser | ComputerUse | Usage | Reconciler
-
-/** Where a message to the primary goes, as the renderer sent it. */
-const jobTarget = (v: unknown): JobTarget =>
-  v === 'new' ? 'new' : v && typeof v === 'object' && typeof (v as { jobId?: unknown }).jobId === 'string' ? { jobId: (v as { jobId: string }).jobId } : 'auto'
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
@@ -172,12 +168,8 @@ const handlers: Record<string, Handler> = {
   'jobs:list': () => Db.use((db) => db.use((d) => d.listJobs())),
   'jobs:primary': () => Jobs.use((j) => j.primary),
   'jobs:send': (input) =>
-    Jobs.use((j) => j.send({ text: str(input.text, 'text'), attachmentIds: ids(input.attachmentIds), target: jobTarget(input.target) })),
-  'jobs:move': (input) =>
-    Jobs.use((j) => {
-      const target = jobTarget(input.target)
-      return j.move({ messageId: str(input.messageId, 'messageId'), target: target === 'auto' ? 'new' : target })
-    }),
+    Jobs.use((j) => j.send({ text: str(input.text, 'text'), attachmentIds: ids(input.attachmentIds) })),
+  'jobs:newTopic': () => Jobs.use((j) => j.newTopic),
   'jobs:setStatus': (id, status) => Jobs.use((j) => j.setStatus(str(id, 'id'), status === 'done' ? 'done' : 'open')),
   'jobs:detail': (id) => Team.use((t) => t.detail(str(id, 'id'))),
   'jobs:rename': (id, title) => Db.use((db) => db.use((d) => d.renameJob(str(id, 'id'), str(title, 'title').trim() || NEW_SESSION_TITLE))),

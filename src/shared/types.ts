@@ -95,9 +95,12 @@ export interface Message {
  * between bots, or a bot's report. `to` is the bot it is addressed to; null is everyone on the job.
  * held: waiting for the user's OK (a request beyond the asking bot's access); declined: the user
  * said no; stopped: not passed on, because the same request kept bouncing between two bots.
+ *
+ * 'topic' isn't a bot's post: it is the New topic divider in the primary's conversation (an
+ * assistant row that answers nothing), where the next reply starts afresh (agent/history.ts).
  */
 export interface Post {
-  kind: 'task' | 'message' | 'report'
+  kind: 'task' | 'message' | 'report' | 'topic'
   to: string | null
   state: 'held' | 'declined' | 'stopped' | null
 }
@@ -221,8 +224,6 @@ export interface Job {
   threadId: string | null
 }
 
-/** Where a message to the primary bot goes: Tomo decides (auto), a new job, or a job by id. */
-export type JobTarget = 'auto' | 'new' | { jobId: string }
 
 /** What a profile or playbook record is about. */
 export type MemoryRecordType = 'preference' | 'person' | 'project' | 'procedure'
@@ -490,10 +491,10 @@ export interface Api {
     list(): Promise<Job[]>
     /** The primary bot's conversation: its turns from every job thread, oldest first. */
     primary(): Promise<SessionView>
-    /** A message to the primary bot, routed to a job (see JobTarget); returns the primary view. */
-    send(input: { text: string; attachmentIds: string[]; target: JobTarget }): Promise<SessionView>
-    /** Moves the primary's last turn (a wrong guess) to another job, or a new one. */
-    move(input: { messageId: string; target: 'new' | { jobId: string } }): Promise<SessionView>
+    /** A message to the primary bot, in its own conversation; returns the primary view. */
+    send(input: { text: string; attachmentIds: string[] }): Promise<SessionView>
+    /** New topic: a divider in the primary's conversation, after which its next reply starts afresh. */
+    newTopic(): Promise<SessionView>
     setStatus(id: string, status: JobStatus): Promise<void>
     /** The bots on a job, their threads, and its notes. */
     detail(id: string): Promise<JobDetail>

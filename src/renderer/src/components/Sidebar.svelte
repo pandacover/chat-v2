@@ -218,7 +218,7 @@
 
 {#snippet item({ entry: e, need }: Row)}
   {@const s = e.session}
-  {@const active = (app.view?.session.id ?? '') === e.key}
+  {@const active = (app.view?.session.id ?? '') === e.key || (!!app.view && app.view.session.id === app.ownThreadOf(e.job)?.id)}
   {@const owner = app.team ? (app.bots.find((b) => b.id === e.job.ownerBotId) ?? app.primaryBot) : null}
   <div class="chat-row group relative">
     {#if renaming === s.id}
@@ -296,7 +296,7 @@
     <Icon name="sidebar" size={16} />
   </button>
   {#if !app.sidebarOpen}
-    <button class="icon-btn size-8" use:tip={{ text: 'New topic', kbd: shortcut('N') }} onclick={() => app.newSession()} in:fade={{ duration: 160 }}>
+    <button class="icon-btn size-8" data-new-topic use:tip={{ text: 'New topic', kbd: shortcut('N') }} onclick={() => app.newSession()} in:fade={{ duration: 160 }}>
       <Icon name="compose" size={16} />
     </button>
     <!-- Whose conversation is open, while the sidebar that shows it is shut. Part of the bar: it
@@ -340,7 +340,7 @@
         {#if app.isPrimary ? app.hasDraft(app.view?.session.id ?? '') : false}<span class="grid shrink-0 place-items-center text-blue" use:tip={'Unsent draft'}><Icon name="pen" size={13} /></span>{/if}
       </button>
       <div class="acts pointer-events-none absolute top-1 right-1 flex rounded-r-lg pl-4 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100 {app.isPrimary ? 'on' : ''}">
-        <button class="icon-btn size-[26px] !rounded-lg" use:tip={{ text: 'New topic', kbd: shortcut('N') }} onclick={() => app.newSession()}><Icon name="compose" size={14} /></button>
+        <button class="icon-btn size-[26px] !rounded-lg" data-new-topic use:tip={{ text: 'New topic', kbd: shortcut('N') }} onclick={() => app.newSession()}><Icon name="compose" size={14} /></button>
       </div>
     </div>
     <button class="nav-item" onclick={() => (app.findOpen = true)}>

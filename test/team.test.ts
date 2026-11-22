@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Effect, Layer, ManagedRuntime } from 'effect'
-import type { Bot, BotPatch, JobTarget, Message, StreamEvent } from '../src/shared/types'
+import type { Bot, BotPatch, Message, StreamEvent } from '../src/shared/types'
 import { AppPaths } from '../src/main/services/AppPaths'
 import { Attachments } from '../src/main/services/Attachments'
 import { Broadcaster, Chat, unanswered } from '../src/main/services/Chat'
@@ -140,7 +140,7 @@ const setup = (dir?: string) => {
     }
   }
   const addBot = async (patch: BotPatch) => (await run(Team.use((t) => t.createBot(patch)))).find((b) => b.name === patch.name)!
-  const send = (text: string, target: JobTarget = 'new') => run(Jobs.use((j) => j.send({ text, attachmentIds: [], target })))
+  const send = (text: string) => run(Jobs.use((j) => j.send({ text, attachmentIds: [] })))
   /** Every post in a job's shared thread. */
   const posts = (title: string) =>
     d((x) => {
@@ -166,29 +166,42 @@ const shape = async (t: T) => {
 }
 
 describe('the team tools', () => {
-  test('one bot gets no team tools; once there is a worker, every reply on a job gets them, and no wait tool', async () => {
+  test("Tomo's chat always has the team tools; a job's thread gets them once there is a worker; no wait tool", async () => {
     const t = setup()
     await t.send('hello')
     await t.until(t.idle, 'first reply')
-    expect(Object.keys(t.replies()[0]!.options.mcpServers ?? {})).not.toContain('team')
-    expect(systemOf(t.replies()[0]!)).not.toContain('team of bots')
+    expect(Object.keys(t.replies()[0]!.options.mcpServers ?? {})).toContain('team')
+    expect(systemOf(t.replies()[0]!)).toContain('You have no other bots yet: hand work to yourself.')
+    // A job's thread, with Tomo the only bot: nobody to talk to there.
+    const { thread } = await t.d((x) => x.createJob({ title: 'Solo', botId: 'tomo' }))
+    const sayInJob = async (text: string) => {
+      const parentId = await t.d((x) => x.activePath(x.getSession(thread.id)!).at(-1)?.message.id ?? thread.rootId)
+      await t.run(Chat.use((c) => c.send({ sessionId: thread.id, parentId, text, attachmentIds: [] })))
+    }
+    await sayInJob('on my own')
+    await t.until(t.idle, 'the reply in the job')
+    expect(Object.keys(t.replies()[1]!.options.mcpServers ?? {})).not.toContain('team')
+    expect(systemOf(t.replies()[1]!)).not.toContain('team of bots')
 
     await t.addBot({ name: 'Scout', instructions: 'Finds things out on the web.\nBe thorough.' })
     await t.send('try wait')
-    await t.until(t.idle, 'second reply')
-    const second = t.replies()[1]!
-    expect(Object.keys(second.options.mcpServers ?? {})).toContain('team')
-    expect(systemOf(second)).toContain('You lead a team of bots')
-    expect(systemOf(second)).toContain('- Scout: Finds things out on the web. (tools: none beyond memory and notes)')
+    await t.until(t.idle, 'third reply')
+    const third = t.replies()[2]!
+    expect(Object.keys(third.options.mcpServers ?? {})).toContain('team')
+    expect(systemOf(third)).toContain('You lead a team of bots')
+    expect(systemOf(third)).toContain('- Scout: Finds things out on the web. (tools: none beyond memory and notes)')
     // Nobody waits: the tool is gone, and the instructions say the answer comes as a turn.
-    expect(systemOf(second)).toContain('select:mcp__team__start_job,mcp__team__message,mcp__team__list_jobs"')
-    expect(systemOf(second)).not.toMatch(/\bwait\(/)
-    expect(systemOf(second)).toContain("don't track it or wait for it")
-    expect(systemOf(second)).toContain("don't repeat it")
-    const thread = await t.d((x) => x.listJobs().find((j) => j.title === 'try wait')!)
-    const said = (await t.d((x) => x.activePath(x.getSession(thread.threadId!)!))).at(-1)!.message.content
+    expect(systemOf(third)).toContain('select:mcp__team__start_job,mcp__team__message,mcp__team__list_jobs"')
+    expect(systemOf(third)).not.toMatch(/\bwait\(/)
+    expect(systemOf(third)).toContain("don't track it or wait for it")
+    expect(systemOf(third)).toContain("don't repeat it")
+    const said = (await t.conversation()).at(-1)!.message.content
     expect(said).toMatch(/Tomo done: .*wait/i)
     expect(said).toContain('not found')
+    // With a worker, the job's thread has them too.
+    await sayInJob('together now')
+    await t.until(t.idle, 'the second reply in the job')
+    expect(Object.keys(t.replies()[3]!.options.mcpServers ?? {})).toContain('team')
     await t.runtime.dispose()
   })
 
@@ -247,9 +260,9 @@ describe('the team tools', () => {
     expect(tomo.prompt.at(-1)!.text).toBe(`<from_bot name="Scout" kind="report" job="Find the cheapest flight" job_id="${job.id}">\nScout done: Find the cheapest flight\n</from_bot>`)
     expect(Object.keys(tomo.options.mcpServers ?? {})).toContain('team')
     expect(systemOf(tomo)).toContain('it arrives in your conversation with the user as a turn of its own')
-    // The report turn isn't the user's: the next message routes as before, and nothing was filed as a job.
-    expect((await t.d((x) => x.lastRouted(primaryId)))?.jobId).not.toBe(job.id)
-    expect((await t.d((x) => x.listJobs())).map((j) => j.title).sort()).toEqual(['Find the cheapest flight', 'start Scout | Find the cheapest flight'])
+    // The user's message made no job of its own: the only job is the one handed off.
+    expect((await t.d((x) => x.listJobs())).map((j) => j.title)).toEqual(['Find the cheapest flight'])
+    expect(conversation.every((n) => n.message.sessionId === primaryId)).toBe(true)
     expect(t.events.some((e) => e.type === 'thread' && e.sessionId === primaryId)).toBe(true)
     // Scout is done; Tomo idle.
     const presence = await t.run(Team.use((x) => x.presence))
@@ -263,9 +276,8 @@ describe('the team tools', () => {
     await t.send('start Scout | Check the weather\nlist')
     await t.until(async () => t.tomoAnswers().length === 1, "Tomo's answer to the report")
     await t.until(t.idle, 'replies', 8000)
-    const reply = await t.d((x) => x.listJobs().find((j) => j.title !== 'Check the weather')!)
-    const thread = await t.d((x) => x.activePath(x.getSession(reply.threadId!)!).map((n) => n.message))
-    const said = thread.findLast((m) => m.role === 'assistant' && !m.post)!.content
+    // Tomo's first reply, in its chat: the hand-off and the list.
+    const said = (await t.conversation()).find((n) => n.message.role === 'assistant' && !n.message.post)!.message.content
     expect(said).toContain("You don't need to wait or check on it")
     expect(said).toMatch(/Open jobs:\n- Check the weather \[id [^\]]+\] · owner Scout · bots: Scout \(\w+\), Tomo \(\w+\)/)
     await t.runtime.dispose()
@@ -304,15 +316,14 @@ describe('the team tools', () => {
   test("a user message while Tomo is mid-reply is queued, not refused; two queued are answered by one reply", async () => {
     const t = setup()
     await t.send('slow q1')
-    const job = await t.d((x) => x.listJobs()[0]!)
     await t.until(async () => t.replies().length === 1, 'the first reply runs')
-    // Two more for the same job while it runs: neither is refused, neither starts a reply.
-    await t.send('First follow-up', { jobId: job.id })
-    const view = await t.send('Second follow-up', { jobId: job.id })
+    // Two more while it runs: neither is refused, neither starts a reply.
+    await t.send('First follow-up')
+    const view = await t.send('Second follow-up')
     expect(view.session.kind).toBe('primary')
     await new Promise((r) => setTimeout(r, 50))
     expect(t.replies()).toHaveLength(1)
-    const thread = await t.d((x) => x.getSession(job.threadId!)!)
+    const thread = await t.d((x) => x.primarySession())
     let path = await t.d((x) => x.activePath(thread).map((n) => n.message))
     expect(path.map((m) => [m.role, m.status, m.role === 'user' ? m.content : ''])).toEqual([
       ['user', 'complete', 'slow q1'],
@@ -344,6 +355,7 @@ describe('the team tools', () => {
       'Second follow-up',
       'Tomo done: Second follow-up'
     ])
+    expect(await t.d((x) => x.listJobs())).toEqual([])
     await t.runtime.dispose()
   })
 
@@ -355,12 +367,12 @@ describe('the team tools', () => {
     await first.until(first.idle, 'replies')
     const job = (await first.d((x) => x.listJobs())).find((j) => j.title === 'Map the route')!
     const scoutThread = (await first.d((x) => x.workerThread(job.id, scout.id)))!
-    const tomoThread = (await first.d((x) => x.listJobs().find((j) => j.title !== 'Map the route')!)).threadId!
-    // As a quit can leave things: a message held in a job's thread, and a post made for Scout that
-    // never reached its thread.
+    // As a quit can leave things: a message held in Tomo's conversation, and a post made for Scout
+    // that never reached its thread.
     await first.d((x) => {
-      const thread = x.getSession(tomoThread)!
-      x.insertMessage({ sessionId: thread.id, parentId: x.activePath(thread).at(-1)!.message.id, role: 'user', content: 'Held over the restart', status: 'complete' })
+      const primary = x.primarySession()
+      const held = x.insertMessage({ sessionId: primary.id, parentId: x.activePath(primary).at(-1)!.message.id, role: 'user', content: 'Held over the restart', status: 'complete' })
+      x.markVia(held.id, primary.id)
       x.appendPost({ threadId: job.threadId!, authorBotId: 'tomo', text: 'Also the scenic way', post: { kind: 'message', to: scout.id, state: null } })
     })
     await first.runtime.dispose()
@@ -379,10 +391,10 @@ describe('the team tools', () => {
       ['user', 'Tomo', 'Also the scenic way'],
       ['assistant', 'Scout', 'Scout done: Also the scenic way']
     ])
-    // The held message got its answer in its thread.
+    // The held message got its answer in Tomo's conversation.
     const tomoCalls = t.replies().filter((c) => botOf(c) === 'Tomo' && c.prompt.at(-1)?.text === 'Held over the restart')
     expect(tomoCalls).toHaveLength(1)
-    expect((await t.d((x) => x.activePath(x.getSession(tomoThread)!))).at(-1)!.message.content).toBe('Tomo done: Held over the restart')
+    expect((await t.conversation()).map((n) => n.message.content.split('\n').at(-1))).toContain('Tomo done: Held over the restart')
     // A second start finds nothing left to do.
     expect(await t.run(Team.use((x) => x.resume))).toBe(0)
     await t.runtime.dispose()
@@ -397,7 +409,7 @@ describe('the team tools', () => {
     await t.until(t.idle, 'replies')
     const report = (await t.posts('open job')).at(-1)!
     expect(report.content).toContain('Error: Only Tomo, the primary bot, opens jobs')
-    expect((await t.d((x) => x.listJobs())).map((j) => j.title).sort()).toEqual(['open job', 'start Scout | open job'])
+    expect((await t.d((x) => x.listJobs())).map((j) => j.title)).toEqual(['open job'])
     await t.runtime.dispose()
   })
 
@@ -499,6 +511,50 @@ describe('the team tools', () => {
     await t.runtime.dispose()
   })
 
+  test("a job Tomo hands itself runs in its own thread; a worker's answer comes back there, and Tomo's report to its chat", async () => {
+    const t = setup()
+    const scout = await t.addBot({ name: 'Scout' })
+    await t.send('start yourself | ask Scout | Check the map\nstart myself | open job')
+    const reported = async (title: string) => (await t.posts(title)).some((p) => p.post?.kind === 'report' && p.post.to === 'tomo' && p.authorBotId === 'tomo')
+    await t.until(async () => (await reported('ask Scout | Check the map')) && (await reported('open job')), "both of Tomo's own reports", 10_000)
+    await t.until(t.idle, 'replies', 10_000)
+    const bots = await t.d((x) => x.listBots())
+    const jobs = await t.d((x) => x.listJobs())
+    const map = jobs.find((j) => j.title === 'ask Scout | Check the map')!
+    expect(map.ownerBotId).toBe('tomo')
+    const own = (await t.d((x) => x.workerThread(map.id, 'tomo')))!
+    expect(own.kind).toBe('worker')
+    // In its own thread Tomo works as a worker does: it asked Scout, ended there, and Scout's answer
+    // came back to this thread (not to the chat), where Tomo's reply to it is the report.
+    expect((await t.d((x) => x.activePath(own))).map((n) => [n.message.role, name(bots, n.message.authorBotId), n.message.post?.kind ?? null])).toEqual([
+      ['user', 'Tomo', 'task'],
+      ['assistant', 'Tomo', null],
+      ['user', 'Scout', 'report'],
+      ['assistant', 'Tomo', null]
+    ])
+    const ownCalls = t.replies().filter((c) => systemOf(c).includes('working on a task you handed yourself'))
+    expect(systemOf(ownCalls[0]!)).toContain('This is your own thread on a job you handed yourself.')
+    expect(systemOf(ownCalls[0]!)).not.toContain('You lead a team')
+    expect(postsAre(bots, await t.posts(map.title))).toEqual([
+      ['task', 'Tomo', 'Tomo', null],
+      ['message', 'Tomo', 'Scout', null],
+      ['report', 'Scout', 'Tomo', null],
+      ['report', 'Tomo', 'Tomo', null]
+    ])
+    expect((await t.d((x) => x.workerThread(map.id, scout.id)))?.kind).toBe('worker')
+    // From its own thread it opens no jobs.
+    expect((await t.posts('open job')).at(-1)!.content).toContain("Error: You're working on a job in its own thread")
+    expect(jobs.map((j) => j.title).sort()).toEqual(['ask Scout | Check the map', 'open job'])
+    // Tomo's chat: the hand-off, then its two reports as turns from itself, each answered once.
+    const rows = (await shape(t)).filter((r) => r[1] === 'Tomo' && r[2] === 'report')
+    expect(rows.map((r) => r[3]).sort()).toEqual([
+      "Tomo done: Error: You're working on a job in its own thread: do the work here, or ask one of your bots on this job with message. If it needs a job of its own, say so in your report.",
+      'Tomo done: Scout done: Check the map'
+    ])
+    expect((await t.conversation()).filter((n) => n.message.role === 'assistant' && !n.message.post)).toHaveLength(3)
+    await t.runtime.dispose()
+  })
+
   test('a request bouncing between two bots is stopped, and the user told in the primary’s conversation', async () => {
     const t = setup()
     await t.addBot({ name: 'Scout' })
@@ -569,8 +625,9 @@ describe('the pure parts', () => {
     ).toEqual({ tomo: 'idle', w: 'waiting', work: 'working', think: 'thinking', stuck: 'stuck', done: 'done', old: 'idle' })
   })
 
-  test("a report is the reply's words, without its steps", () => {
+  test("a report is the reply's words, without its steps; an artifact is named, not carried", () => {
     expect(reportText('Looked.\n::step {"tool":"x","label":"Searched","ok":true}\nFound two flights.')).toBe('Looked.\n\nFound two flights.')
+    expect(reportText('Here it is.\n<artifact identifier="cats" title="Cats">\n<h1>Cats</h1>\n</artifact>\nDone.')).toBe("Here it is.\n\n(Made “Cats”: it's in the job's thread.)\n\nDone.")
   })
 
   test('a thread waits on turns nothing answered: user turns after its last reply; posts answer nothing', () => {

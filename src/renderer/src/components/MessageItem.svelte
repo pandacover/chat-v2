@@ -71,7 +71,8 @@
   /** What computer use waits on in this reply. */
   const wait = $derived(app.computerWait?.messageId === message.id ? app.computerWait : null)
   // The Stop shortcut works while another app covers the chat; say so while a computer reply runs.
-  const computerRun = $derived(streaming && app.chat.computerEnabled && app.computerSupported)
+  // Tomo's own conversation never uses the computer: that work runs in a job's thread.
+  const computerRun = $derived(streaming && !primary && app.chat.computerEnabled && app.computerSupported)
   /** The computer tool this reply runs now; while a card asks something, the card says it. */
   const doing = $derived(streaming && !wait ? (app.computerDoing.get(message.id) ?? null) : null)
   /**
@@ -203,7 +204,14 @@
   </div>
 {/snippet}
 
-{#if message.post || (message.role === 'user' && message.authorBotId)}
+{#if message.post?.kind === 'topic'}
+  <!-- New topic: Tomo starts afresh from here; nothing above is carried into its next reply. -->
+  <div class="msg flex items-center gap-3 {far ? 'far' : ''}" role="separator" aria-label="New topic" data-topic in:fade={{ duration: fresh ? 200 : 0 }}>
+    <span class="flex-1 border-t border-line"></span>
+    <span class="mono-label shrink-0" use:tip={`${app.primaryBot?.name ?? 'Tomo'} starts afresh from here`}>New topic</span>
+    <span class="flex-1 border-t border-line"></span>
+  </div>
+{:else if message.post || (message.role === 'user' && message.authorBotId)}
   <!-- A bot's post (a task, message or report), or what a bot sent this bot's own thread. -->
   <div class="msg {far ? 'far' : ''}">
     <PostCard {message} job={primary ? job : null} {fresh} />

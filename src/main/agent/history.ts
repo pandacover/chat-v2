@@ -40,11 +40,32 @@ export interface TurnPlan {
   baseCost: number
   /** The messages the prompt carries, oldest first. The last is the user message being answered, unless continuing from the reply's own checkpoint. */
   turns: Message[]
+  /**
+   * What the topic boundary the turns start after hands on to a fresh session (its text), or null.
+   * Only when nothing after the boundary is resumed: a resumed session had it in its first prompt.
+   */
+  carried: string | null
 }
+
+/**
+ * Topic boundaries. In the primary's conversation, New topic puts a divider in the message tree
+ * (an assistant row with post kind 'topic', which answers nothing): the next reply starts a fresh
+ * Claude Code session, and nothing before the divider is resumed or carried as transcript. The
+ * divider's text, when it has any, is handed to that reply instead (a running summary, say). This
+ * is the one place that knows where a conversation's history starts.
+ */
+export const isTopicStart = (m: Pick<Message, 'role' | 'post'>): boolean => m.role === 'assistant' && m.post?.kind === 'topic'
+
+/** Where the history a reply may see starts in `lineage` (root first): the index of its last topic divider, or -1. */
+export const topicStart = (lineage: readonly Pick<Message, 'role' | 'post'>[]): number => lineage.findLastIndex(isTopicStart)
+
+/** A topic divider's text, as the first block of the fresh session after it. */
+export const carriedText = (text: string) => `<earlier_topics>\n${text.trim()}\n</earlier_topics>`
 
 /**
  * Plans the reply to the user message that ends `lineage` (root first). `reply` is the
  * assistant message being written; `continuing` when it already has text to carry on from.
+ * Nothing before the last topic divider in `lineage` is resumed or carried.
  */
 export const planTurn = (lineage: readonly Message[], reply: Message, continuing: boolean, look: SessionLookup): TurnPlan => {
   const resumable = (m: Message) => {
@@ -58,12 +79,14 @@ export const planTurn = (lineage: readonly Message[], reply: Message, continuing
   })
   // A reply cut off after its first checkpoint: its own session has everything up to there.
   const own = continuing ? resumable(reply) : null
-  if (own) return { ...from(reply, own), turns: [] }
-  for (let i = lineage.length - 1; i >= 0; i--) {
+  if (own) return { ...from(reply, own), turns: [], carried: null }
+  const start = topicStart(lineage)
+  for (let i = lineage.length - 1; i > start; i--) {
     const p = resumable(lineage[i]!)
-    if (p) return { ...from(lineage[i]!, p), turns: lineage.slice(i + 1) }
+    if (p) return { ...from(lineage[i]!, p), turns: lineage.slice(i + 1), carried: null }
   }
-  return { resume: null, baseCost: 0, turns: [...lineage] }
+  const mark = start >= 0 ? lineage[start]! : null
+  return { resume: null, baseCost: 0, turns: lineage.slice(start + 1), carried: mark?.content.trim() ? mark.content : null }
 }
 
 /** In every system prompt, so it never changes between turns (which would miss the cache). */
