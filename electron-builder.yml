@@ -59,17 +59,15 @@ mac:
     NSMicrophoneUsageDescription: Tomo uses the microphone for voice input.
     # Computer use drives other apps through System Events (osascript) on macOS.
     NSAppleEventsUsageDescription: Tomo uses other apps for you when you turn on computer use in a chat.
-  # One build per architecture: a universal app carries both and is twice the size. Apps from
-  # before the split download "-universal.dmg": release.yml uploads the Intel DMG under that name
-  # too (it runs on both through Rosetta, and the next update moves Apple silicon to arm64).
+  # Apple silicon only: no Intel or universal builds.
   target:
-    # The DMGs are for first installs, and for ad-hoc signed apps, which still update by opening
-    # the DMG for their processor (chat-v2-<version>-<arch>.dmg): keep these names.
+    # The DMG is for first installs, and for ad-hoc signed apps, which still update by opening
+    # it (chat-v2-<version>-arm64.dmg): keep this name.
     - target: dmg
-      arch: [arm64, x64]
-    # Squirrel.Mac installs updates from the zips, which also carry latest-mac.yml.
+      arch: [arm64]
+    # Squirrel.Mac installs updates from the zip, described by latest-mac.yml.
     - target: zip
-      arch: [arm64, x64]
+      arch: [arm64]
   # A literal chat-v2- prefix, not ${productName}: ad-hoc signed apps open the DMG by this name.
   artifactName: chat-v2-${version}-${arch}.${ext}
 
