@@ -30,7 +30,8 @@
     far = false,
     primary = false,
     job = null,
-    showAuthor = false
+    showAuthor = false,
+    queued = false
   }: {
     node: PathNode
     last?: boolean
@@ -45,6 +46,8 @@
     job?: Job | null
     /** Several bots write in this thread (a job's with posts, or a bot's own): replies say whose they are. */
     showAuthor?: boolean
+    /** A message sent while a reply ran, waiting to be answered once that ends. */
+    queued?: boolean
   } = $props()
   const author = $derived(primary || showAuthor ? (app.bots.find((b) => b.id === node.message.authorBotId) ?? (primary ? app.primaryBot : null)) : null)
 
@@ -193,9 +196,19 @@
   }
 </script>
 
+{#snippet queuedNote(pad: string)}
+  <!-- Quiet: it goes as soon as the reply it waits for ends and its own starts. -->
+  <div class="mono-label flex h-4 items-center gap-1.5 {pad}" data-queued use:tip={'Sent while a reply was running: answered as soon as it ends'} in:fade={{ duration: 160 }} out:fade={{ duration: 120 }}>
+    <Icon name="clock" size={11} />Queued
+  </div>
+{/snippet}
+
 {#if message.post || (message.role === 'user' && message.authorBotId)}
   <!-- A bot's post (a task, message or report), or what a bot sent this bot's own thread. -->
-  <div class="msg {far ? 'far' : ''}"><PostCard {message} job={primary ? job : null} {fresh} /></div>
+  <div class="msg {far ? 'far' : ''}">
+    <PostCard {message} job={primary ? job : null} {fresh} />
+    {#if queued}{@render queuedNote('mt-2 pl-1')}{/if}
+  </div>
 {:else if message.role === 'user'}
   <div class="msg user group flex flex-col items-end gap-1.5 {far ? 'far' : ''}" in:fly={{ y: 8, duration: fresh ? 240 : 0 }}>
     {#if message.attachments.length > 0}
@@ -257,6 +270,8 @@
       </div>
     {/if}
     </div>
+
+    {#if queued && !editing}{@render queuedNote('pr-1')}{/if}
 
     {#if editing}
       <div class="flex items-center gap-1.5" data-edit-actions in:fade={{ duration: 120 }}>

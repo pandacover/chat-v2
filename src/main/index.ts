@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { BrowserWindow, type WebContents, WebContentsView, app, ipcMain, autoUpdater as nativeUpdater, nativeTheme, safeStorage, session, shell, webContents } from 'electron'
-import { Effect, Layer, ManagedRuntime } from 'effect'
+import { Cause, Effect, Layer, ManagedRuntime } from 'effect'
 import { adUrlPatterns } from '@shared/blocklist'
 import type { BrowserEvent, StreamEvent } from '@shared/types'
 import { type MainServices, pinWindow, registerIpc } from './ipc'
@@ -386,6 +386,13 @@ app.whenReady().then(async () => {
       const stale = yield* db.use((d) => d.pruneOrphanAttachments(Date.now() - 24 * 60 * 60 * 1000))
       yield* attachments.removeFiles(stale)
     })
+  )
+  // What the last run left waiting (messages held behind a reply, posts a bot never got) is answered now.
+  void rt.runPromise(
+    Team.use((t) => t.resume).pipe(
+      Effect.tap((n) => (n > 0 ? Effect.logInfo(`Answered held messages in ${n} threads`) : Effect.void)),
+      Effect.catchCause((cause) => Effect.logWarning(`Answering held messages failed: ${Cause.pretty(cause)}`))
+    )
   )
 
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {

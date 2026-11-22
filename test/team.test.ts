@@ -1,5 +1,7 @@
-// Workers (services/Team.ts, agent/team.ts): the four team tools, run end to end against a fake
-// Claude Code that plays every bot from a script, plus the pure parts (bouncing, presence).
+// Workers (services/Team.ts, agent/team.ts): the team tools, run end to end against a fake Claude
+// Code that plays every bot from a script, how what bots say is delivered (reports as turns in the
+// primary's conversation, held while a reply runs, caught up at startup), plus the pure parts
+// (bouncing, presence).
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -8,7 +10,7 @@ import { Effect, Layer, ManagedRuntime } from 'effect'
 import type { Bot, BotPatch, JobTarget, Message, StreamEvent } from '../src/shared/types'
 import { AppPaths } from '../src/main/services/AppPaths'
 import { Attachments } from '../src/main/services/Attachments'
-import { Broadcaster, Chat } from '../src/main/services/Chat'
+import { Broadcaster, Chat, unanswered } from '../src/main/services/Chat'
 import { Db } from '../src/main/services/Db'
 import { Jobs } from '../src/main/services/Jobs'
 import { SettingsStore } from '../src/main/services/SettingsStore'
@@ -39,6 +41,7 @@ const asked = (c: Call) => {
   const last = c.prompt.at(-1)?.text ?? ''
   return /<from_bot [^>]*>\n([\s\S]*)\n<\/from_bot>/.exec(last)?.[1] ?? last
 }
+const promptOf = (c: Call) => c.prompt.map((b) => b.text ?? '').join('\n---\n')
 
 /** Gates a script can wait on (`gate <name>`), opened by the test. */
 const gates = new Map<string, { promise: Promise<void>; open: () => void }>()
@@ -54,15 +57,16 @@ const gate = (name: string) => {
 
 /**
  * Every bot, scripted. A message is read line by line:
- *   start <Bot> | <task>      start_job (and `wait` after it waits on that job)
- *   wait                      wait on the job started last
+ *   start <Bot> | <task>      start_job
  *   ask <Bot> | <text>        message
- *   waitfor <Bot> <seconds>   wait for that bot
- *   loop <Bot> | <text> | <n> message and wait (1 s), n times
+ *   try wait                  calls the wait tool there used to be
  *   open job                  start_job, from wherever it runs
+ *   list                      list_jobs
  *   gate <name>               waits until the test opens it
  *   slow <name>               the same, said as work
- * Builder answers "Do the thing" with "No, you do it." Each reply ends saying what its tools said.
+ *   hold-<name>               anywhere in a report Tomo answers: its reply waits on that gate
+ * Builder answers "Do the thing" with "No, you do it."; a worker told that asks Builder again.
+ * Each reply ends saying what its tools said.
  */
 const script: Script = async function* (t) {
   if (isAsk(t.call)) {
@@ -80,38 +84,39 @@ const script: Script = async function* (t) {
   const out: string[] = []
   const say = (r: { permission: { behavior: string; message?: string }; result: { content: Array<{ text?: string }> } | null }) =>
     r.permission.behavior === 'deny' ? `denied: ${r.permission.message}` : (r.result?.content ?? []).map((c) => c.text ?? '').join('')
-  let lastJob: string | null = null
-  // A worker's task can carry several commands, joined with ' ; '.
-  for (const line of said.split(who === 'Tomo' ? '\n' : /\n| ; /).map((l) => l.trim()).filter(Boolean)) {
+  // Tomo answering a bot (a report in its conversation) holds on what the report names.
+  const hold = who === 'Tomo' && /^<from_bot /.test(t.call.prompt.at(-1)?.text ?? '') ? /\bhold-(\w+)/.exec(said)?.[1] : undefined
+  if (hold) {
+    yield* t.text('Tomo is on it.\n')
+    await t.wait(gate(hold).promise)
+    out.push(`${hold} released`)
+  }
+  // A worker's task can carry several commands, joined with ' ; '; told "No, you do it.", it asks again.
+  const lines = who !== 'Tomo' && said.trim() === 'No, you do it.' ? ['ask Builder | Do the thing'] : said.split(who === 'Tomo' ? '\n' : /\n| ; /)
+  for (const line of lines.map((l) => l.trim()).filter(Boolean)) {
     let m: RegExpExecArray | null
-    if ((m = /^start (\w+) \| (.+)$/.exec(line))) {
-      const r = say(yield* t.tool('mcp__team__start_job', { bot: m[1], task: m[2], title: m[2] }))
-      lastJob = /\(id ([^)]+)\)/.exec(r)?.[1] ?? null
-      out.push(r)
-    } else if (line === 'wait') out.push(say(yield* t.tool('mcp__team__wait', { thread: lastJob, timeout_seconds: 20 })))
+    if ((m = /^start (\w+) \| (.+)$/.exec(line))) out.push(say(yield* t.tool('mcp__team__start_job', { bot: m[1], task: m[2], title: m[2] })))
     else if ((m = /^ask (\w+) \| (.+)$/.exec(line))) out.push(say(yield* t.tool('mcp__team__message', { to: m[1], text: m[2] })))
-    else if ((m = /^waitfor (\w+) (\d+)$/.exec(line))) out.push(say(yield* t.tool('mcp__team__wait', { bot: m[1], timeout_seconds: Number(m[2]) })))
-    else if ((m = /^loop (\w+) \| (.+) \| (\d+)$/.exec(line))) {
-      for (let i = 0; i < Number(m[3]); i++) {
-        out.push(say(yield* t.tool('mcp__team__message', { to: m[1], text: m[2] })))
-        out.push(say(yield* t.tool('mcp__team__wait', { bot: m[1], timeout_seconds: 1 })))
-      }
-    } else if (line === 'open job') out.push(say(yield* t.tool('mcp__team__start_job', { bot: 'Builder', task: 'Something new' })))
+    else if (line === 'try wait') out.push(say(yield* t.tool('mcp__team__wait', { timeout_seconds: 1 })))
+    else if (line === 'open job') out.push(say(yield* t.tool('mcp__team__start_job', { bot: 'Builder', task: 'Something new' })))
     else if (line === 'list') out.push(say(yield* t.tool('mcp__team__list_jobs', {})))
     else if ((m = /^(?:gate|slow) (\w+)/.exec(line))) {
       yield* t.text(`${who} is on it.\n`)
       await t.wait(gate(m[1]!).promise)
       out.push(`${m[1]} finished`)
-    } else out.push(line)
+    } else if (!hold || line !== said.trim()) out.push(line)
   }
   yield* t.text(`${who} done: ${out.join(' / ')}`)
   yield t.result()
 }
 
-const setup = () => {
-  const dir = mkdtempSync(join(tmpdir(), 'chat-v2-team-'))
-  dirs.push(dir)
-  writeFileSync(join(dir, 'config.json'), JSON.stringify({ titleModel: '', memoryModel: '', systemPrompt: 'Be a fox.' }))
+/** A fresh data folder; or `dir` as an earlier run left it (the app started again). */
+const setup = (dir?: string) => {
+  if (!dir) {
+    dir = mkdtempSync(join(tmpdir(), 'chat-v2-team-'))
+    dirs.push(dir)
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ titleModel: '', memoryModel: '', systemPrompt: 'Be a fox.' }))
+  }
   const events: StreamEvent[] = []
   const fake = fakeQuery(script)
   const paths = AppPaths.layer(dir)
@@ -143,17 +148,25 @@ const setup = () => {
       return job?.threadId ? x.activePath(x.getSession(job.threadId)!).map((n) => n.message).filter((m) => m.post) : []
     })
   const replies = () => fake.calls.filter((c) => !isAsk(c))
-  const idle = () => d((x) => x.listSessions().every((s) => x.streamingIds(s.id).length === 0))
-  return { runtime, run, d, until, addBot, send, posts, replies, events, idle }
+  const idle = () => d((x) => [x.primarySession(), ...x.listSessions()].every((s) => x.streamingIds(s.id).length === 0))
+  /** The primary's conversation. */
+  const conversation = async () => (await run(Jobs.use((j) => j.primary))).path
+  /** Tomo's replies in its own conversation (to reports and messages). */
+  const tomoAnswers = () => replies().filter((c) => botOf(c) === 'Tomo' && /<from_bot /.test(c.prompt.at(-1)?.text ?? ''))
+  return { dir, runtime, run, d, until, addBot, send, posts, replies, events, idle, conversation, tomoAnswers }
 }
 
 type T = ReturnType<typeof setup>
-const lastPrimary = async (t: T) => (await t.run(Jobs.use((j) => j.primary))).path.at(-1)!.message
 const name = (bots: Bot[], id: string | null) => bots.find((b) => b.id === id)?.name
 const postsAre = (bots: Bot[], ps: Message[]) => ps.map((p) => [p.post!.kind, name(bots, p.authorBotId), name(bots, p.post!.to), p.post!.state])
+/** The primary's conversation as [role, who, kind, first line] rows. */
+const shape = async (t: T) => {
+  const bots = await t.d((x) => x.listBots())
+  return (await t.conversation()).map((n) => [n.message.role, name(bots, n.message.authorBotId) ?? 'user', n.message.post?.kind ?? null, n.message.content.split('\n').at(-1)!])
+}
 
 describe('the team tools', () => {
-  test('one bot gets no team tools; once there is a worker, every reply on a job gets them', async () => {
+  test('one bot gets no team tools; once there is a worker, every reply on a job gets them, and no wait tool', async () => {
     const t = setup()
     await t.send('hello')
     await t.until(t.idle, 'first reply')
@@ -161,26 +174,36 @@ describe('the team tools', () => {
     expect(systemOf(t.replies()[0]!)).not.toContain('team of bots')
 
     await t.addBot({ name: 'Scout', instructions: 'Finds things out on the web.\nBe thorough.' })
-    await t.send('hello again')
+    await t.send('try wait')
     await t.until(t.idle, 'second reply')
     const second = t.replies()[1]!
     expect(Object.keys(second.options.mcpServers ?? {})).toContain('team')
     expect(systemOf(second)).toContain('You lead a team of bots')
     expect(systemOf(second)).toContain('- Scout: Finds things out on the web. (tools: none beyond memory and notes)')
+    // Nobody waits: the tool is gone, and the instructions say the answer comes as a turn.
+    expect(systemOf(second)).toContain('select:mcp__team__start_job,mcp__team__message,mcp__team__list_jobs"')
+    expect(systemOf(second)).not.toMatch(/\bwait\(/)
+    expect(systemOf(second)).toContain("don't track it or wait for it")
+    expect(systemOf(second)).toContain("don't repeat it")
+    const thread = await t.d((x) => x.listJobs().find((j) => j.title === 'try wait')!)
+    const said = (await t.d((x) => x.activePath(x.getSession(thread.threadId!)!))).at(-1)!.message.content
+    expect(said).toMatch(/Tomo done: .*wait/i)
+    expect(said).toContain('not found')
     await t.runtime.dispose()
   })
 
-  test('start_job opens a job for a worker, which works in its own thread and reports back to the primary as a card', async () => {
+  test("start_job opens a job for a worker; its report arrives in the primary's conversation as a turn, which Tomo answers", async () => {
     const t = setup()
     const scout = await t.addBot({ name: 'Scout' })
     await t.send('start Scout | Find the cheapest flight')
-    await t.until(async () => (await t.posts('Find the cheapest flight')).some((p) => p.post?.kind === 'report'), 'the report')
+    await t.until(async () => t.tomoAnswers().length === 1, "Tomo's answer to the report")
     await t.until(t.idle, 'all replies')
     const bots = await t.d((x) => x.listBots())
     const job = (await t.d((x) => x.listJobs())).find((j) => j.title === 'Find the cheapest flight')!
     // Owned by the bot doing it; the primary answers on its shared thread.
     expect(job.ownerBotId).toBe(scout.id)
     expect((await t.d((x) => x.getSession(job.threadId!)))!.botId).toBe('tomo')
+    // The shared thread keeps the record: the task and the report.
     expect(postsAre(bots, await t.posts(job.title))).toEqual([
       ['task', 'Tomo', 'Scout', null],
       ['report', 'Scout', 'Tomo', null]
@@ -201,28 +224,167 @@ describe('the team tools', () => {
     const scoutCall = t.replies().find((c) => botOf(c) === 'Scout')!
     expect(scoutCall.prompt.at(-1)!.text).toBe('<from_bot name="Tomo" kind="task">\nFind the cheapest flight\n</from_bot>')
     expect(systemOf(scoutCall)).toContain("You can't open jobs")
-    expect(systemOf(scoutCall)).not.toContain('this conversation is one job\'s thread')
-    // The report, in the primary's conversation, from the job's thread.
-    const card = await lastPrimary(t)
-    expect(card).toMatchObject({ role: 'assistant', authorBotId: scout.id, sessionId: job.threadId, post: { kind: 'report', to: 'tomo', state: null } })
-    expect(card.content).toBe('Scout done: Find the cheapest flight')
-    expect(t.events.some((e) => e.type === 'thread' && e.sessionId === job.threadId)).toBe(true)
+    expect(systemOf(scoutCall)).toContain('end your reply there: its answer arrives as your next turn')
+    expect(systemOf(scoutCall)).not.toMatch(/\bwait\(/)
+    expect(systemOf(scoutCall)).not.toContain("this conversation is one job's thread")
+
+    // In the primary's conversation: the report once, as a turn from Scout about the job, then Tomo's answer.
+    const primaryId = (await t.d((x) => x.primarySession())).id
+    const conversation = await t.conversation()
+    expect(await shape(t)).toEqual([
+      ['user', 'user', null, 'start Scout | Find the cheapest flight'],
+      ['assistant', 'Tomo', null, expect.stringContaining('Tomo done: Opened the job “Find the cheapest flight”')],
+      ['user', 'Scout', 'report', 'Scout done: Find the cheapest flight'],
+      ['assistant', 'Tomo', null, 'Tomo done: Scout done: Find the cheapest flight']
+    ])
+    const [turn, answer] = conversation.slice(2)
+    expect(turn!.message).toMatchObject({ sessionId: primaryId, authorBotId: scout.id, post: { kind: 'report', to: 'tomo', state: null } })
+    expect(turn!.jobId).toBe(job.id)
+    expect(answer!.jobId).toBe(job.id)
+    expect(answer!.message.sessionId).toBe(primaryId)
+    // Tomo was told who reported, about which job, and how to answer it.
+    const tomo = t.tomoAnswers()[0]!
+    expect(tomo.prompt.at(-1)!.text).toBe(`<from_bot name="Scout" kind="report" job="Find the cheapest flight" job_id="${job.id}">\nScout done: Find the cheapest flight\n</from_bot>`)
+    expect(Object.keys(tomo.options.mcpServers ?? {})).toContain('team')
+    expect(systemOf(tomo)).toContain('it arrives in your conversation with the user as a turn of its own')
+    // The report turn isn't the user's: the next message routes as before, and nothing was filed as a job.
+    expect((await t.d((x) => x.lastRouted(primaryId)))?.jobId).not.toBe(job.id)
+    expect((await t.d((x) => x.listJobs())).map((j) => j.title).sort()).toEqual(['Find the cheapest flight', 'start Scout | Find the cheapest flight'])
+    expect(t.events.some((e) => e.type === 'thread' && e.sessionId === primaryId)).toBe(true)
     // Scout is done; Tomo idle.
     const presence = await t.run(Team.use((x) => x.presence))
     expect(presence).toEqual({ tomo: 'idle', [scout.id]: 'done' })
     await t.runtime.dispose()
   })
 
-  test('wait gives the primary the report; list_jobs shows the jobs and their bots', async () => {
+  test('list_jobs shows the jobs and their bots', async () => {
     const t = setup()
     await t.addBot({ name: 'Scout' })
-    await t.send('start Scout | Check the weather\nwait\nlist')
+    await t.send('start Scout | Check the weather\nlist')
+    await t.until(async () => t.tomoAnswers().length === 1, "Tomo's answer to the report")
     await t.until(t.idle, 'replies', 8000)
-    const reply = (await t.d((x) => x.listJobs().find((j) => j.title !== 'Check the weather')!))
+    const reply = await t.d((x) => x.listJobs().find((j) => j.title !== 'Check the weather')!)
     const thread = await t.d((x) => x.activePath(x.getSession(reply.threadId!)!).map((n) => n.message))
-    const said = thread.at(-1)!.content
-    expect(said).toContain('Scout (report):\nScout done: Check the weather')
-    expect(said).toMatch(/Open jobs:\n- Check the weather \[id [^\]]+\] · owner Scout · bots: Scout \(done\), Tomo \(\w+\)/)
+    const said = thread.findLast((m) => m.role === 'assistant' && !m.post)!.content
+    expect(said).toContain("You don't need to wait or check on it")
+    expect(said).toMatch(/Open jobs:\n- Check the weather \[id [^\]]+\] · owner Scout · bots: Scout \(\w+\), Tomo \(\w+\)/)
+    await t.runtime.dispose()
+  })
+
+  test('a report arriving while Tomo is mid-reply waits, and is answered after', async () => {
+    const t = setup()
+    await t.addBot({ name: 'Scout' })
+    await t.addBot({ name: 'Builder' })
+    await t.send('start Scout | hold-tomo1\nstart Builder | slow b1')
+    // Scout reports at once; Tomo's answer to it runs until the test lets it go.
+    await t.until(async () => t.tomoAnswers().length === 1, "Tomo starts answering Scout's report")
+    gate('b1').open()
+    await t.until(async () => (await t.posts('slow b1')).some((p) => p.post?.kind === 'report'), "Builder's report")
+    await new Promise((r) => setTimeout(r, 100))
+    // Builder's report is in Tomo's conversation, held: no reply for it yet.
+    expect(t.tomoAnswers()).toHaveLength(1)
+    let rows = await shape(t)
+    expect(rows.at(-1)).toEqual(['user', 'Builder', 'report', 'Builder done: b1 finished'])
+    expect(rows.at(-2)).toEqual(['assistant', 'Tomo', null, 'Tomo is on it.'])
+    const primary = await t.d((x) => x.primarySession())
+    expect(await t.d((x) => unanswered(x.activePath(primary)))).toBe(true)
+    gate('tomo1').open()
+    await t.until(async () => t.tomoAnswers().length === 2, 'Tomo answers the held report once its reply ends')
+    await t.until(t.idle, 'replies')
+    rows = await shape(t)
+    expect(rows.slice(2)).toEqual([
+      ['user', 'Scout', 'report', 'Scout done: hold-tomo1'],
+      ['assistant', 'Tomo', null, 'Tomo done: tomo1 released'],
+      ['user', 'Builder', 'report', 'Builder done: b1 finished'],
+      ['assistant', 'Tomo', null, 'Tomo done: Builder is on it. / Builder done: b1 finished']
+    ])
+    await t.runtime.dispose()
+  })
+
+  test("a user message while Tomo is mid-reply is queued, not refused; two queued are answered by one reply", async () => {
+    const t = setup()
+    await t.send('slow q1')
+    const job = await t.d((x) => x.listJobs()[0]!)
+    await t.until(async () => t.replies().length === 1, 'the first reply runs')
+    // Two more for the same job while it runs: neither is refused, neither starts a reply.
+    await t.send('First follow-up', { jobId: job.id })
+    const view = await t.send('Second follow-up', { jobId: job.id })
+    expect(view.session.kind).toBe('primary')
+    await new Promise((r) => setTimeout(r, 50))
+    expect(t.replies()).toHaveLength(1)
+    const thread = await t.d((x) => x.getSession(job.threadId!)!)
+    let path = await t.d((x) => x.activePath(thread).map((n) => n.message))
+    expect(path.map((m) => [m.role, m.status, m.role === 'user' ? m.content : ''])).toEqual([
+      ['user', 'complete', 'slow q1'],
+      ['assistant', 'streaming', ''],
+      ['user', 'complete', 'First follow-up'],
+      ['user', 'complete', 'Second follow-up']
+    ])
+    // Both show in the primary's conversation, waiting.
+    expect((await t.conversation()).map((n) => n.message.content.trim())).toEqual(['slow q1', 'Tomo is on it.', 'First follow-up', 'Second follow-up'])
+    gate('q1').open()
+    await t.until(async () => t.replies().length === 2, 'the queued messages are answered')
+    await t.until(t.idle, 'replies')
+    expect(t.replies()).toHaveLength(2)
+    const answer = t.replies()[1]!
+    expect(promptOf(answer)).toContain('<user>\nFirst follow-up\n</user>')
+    expect(answer.prompt.at(-1)!.text).toBe('Second follow-up')
+    path = await t.d((x) => x.activePath(thread).map((n) => n.message))
+    expect(path.map((m) => [m.role, m.content.split('\n').at(-1)])).toEqual([
+      ['user', 'slow q1'],
+      ['assistant', 'Tomo done: q1 finished'],
+      ['user', 'First follow-up'],
+      ['user', 'Second follow-up'],
+      ['assistant', 'Tomo done: Second follow-up']
+    ])
+    expect((await t.conversation()).map((n) => n.message.content.split('\n').at(-1))).toEqual([
+      'slow q1',
+      'Tomo done: q1 finished',
+      'First follow-up',
+      'Second follow-up',
+      'Tomo done: Second follow-up'
+    ])
+    await t.runtime.dispose()
+  })
+
+  test("held turns are answered at startup, and a worker gets only the posts it didn't", async () => {
+    const first = setup()
+    const scout = await first.addBot({ name: 'Scout' })
+    await first.send('start Scout | Map the route')
+    await first.until(async () => first.tomoAnswers().length === 1, "Tomo's answer to the report")
+    await first.until(first.idle, 'replies')
+    const job = (await first.d((x) => x.listJobs())).find((j) => j.title === 'Map the route')!
+    const scoutThread = (await first.d((x) => x.workerThread(job.id, scout.id)))!
+    const tomoThread = (await first.d((x) => x.listJobs().find((j) => j.title !== 'Map the route')!)).threadId!
+    // As a quit can leave things: a message held in a job's thread, and a post made for Scout that
+    // never reached its thread.
+    await first.d((x) => {
+      const thread = x.getSession(tomoThread)!
+      x.insertMessage({ sessionId: thread.id, parentId: x.activePath(thread).at(-1)!.message.id, role: 'user', content: 'Held over the restart', status: 'complete' })
+      x.appendPost({ threadId: job.threadId!, authorBotId: 'tomo', text: 'Also the scenic way', post: { kind: 'message', to: scout.id, state: null } })
+    })
+    await first.runtime.dispose()
+
+    const t = setup(first.dir)
+    expect(await t.run(Team.use((x) => x.resume))).toBe(2)
+    await t.until(async () => t.tomoAnswers().length === 1, "Scout's second report reaches Tomo")
+    await t.until(t.idle, 'replies')
+    // Scout answered the post it never got, and only that: its task wasn't handed over again.
+    const scoutCalls = t.replies().filter((c) => botOf(c) === 'Scout')
+    expect(scoutCalls.map((c) => asked(c))).toEqual(['Also the scenic way'])
+    const bots = await t.d((x) => x.listBots())
+    expect((await t.d((x) => x.activePath(scoutThread))).map((n) => [n.message.role, name(bots, n.message.authorBotId), n.message.content.split('\n').at(-1)])).toEqual([
+      ['user', 'Tomo', 'Map the route'],
+      ['assistant', 'Scout', 'Scout done: Map the route'],
+      ['user', 'Tomo', 'Also the scenic way'],
+      ['assistant', 'Scout', 'Scout done: Also the scenic way']
+    ])
+    // The held message got its answer in its thread.
+    const tomoCalls = t.replies().filter((c) => botOf(c) === 'Tomo' && c.prompt.at(-1)?.text === 'Held over the restart')
+    expect(tomoCalls).toHaveLength(1)
+    expect((await t.d((x) => x.activePath(x.getSession(tomoThread)!))).at(-1)!.message.content).toBe('Tomo done: Held over the restart')
+    // A second start finds nothing left to do.
+    expect(await t.run(Team.use((x) => x.resume))).toBe(0)
     await t.runtime.dispose()
   })
 
@@ -239,12 +401,12 @@ describe('the team tools', () => {
     await t.runtime.dispose()
   })
 
-  test('a worker asking a worker with more access is held for the user, named on the card, then passed on', async () => {
+  test('a worker asking a worker with more access is held for the user, then passed on; it reports once the answer is in', async () => {
     const t = setup()
     const scout = await t.addBot({ name: 'Scout', modules: [] })
     const builder = await t.addBot({ name: 'Builder', modules: ['computer'] })
     const waiting = () => t.run(ComputerUse.use((c) => Effect.sync(c.waiting)))
-    await t.send('start Scout | ask Builder | Write the notes file ; waitfor Builder 10')
+    await t.send('start Scout | ask Builder | Write the notes file')
     await t.until(async () => (await waiting())?.kind === 'approval', 'the approval card')
     const card = (await waiting())!
     expect(card.kind === 'approval' && card.title).toBe('Scout asks Builder to do what Scout can’t')
@@ -254,7 +416,7 @@ describe('the team tools', () => {
     const scoutThread = await t.d((x) => x.workerThread(x.listJobs().find((j) => j.title.startsWith('ask Builder'))!.id, scout.id)!)
     expect(card.sessionId).toBe(scoutThread.id)
     expect((await t.run(Team.use((x) => x.presence)))[scout.id]).toBe('waiting')
-    const jobTitle = (await t.d((x) => x.listJobs().find((j) => j.ownerBotId === scout.id)!.title))
+    const jobTitle = await t.d((x) => x.listJobs().find((j) => j.ownerBotId === scout.id)!.title)
     expect(postsAre(await t.d((x) => x.listBots()), await t.posts(jobTitle)).at(-1)).toEqual(['message', 'Scout', 'Builder', 'held'])
     // Nothing reached Builder yet.
     expect(await t.d((x) => x.workerThread(x.listJobs().find((j) => j.title === jobTitle)!.id, builder.id))).toBeUndefined()
@@ -263,17 +425,22 @@ describe('the team tools', () => {
     await t.until(async () => (await t.posts(jobTitle)).some((p) => p.post?.kind === 'report' && p.post.to === 'tomo'), "Scout's report")
     await t.until(t.idle, 'replies')
     const bots = await t.d((x) => x.listBots())
+    // Scout's reply that asked Builder didn't report; its reply to Builder's answer did.
     expect(postsAre(bots, await t.posts(jobTitle))).toEqual([
       ['task', 'Tomo', 'Scout', null],
       ['message', 'Scout', 'Builder', null],
       ['report', 'Builder', 'Scout', null],
       ['report', 'Scout', 'Tomo', null]
     ])
-    const scoutReport = (await t.posts(jobTitle)).at(-1)!.content
-    expect(scoutReport).toContain('Builder (report):\nBuilder done: Write the notes file')
-    // Builder ran under its own rules, in its own thread, and only once: Scout read its report with wait.
+    expect((await t.posts(jobTitle)).at(-1)!.content).toBe('Scout done: Builder done: Write the notes file')
+    const scoutCalls = t.replies().filter((c) => botOf(c) === 'Scout')
+    expect(scoutCalls).toHaveLength(2)
+    expect(scoutCalls[0]!.prompt.at(-1)!.text).toContain('<from_bot name="Tomo" kind="task">')
+    expect(scoutCalls[1]!.prompt.at(-1)!.text).toBe('<from_bot name="Builder" kind="report">\nBuilder done: Write the notes file\n</from_bot>')
+    // Builder ran under its own rules, in its own thread, once.
     expect(t.replies().filter((c) => botOf(c) === 'Builder')).toHaveLength(1)
-    expect(t.replies().filter((c) => botOf(c) === 'Scout')).toHaveLength(1)
+    // Tomo heard one report, Scout's final one.
+    expect(t.tomoAnswers()).toHaveLength(1)
     await t.runtime.dispose()
   })
 
@@ -305,6 +472,7 @@ describe('the team tools', () => {
     await t.send('start Builder | Write the report')
     await t.until(async () => (await t.posts('Write the report')).some((p) => p.post?.kind === 'report'), 'the report')
     expect(await t.run(ComputerUse.use((c) => Effect.sync(c.waiting)))).toBeNull()
+    await t.until(t.idle, 'replies')
     await t.runtime.dispose()
   })
 
@@ -324,7 +492,9 @@ describe('the team tools', () => {
     gate('a').open()
     gate('b').open()
     await t.until(async () => (await t.posts('slow a')).length === 2 && (await t.posts('slow b')).length === 2, 'both reports')
-    const conversation = (await t.run(Jobs.use((j) => j.primary))).path.map((n) => n.message)
+    await t.until(async () => t.tomoAnswers().length === 2, 'Tomo answers both')
+    await t.until(t.idle, 'replies')
+    const conversation = (await t.conversation()).map((n) => n.message)
     expect(conversation.filter((m) => m.post?.kind === 'report').map((m) => m.content.split('\n').at(-1)).sort()).toEqual(['Builder done: b finished', 'Scout done: a finished'])
     await t.runtime.dispose()
   })
@@ -333,25 +503,29 @@ describe('the team tools', () => {
     const t = setup()
     await t.addBot({ name: 'Scout' })
     await t.addBot({ name: 'Builder' })
-    await t.send('start Scout | loop Builder | Do the thing | 4')
-    await t.until(async () => (await t.posts('loop Builder | Do the thing | 4')).some((p) => p.post?.kind === 'report' && p.post.to === 'tomo' && p.authorBotId !== 'tomo'), "Scout's report", 15000)
+    await t.send('start Scout | ask Builder | Do the thing')
+    const title = 'ask Builder | Do the thing'
+    await t.until(async () => (await t.posts(title)).some((p) => p.post?.state === 'stopped'), 'the bounce is stopped', 15000)
     await t.until(t.idle, 'replies')
     const bots = await t.d((x) => x.listBots())
-    const ps = postsAre(bots, await t.posts('loop Builder | Do the thing | 4'))
-    expect(ps.slice(0, 7)).toEqual([
+    const ps = postsAre(bots, await t.posts(title))
+    expect(ps).toEqual([
       ['task', 'Tomo', 'Scout', null],
       ['message', 'Scout', 'Builder', null],
       ['report', 'Builder', 'Scout', null],
       ['message', 'Scout', 'Builder', null],
       ['report', 'Builder', 'Scout', null],
       ['message', 'Scout', 'Builder', null],
-      ['report', 'Builder', 'Scout', 'stopped']
+      ['report', 'Builder', 'Scout', 'stopped'],
+      ['report', 'Tomo', 'Tomo', null]
     ])
-    expect(ps.filter((p) => p[3] === 'stopped').length).toBeGreaterThanOrEqual(2)
-    // Builder answered three times, not four: the fourth request was stopped too.
+    // Builder answered three times; its third answer went no further.
     expect(t.replies().filter((c) => botOf(c) === 'Builder')).toHaveLength(3)
-    const conversation = (await t.run(Jobs.use((j) => j.primary))).path.map((n) => n.message)
-    expect(conversation.some((m) => m.authorBotId === 'tomo' && m.content.includes('Scout and Builder kept passing the same request back and forth'))).toBe(true)
+    expect(t.replies().filter((c) => botOf(c) === 'Scout')).toHaveLength(3)
+    // The user sees the notice in Tomo's conversation, as a card; Tomo doesn't answer its own notice.
+    const conversation = (await t.conversation()).map((n) => n.message)
+    expect(conversation.some((m) => m.authorBotId === 'tomo' && m.post?.kind === 'report' && m.content.includes('Builder and Scout kept passing the same request back and forth'))).toBe(true)
+    expect(t.tomoAnswers()).toHaveLength(0)
     await t.runtime.dispose()
   })
 })
@@ -397,5 +571,15 @@ describe('the pure parts', () => {
 
   test("a report is the reply's words, without its steps", () => {
     expect(reportText('Looked.\n::step {"tool":"x","label":"Searched","ok":true}\nFound two flights.')).toBe('Looked.\n\nFound two flights.')
+  })
+
+  test('a thread waits on turns nothing answered: user turns after its last reply; posts answer nothing', () => {
+    const n = (role: Message['role'], post = false) => ({ message: { role, post: post ? { kind: 'report' as const, to: null, state: null } : null } })
+    expect(unanswered([n('root'), n('user'), n('assistant')])).toBe(false)
+    expect(unanswered([n('root'), n('user'), n('assistant'), n('user')])).toBe(true)
+    expect(unanswered([n('root'), n('user'), n('assistant'), n('user'), n('user')])).toBe(true)
+    expect(unanswered([n('root'), n('user'), n('assistant'), n('user'), n('assistant', true)])).toBe(true)
+    expect(unanswered([n('root'), n('user'), n('assistant'), n('assistant', true)])).toBe(false)
+    expect(unanswered([n('root')])).toBe(false)
   })
 })

@@ -48,6 +48,24 @@
   // A chat from before Claude keeps its old model id; it now runs on the default.
   const model = $derived(isClaudeModel(app.chat.model) ? app.chat.model : (app.settings?.settings.defaultModel ?? ''))
   const hasOverride = $derived(app.chat.systemPrompt != null)
+  /**
+   * Messages sent while a reply ran, still waiting: turns after their thread's last reply (the
+   * primary's conversation runs across threads, so each thread is looked at on its own). Bots'
+   * posts in a job's shared thread answer nothing.
+   */
+  const queued = $derived.by(() => {
+    const out = new Set<string>()
+    const answered = new Set<string>()
+    const path = view?.path ?? []
+    for (let i = path.length - 1; i >= 0; i--) {
+      const m = path[i]!.message
+      if (m.role === 'assistant' && !m.post) answered.add(m.sessionId)
+      else if (m.role === 'user' && !answered.has(m.sessionId)) out.add(m.id)
+    }
+    return out
+  })
+  /** The job a turn of the primary's conversation is in, or (a bot's report there) is about. */
+  const jobOf = (node: PathNode) => app.jobByThread.get(node.message.sessionId) ?? (node.jobId ? (app.jobs.find((j) => j.id === node.jobId) ?? null) : null)
   /** A bot's own thread on a job. */
   const worker = $derived(view?.session.kind === 'worker')
   /** Several bots write here: replies say whose they are. */
@@ -361,8 +379,9 @@
               last={from + i === view.path.length - 1 && pendingNodes.length === 0}
               far={from + i < view.path.length - 4}
               primary={app.isPrimary}
-              job={app.isPrimary ? (app.jobByThread.get(node.message.sessionId) ?? null) : null}
+              job={app.isPrimary ? jobOf(node) : null}
               {showAuthor}
+              queued={queued.has(node.message.id)}
             />
           {/each}
           {#each pendingNodes as node (node.message.id)}

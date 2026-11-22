@@ -258,6 +258,8 @@ describe('routing, summaries and the job list', () => {
     expect(didWork(`${step('computer_click')}`)).toBe(true)
     expect(didWork('Here:\n<artifact identifier="a" title="A">\nx\n</artifact>')).toBe(true)
     expect(didWork('Done.', 1)).toBe(true)
+    // Handing work to a bot makes a job of its own: the reply that did it stays where it is.
+    expect(didWork(`${step('team_start_job')}\n${step('team_message')}\nScout is on it`)).toBe(false)
   })
 
   test('summaries are one tidy line', () => {
@@ -277,6 +279,18 @@ const isAsk = (c: Call) => c.options.persistSession === false
 const systemOf = (c: Call) => (c.options.systemPrompt as { prompt: string }).prompt
 const promptText = (c: Call) => c.prompt.map((b) => b.text ?? `[${b.type}]`).join('\n---\n')
 
+/** Gates a reply can wait on ("hold: <name>"), opened by the test. */
+const gates = new Map<string, { promise: Promise<void>; open: () => void }>()
+const gate = (name: string) => {
+  let g = gates.get(name)
+  if (!g) {
+    let open = () => {}
+    const promise = new Promise<void>((r) => (open = r))
+    gates.set(name, (g = { promise, open }))
+  }
+  return g
+}
+
 /** Asks answered by kind; replies echo the message. `route` answers the router, in order. */
 const script = (route: string[]): Script =>
   async function* (t) {
@@ -295,6 +309,12 @@ const script = (route: string[]): Script =>
       yield* t.text(`Recalled: ${(found.result?.content ?? []).map((c) => c.text ?? '').join('')}`)
       yield t.result()
       return
+    }
+    // "hold: name" waits for the test.
+    const hold = /^hold: (\w+)$/.exec(said)?.[1]
+    if (hold) {
+      yield* t.text('Thinking it over.\n')
+      await t.wait(gate(hold).promise)
     }
     // "make: …" makes an artifact: work.
     if (said.startsWith('make: ')) {
@@ -479,6 +499,35 @@ describe('talking to the primary bot', () => {
     expect(view.path.at(-2)!.message.sessionId).toBe(made!.threadId!)
     expect(view.path.map((n) => n.message.content.split('\n')[0])).toEqual(['Hi', 'Reply to Hi', 'make: a haiku page', 'Here it is.', 'Make it longer', 'Reply to Make it longer', 'Thanks!', 'Reply to Thanks!'])
     expect(t.doneCount()).toBe(4)
+    await t.runtime.dispose()
+  })
+
+  test('a message while Tomo replies in its own conversation is queued there, not refused or filed, and answered after', async () => {
+    const t = setup(['{"job": "none"}', '{"job": "none"}', '{"job": "none"}'])
+    const primaryId = (await t.run(Jobs.use((j) => j.primary))).session.id
+    await t.run(send('hold: chat1'))
+    await until(async () => replies(t.calls).length === 1)
+    // Two more while it replies: both wait in Tomo's own conversation; no job is made for them.
+    await t.run(send('Are you there?'))
+    let view = await t.run(send('Hello?'))
+    await new Promise((r) => setTimeout(r, 50))
+    expect(replies(t.calls)).toHaveLength(1)
+    expect(await t.run(listJobs)).toHaveLength(0)
+    expect(view.path.map((n) => [n.message.role, n.message.status, n.message.sessionId === primaryId])).toEqual([
+      ['user', 'complete', true],
+      ['assistant', 'streaming', true],
+      ['user', 'complete', true],
+      ['user', 'complete', true]
+    ])
+    gate('chat1').open()
+    await t.settle(() => t.doneCount() >= 2)
+    const answer = replies(t.calls)[1]!
+    expect(promptText(answer)).toContain('<user>\nAre you there?\n</user>')
+    expect(answer.prompt.at(-1)!.text).toBe('Hello?')
+    view = await t.run(Jobs.use((j) => j.primary))
+    expect(view.path.map((n) => n.message.content.split('\n').at(-1))).toEqual(['hold: chat1', 'Reply to hold: chat1', 'Are you there?', 'Hello?', 'Reply to Hello?'])
+    await new Promise((r) => setTimeout(r, 50))
+    expect(replies(t.calls)).toHaveLength(2)
     await t.runtime.dispose()
   })
 

@@ -4,8 +4,9 @@
 // says without picking a job. A job is one piece of work, which the user switches between as they
 // did chats. A thread is a `sessions` row: a job's thread (kind 'shared') is a chat as before, with
 // its branches, forks, Claude Code sessions and artifacts. The primary's conversation is a session
-// too (kind 'primary'), but it holds no messages: each turn the user sends it lands in a job's
-// thread, marked with `via_session_id`, and the conversation is read back from those turns.
+// too (kind 'primary'): each turn the user sends it lands in a job's thread (or, for small talk, in
+// the conversation itself), marked with `via_session_id`, and the conversation is read back from
+// those turns. Bots' reports and messages to the primary arrive in it as turns of their own.
 import { randomUUID } from 'node:crypto'
 import type { SQLInputValue } from 'node:sqlite'
 import type { Bot, BotPatch, Effort, Job, JobStatus, JobUsage, Message, MessageStatus, PathNode, Post, Role, Session } from '@shared/types'
@@ -304,7 +305,7 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
 
   /**
    * A bot's post at the end of a job's shared thread. `via` puts it in the primary's conversation
-   * too (a report or a message to the primary shows there as a card).
+   * too, as a card (a notice for the user; a report to the primary arrives there as a turn instead).
    */
   const appendPost = (input: {
     threadId: string
@@ -441,10 +442,35 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
         if (seq === undefined) return
         const next = path[i + 1]
         const answered = node.message.role === 'user' && next?.message.role === 'assistant' && !next.message.post
-        out.push({ seq, nodes: answered ? [node, next] : [node] })
+        // A bot's report or message here, and the primary's answer to it, are about the bot's job.
+        const jobId = session.kind === 'primary' && node.message.authorBotId ? (jobOfTurn(node.message.id)?.id ?? null) : null
+        const tagged = (n: PathNode): PathNode => (jobId ? { ...n, jobId } : n)
+        out.push({ seq, nodes: answered ? [tagged(node), tagged(next)] : [tagged(node)] })
       })
     }
     return out.sort((a, b) => a.seq - b.seq).flatMap((t) => t.nodes)
+  }
+
+  /**
+   * The job a bot's turn in the primary's conversation is about: the job whose shared thread holds
+   * the same post (a report or message is posted there, then delivered). Null for any other turn.
+   */
+  const jobOfTurn = (messageId: string): { id: string; title: string } | null => {
+    const turn = one<{ seq: number; author_bot_id: string | null; post_kind: string | null; content: string; kind: string }>(
+      `select m.seq, m.author_bot_id, m.post_kind, m.content, s.kind from messages m join sessions s on s.id = m.session_id where m.id = ?`,
+      messageId
+    )
+    if (!turn?.author_bot_id || !turn.post_kind || turn.kind !== 'primary') return null
+    const row = one<{ id: string; title: string }>(
+      `select j.id, j.title from messages m join sessions s on s.id = m.session_id join jobs j on j.id = s.job_id
+        where m.author_bot_id = ? and m.seq < ? and m.role = 'assistant' and m.post_kind = ? and m.content = ? and s.kind = 'shared'
+        order by m.seq desc limit 1`,
+      turn.author_bot_id,
+      turn.seq,
+      turn.post_kind,
+      turn.content
+    )
+    return row ?? null
   }
 
   const listBots = (): Bot[] => all<BotRow>('select * from bots order by is_primary desc, created_at, rowid').map(toBot)
@@ -513,6 +539,22 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
     /** The newest message's place in a thread, for reading what came after it. */
     lastSeq: (threadId: string): number => one<{ s: number | null }>('select max(seq) as s from messages where session_id = ?', threadId)?.s ?? 0,
     seqOf,
+    jobOfTurn,
+    /**
+     * Threads that may end on turns nothing answered yet (held while a reply ran): those with a user
+     * turn answered by nothing, or followed only by another turn or a post. Chat.drain checks each.
+     */
+    heldThreads: (): string[] =>
+      all<{ id: string }>(
+        `select distinct m.session_id as id from messages m left join messages c on c.id = m.active_child_id
+          where m.role = 'user' and (c.id is null or c.role = 'user' or c.post_kind is not null)`
+      ).map((r) => r.id),
+    /**
+     * Where the newest turn a bot sent a thread is (0 if none): every post addressed to the thread's
+     * bot before it was delivered, as posts are handed over in order as they are made.
+     */
+    lastBotTurnSeq: (sessionId: string): number =>
+      one<{ s: number | null }>(`select max(seq) as s from messages where session_id = ? and role = 'user' and author_bot_id is not null`, sessionId)?.s ?? 0,
     /** Where a bot last posted in a shared thread (0 if it never did). */
     lastPostSeq: (threadId: string, botId: string): number =>
       one<{ s: number | null }>('select max(seq) as s from messages where session_id = ? and author_bot_id = ? and post_kind is not null', threadId, botId)?.s ?? 0,
@@ -644,11 +686,11 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
       run('update messages set via_session_id = ? where id = ?', viaSessionId, messageId)
     },
     primaryPath,
-    /** The newest turn sent to the primary, with its thread. */
+    /** The newest turn the user sent the primary, with its thread (a bot's report there isn't one). */
     lastRouted: (primaryId: string): { messageId: string; sessionId: string; jobId: string | null } | null => {
       const row = one<{ id: string; session_id: string; job_id: string | null }>(
         `select m.id, m.session_id, s.job_id from messages m join sessions s on s.id = m.session_id
-          where m.via_session_id = ? and m.role = 'user' order by m.seq desc limit 1`,
+          where m.via_session_id = ? and m.role = 'user' and m.author_bot_id is null order by m.seq desc limit 1`,
         primaryId
       )
       return row ? { messageId: row.id, sessionId: row.session_id, jobId: row.job_id } : null

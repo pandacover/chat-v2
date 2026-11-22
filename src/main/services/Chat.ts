@@ -89,6 +89,19 @@ const sumUsage = (a: Usage | null, b: Usage): Usage =>
 
 type ChatError = DbError | NotFound | InvalidInput
 
+/**
+ * Whether a thread's active path ends with turns nothing answered yet: a user turn (the user's or a
+ * bot's) after its last reply. Bots' posts in a job's shared thread answer nothing.
+ */
+export const unanswered = (path: ReadonlyArray<{ message: Pick<Message, 'role' | 'post'> }>): boolean => {
+  for (let i = path.length - 1; i >= 0; i--) {
+    const m = path[i]!.message
+    if (m.role === 'user') return true
+    if (m.role === 'assistant' && !m.post) return false
+  }
+  return false
+}
+
 /** A reply being written, for presence. */
 export interface RunningReply {
   messageId: string
@@ -111,11 +124,15 @@ export class Chat extends Context.Service<
       from?: string | null
     }) => Effect.Effect<SessionView, ChatError>
     /**
-     * A bot's message to a thread (a worker's own): added at the end, and answered at once unless a
-     * reply is still running there, in which case `drain` answers it once that ends.
+     * A bot's message to a thread (a worker's own, or the primary's conversation): added at the end,
+     * and answered at once unless a reply is still running there, in which case it is held and
+     * answered once that ends. `via` marks it as shown in that conversation (the primary's).
      */
-    readonly queue: (input: { sessionId: string; text: string; from: string; post?: Post | null }) => Effect.Effect<{ messageId: string; started: boolean }, ChatError>
-    /** Answers the turn a thread ends on if nothing answered it yet (a message queued while a reply ran). */
+    readonly queue: (input: { sessionId: string; text: string; from: string; post?: Post | null; via?: string | null }) => Effect.Effect<{ messageId: string; started: boolean }, ChatError>
+    /**
+     * Answers the turns a thread ends on that nothing answered yet (messages held while a reply ran),
+     * all in one reply. Every reply that ends does this for its thread; so does startup.
+     */
     readonly drain: (sessionId: string) => Effect.Effect<boolean, ChatError>
     /** Adds tool sets to every reply: for each, the factories a reply in `session` by `bot` gets. */
     readonly provideTools: (provider: (session: Session, bot: Bot) => ToolModuleFactory[]) => void
@@ -280,10 +297,15 @@ export class Chat extends Context.Service<
         const names = yield* db.use((d) => new Map(d.listBots().map((b) => [b.id, b.name])))
         const nameOf: NameOf = (id) => (id ? names.get(id) : undefined) ?? 'a bot'
         const blocks: PromptBlock[] = []
-        const last = partial === null ? plan.turns.length - 1 : -1
+        // A bot's report or message in the primary's conversation says which job it is about.
+        const jobs = yield* db.use((d) => new Map(plan.turns.flatMap((m) => (m.role === 'user' && m.authorBotId ? [[m.id, d.jobOfTurn(m.id)] as const] : []))))
+        // The message answered comes as it is, the earlier turns quoted. A held message may have had a
+        // post land after it in a job's shared thread: the message is still the one answered.
+        const last = partial === null ? plan.turns.findLastIndex((m) => m.role === 'user') : -1
         for (const [i, m] of plan.turns.entries()) {
           if (m.role === 'user') blocks.push(...(yield* attachments.toBlocks(stored.get(m.id) ?? [])))
-          const text = i === last ? tag(m.role === 'user' && m.authorBotId ? fromBotText(m, nameOf) : m.content) : transcriptText(m, nameOf)
+          const job = jobs.get(m.id) ?? null
+          const text = i === last ? tag(m.authorBotId ? fromBotText(m, nameOf, job) : m.content) : transcriptText(m, nameOf, job)
           if (text?.trim()) blocks.push({ type: 'text', text })
         }
         if (partial !== null) {
@@ -533,19 +555,21 @@ export class Chat extends Context.Service<
               computerReplies.delete(assistant.id)
               if (runningReplies.delete(assistant.id)) active()
               meter?.replyEnded({ sessionId: assistant.sessionId, messageId: assistant.id, model, startedAt, endedAt: Date.now(), cost: runCost })
+              // Then what was held while it ran is answered (afterEnd).
+              const end = (status: MessageStatus, error: string | null, tailPartial: boolean) =>
+                finish(assistant.id, status, error, tailPartial, usage, model).pipe(Effect.andThen(afterEnd(assistant.sessionId, status)))
               // Paused: kept as a stop keeps it, with why, for Continue.
               // Paused at a tool call, its text had ended; only repeated text is cut off mid-line.
-              if (Exit.isSuccess(exit) && paused) return yield* finish(assistant.id, 'paused', paused, partial && pausedMidText, usage, model)
-              if (Exit.isSuccess(exit)) return yield* finish(assistant.id, 'complete', null, false, usage, model)
-              if (Cause.hasInterruptsOnly(exit.cause))
-                return yield* finish(assistant.id, stopped ? 'stopped' : 'interrupted', null, partial, usage, model)
+              if (Exit.isSuccess(exit) && paused) return yield* end('paused', paused, partial && pausedMidText)
+              if (Exit.isSuccess(exit)) return yield* end('complete', null, false)
+              if (Cause.hasInterruptsOnly(exit.cause)) return yield* end(stopped ? 'stopped' : 'interrupted', null, partial)
               // At a usage limit the reply pauses with its work kept, and continues once the limit resets.
               if (meter && shouldPause(limit)) {
                 meter.pause({ sessionId: assistant.sessionId, messageId: assistant.id, signal: limit })
                 return yield* finish(assistant.id, 'stopped', `Paused at your ${limitName(limit?.window ?? null)}.`, partial, usage, model)
               }
               const error = Cause.squash(exit.cause)
-              return yield* finish(assistant.id, 'error', errorMessage(error), partial, usage, model)
+              return yield* end('error', errorMessage(error), partial)
             })
           )
         )
@@ -627,6 +651,8 @@ export class Chat extends Context.Service<
         post?: Post | null
         /** Leave it unanswered for now (a reply still runs in the thread): `drain` answers it. */
         hold?: boolean
+        /** The conversation it shows in besides its thread (the primary's). */
+        via?: string | null
       }) {
         if (!input.text.trim() && input.attachmentIds.length === 0)
           return yield* new InvalidInput({ message: 'Message is empty' })
@@ -647,6 +673,7 @@ export class Chat extends Context.Service<
             post: fromBot ? (input.post ?? null) : null
           })
           d.bindAttachments(input.attachmentIds, user.id)
+          if (input.via) d.markVia(user.id, input.via)
           if (placeholder) d.updateSession(session.id, { title: placeholder })
           const assistant = input.hold ? null : d.insertMessage({
             sessionId: input.sessionId,
@@ -700,16 +727,31 @@ export class Chat extends Context.Service<
           yield* computer.teachDone(waiting.id, teachAnswer(input.text))
           return yield* view(input.sessionId)
         }
+        // A reply still runs here: the message waits at the end, and is answered once that ends.
+        const leaf = yield* db.use((d) => {
+          const session = d.getSession(input.sessionId)
+          return session && d.streamingIds(session.id).length > 0 ? (d.activePath(session).at(-1)?.message.id ?? session.rootId) : null
+        })
+        if (leaf) return (yield* insertUserTurn({ ...input, parentId: leaf, hold: true })).view
         return (yield* insertUserTurn(input)).view
       })
 
-      const queue = Effect.fn('Chat.queue')(function* (input: { sessionId: string; text: string; from: string; post?: Post | null }) {
+      const queue = Effect.fn('Chat.queue')(function* (input: { sessionId: string; text: string; from: string; post?: Post | null; via?: string | null }) {
         const session = yield* db.require('Session', (d) => d.getSession(input.sessionId))
         const { parentId, busy } = yield* db.use((d) => ({
           parentId: d.activePath(session).at(-1)?.message.id ?? session.rootId,
           busy: d.streamingIds(session.id).length > 0
         }))
-        const turn = yield* insertUserTurn({ sessionId: session.id, parentId, text: input.text, attachmentIds: [], from: input.from, post: input.post ?? null, hold: busy })
+        const turn = yield* insertUserTurn({
+          sessionId: session.id,
+          parentId,
+          text: input.text,
+          attachmentIds: [],
+          from: input.from,
+          post: input.post ?? null,
+          hold: busy,
+          via: input.via ?? null
+        })
         return { messageId: turn.userId, started: turn.started }
       })
 
@@ -717,14 +759,30 @@ export class Chat extends Context.Service<
         const session = yield* db.require('Session', (d) => d.getSession(sessionId))
         const settings = yield* settingsStore.get.pipe(Effect.orElseSucceed(() => null))
         const assistant = yield* db.use((d) => {
-          const leaf = d.activePath(session).at(-1)?.message
-          if (leaf?.role !== 'user' || d.streamingIds(session.id).length > 0) return null
-          return d.insertMessage({ sessionId, parentId: leaf.id, role: 'assistant', content: '', status: 'streaming', model: chatModel(session, settings, d.botOf(session.id).model) })
+          const path = d.activePath(session)
+          if (!unanswered(path) || d.streamingIds(session.id).length > 0) return null
+          // Under the thread's last message (a post may have landed after the turns): one reply sees them all.
+          return d.insertMessage({ sessionId, parentId: path.at(-1)!.message.id, role: 'assistant', content: '', status: 'streaming', model: chatModel(session, settings, d.botOf(session.id).model) })
         })
         if (!assistant) return false
         yield* start(assistant)
+        broadcaster.send({ type: 'thread', sessionId })
         return true
       })
+
+      /**
+       * A reply ended: what was held while it ran is answered. Not when it was stopped (deleting a job
+       * or a bot, or moving a turn, stops replies; the user's own Stop drains after, in ipc.ts), cut off
+       * by quitting (startup drains), or paused at a usage limit (it goes on by itself).
+       */
+      const afterEnd = (sessionId: string, status: MessageStatus): Effect.Effect<void> =>
+        status === 'complete' || status === 'paused' || status === 'error'
+          ? drain(sessionId).pipe(
+              Effect.catchCause((cause) =>
+                Cause.hasInterruptsOnly(cause) ? Effect.void : Effect.logWarning(`Answering held messages failed: ${errorMessage(Cause.squash(cause))}`)
+              )
+            )
+          : Effect.void
 
       // Editing never mutates history: it adds a sibling user turn, creating a branch.
       const edit = Effect.fn('Chat.edit')(function* (input: {
