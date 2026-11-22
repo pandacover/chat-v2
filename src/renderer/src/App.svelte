@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte'
+  import { quartOut } from 'svelte/easing'
   import ArtifactPanel from './components/ArtifactPanel.svelte'
   import BarActions from './components/BarActions.svelte'
   import BrowserPanel from './components/BrowserPanel.svelte'
@@ -11,7 +12,7 @@
   import SettingsPage from './components/SettingsPage.svelte'
   import Sidebar from './components/Sidebar.svelte'
   import { modKey } from './lib/keys'
-  import { ease, fade, fly } from './lib/motion'
+  import { fade, fly } from './lib/motion'
   import { app, tabKey } from './lib/store.svelte'
 
   let ready = $state(false)
@@ -29,23 +30,19 @@
 
   const reduce = matchMedia('(prefers-reduced-motion: reduce)')
   /**
-   * The panel slides in from the right edge. The chat column takes its new width at once, and the
-   * panel glides into the room it left. Growing the panel's width instead narrowed the chat a
-   * little every frame, re-laying out and repainting the whole conversation each time (about 30 ms
-   * a frame on a long chat), so the panel stuttered in and out.
+   * The panel opens and closes the way the sidebar does: its width grows from or shrinks to
+   * nothing, so the chat narrows and widens with it, and it fades as it goes (350 ms, ease-out).
+   * Its contents keep their width and stay on the right edge, so only the panel's left edge moves.
+   * From `from` to `to` (0 shut, 1 open), so a toggle mid-way turns back from where it is.
    */
-  const slideFrames = (width: number, opening: boolean): Keyframe[] =>
+  const SLIDE_MS = 350
+  const slideFrames = (width: number, from: number, to: number): Keyframe[] =>
     Array.from({ length: 25 }, (_, i) => {
-      const t = ease(opening ? i / 24 : 1 - i / 24)
-      return { transform: `translateX(${(1 - t) * width}px)`, opacity: Math.min(1, t * 1.5) }
+      const t = from + (to - from) * quartOut(i / 24)
+      return { width: `${t * width}px`, opacity: t }
     })
-  /**
-   * Closing, the panel leaves the layout at once, staying where it sat (main's padding is 8px), so
-   * the chat widens as it slides away rather than all at once after. Position can't be animated,
-   * so it is set as the slide starts.
-   */
-  const OUT_OF_LAYOUT = { position: 'absolute', top: 'var(--card-top)', bottom: '8px', right: '8px' }
-  const IN_LAYOUT = { position: '', top: '', bottom: '', right: '' }
+  /** How open the panel shows now, 0 to 1: part way while a slide runs. */
+  const shownOpen = (el: HTMLElement, width: number) => Math.min(1, Math.max(0, el.getBoundingClientRect().width / width))
 
   /**
    * The panel's element is always there. Closed, it is parked: out of the layout, transparent and
@@ -65,16 +62,22 @@
     untrack(() => {
       if (open === wasOpen) return
       wasOpen = open
-      slide?.cancel()
-      slide = null
       const el = panelEl
       const width = panelWidth + 8
+      // Turned back mid-slide: go on from where it shows now.
+      const from = slide && el ? shownOpen(el, width) : open ? 0 : 1
+      slide?.cancel()
+      slide = null
       if (open) {
         parked = false
         leaving = false
         if (!el) return
-        Object.assign(el.style, IN_LAYOUT)
-        if (!reduce.matches) slide = el.animate(slideFrames(width, true), { duration: 450 })
+        if (!reduce.matches) {
+          const s = (slide = el.animate(slideFrames(width, from, 1), { duration: SLIDE_MS * (1 - from) }))
+          s.onfinish = () => {
+            if (slide === s) slide = null
+          }
+        }
         return
       }
       if (!el || reduce.matches) {
@@ -82,15 +85,14 @@
         leaving = false
         return
       }
+      // It stays beside the chat while it shrinks, so the chat widens with it, and parks once gone.
       leaving = true
-      Object.assign(el.style, OUT_OF_LAYOUT)
-      const s = (slide = el.animate(slideFrames(width, false), { duration: 450, fill: 'forwards' }))
+      const s = (slide = el.animate(slideFrames(width, from, 0), { duration: SLIDE_MS * from, fill: 'forwards' }))
       s.onfinish = () => {
         if (slide !== s) return
         slide = null
         parked = true
         leaving = false
-        Object.assign(el.style, IN_LAYOUT)
         s.cancel()
       }
     })
