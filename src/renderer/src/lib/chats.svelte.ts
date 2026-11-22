@@ -33,7 +33,9 @@ export const sections = (list: Entry[] = entries()): Sections<Entry> & { needs: 
     threads: app.sessions,
     openId: app.view?.session.id ?? null,
     waitingIn: app.computerWait?.sessionId ?? null,
-    draftAt: (key) => app.drafts.get(key)?.at
+    draftAt: (key) => app.drafts.get(key)?.at,
+    // A minute's clock: a quiet job moves to Settled once its hour is up, without anything else changing.
+    now: app.minute
   })
 
 /** What a need reads as, for a row's badge and the search modal. */

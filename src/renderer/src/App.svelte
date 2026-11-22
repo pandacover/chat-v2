@@ -29,29 +29,72 @@
 
   const reduce = matchMedia('(prefers-reduced-motion: reduce)')
   /**
-   * Opens the panel by sliding it in from the right edge. The chat column takes its new width at
-   * once, and the panel glides into the room it left. Growing the panel's width instead narrowed
-   * the chat a little every frame, re-laying out and repainting the whole conversation each time
-   * (about 30 ms a frame on a long chat), so the panel stuttered in and out.
+   * The panel slides in from the right edge. The chat column takes its new width at once, and the
+   * panel glides into the room it left. Growing the panel's width instead narrowed the chat a
+   * little every frame, re-laying out and repainting the whole conversation each time (about 30 ms
+   * a frame on a long chat), so the panel stuttered in and out.
    */
-  const reveal = (_node: Element, { width }: { width: number }) => ({
-    duration: reduce.matches ? 0 : 450,
-    easing: ease,
-    css: (t: number) => `transform: translateX(${(1 - t) * width}px); opacity: ${Math.min(1, t * 1.5)}`
-  })
+  const slideFrames = (width: number, opening: boolean): Keyframe[] =>
+    Array.from({ length: 25 }, (_, i) => {
+      const t = ease(opening ? i / 24 : 1 - i / 24)
+      return { transform: `translateX(${(1 - t) * width}px)`, opacity: Math.min(1, t * 1.5) }
+    })
   /**
    * Closing, the panel leaves the layout at once, staying where it sat (main's padding is 8px), so
    * the chat widens as it slides away rather than all at once after. Position can't be animated,
    * so it is set as the slide starts.
    */
-  const leaveLayout = (e: Event) => {
-    const el = e.currentTarget as HTMLElement
-    Object.assign(el.style, { position: 'absolute', top: 'var(--card-top)', bottom: '8px', right: '8px' })
-  }
-  /** Opened again before it finished closing (the same element slides back): it takes its room beside the chat back. */
-  const rejoinLayout = (e: Event) => {
-    Object.assign((e.currentTarget as HTMLElement).style, { position: '', top: '', bottom: '', right: '' })
-  }
+  const OUT_OF_LAYOUT = { position: 'absolute', top: 'var(--card-top)', bottom: '8px', right: '8px' }
+  const IN_LAYOUT = { position: '', top: '', bottom: '', right: '' }
+
+  /**
+   * The panel's element is always there. Closed, it is parked: out of the layout, transparent and
+   * click-through, holding the browser while a chat that isn't open has it (a job's thread drives
+   * it while you talk to Tomo), so its page keeps running and can be read and captured. (A hidden
+   * or off-screen webview stops painting, and its screenshots never come back.)
+   */
+  let panelEl: HTMLDivElement | undefined = $state()
+  let parked = $state(untrack(() => !app.panelOpen))
+  /** Sliding out: what it shows stays until it is gone. */
+  let leaving = $state(false)
+  let slide: Animation | null = null
+  let wasOpen = untrack(() => app.panelOpen)
+  // Before the DOM updates, so what it shows is still there when the slide out starts.
+  $effect.pre(() => {
+    const open = app.panelOpen
+    untrack(() => {
+      if (open === wasOpen) return
+      wasOpen = open
+      slide?.cancel()
+      slide = null
+      const el = panelEl
+      const width = panelWidth + 8
+      if (open) {
+        parked = false
+        leaving = false
+        if (!el) return
+        Object.assign(el.style, IN_LAYOUT)
+        if (!reduce.matches) slide = el.animate(slideFrames(width, true), { duration: 450 })
+        return
+      }
+      if (!el || reduce.matches) {
+        parked = true
+        leaving = false
+        return
+      }
+      leaving = true
+      Object.assign(el.style, OUT_OF_LAYOUT)
+      const s = (slide = el.animate(slideFrames(width, false), { duration: 450, fill: 'forwards' }))
+      s.onfinish = () => {
+        if (slide !== s) return
+        slide = null
+        parked = true
+        leaving = false
+        Object.assign(el.style, IN_LAYOUT)
+        s.cancel()
+      }
+    })
+  })
 
   onMount(async () => {
     await app.init()
@@ -117,14 +160,15 @@
     <main class="relative flex min-w-0 flex-1 pt-[var(--card-top)] pr-2 pb-2 transition-[padding] duration-[350ms] ease-out {app.sidebarOpen ? 'pl-0' : 'pl-2'}">
       <div class="flex min-w-0 flex-1" inert={app.page !== 'chat'}>
         <ChatView />
-        {#if app.panelOpen}
-          <div
-            class="relative flex shrink-0 justify-end overflow-hidden"
-            style="width: {panelWidth + 8}px"
-            transition:reveal={{ width: panelWidth + 8 }}
-            onoutrostart={leaveLayout}
-            onintrostart={rejoinLayout}
-          >
+        <div
+          bind:this={panelEl}
+          class="flex shrink-0 justify-end overflow-hidden {parked ? 'pointer-events-none absolute top-[var(--card-top)] right-2 bottom-2 opacity-0' : 'relative'}"
+          style="width: {panelWidth + 8}px"
+          inert={!app.panelOpen}
+          aria-hidden={!app.panelOpen || undefined}
+          data-panel={parked ? 'parked' : 'open'}
+        >
+          {#if app.panelOpen || leaving || app.browserAlive}
             <div class="relative flex h-full shrink-0 pl-2" style="width: {panelWidth + 8}px">
               <div
                 role="separator"
@@ -146,15 +190,20 @@
                     <div class="absolute inset-0 {on ? '' : 'invisible'}" inert={!on}><ArtifactPanel tabs={panelTabs} open={t} active={on} /></div>
                   {/if}
                 {/each}
-                {#if app.browserOpen}
-                  {@const on = app.activeTab?.kind === 'browser'}
-                  <div class="absolute inset-0 {on ? '' : 'invisible'}" inert={!on}><BrowserPanel tabs={panelTabs} /></div>
+                <!-- Mounted wherever the browser is open, in this chat's panel or another's, so its page
+                     keeps running. Off show it is transparent and click-through rather than hidden: a
+                     hidden webview stops painting, and the agent's screenshots of it never come back. -->
+                {#if app.browserAlive}
+                  {@const on = app.browserOpen && app.activeTab?.kind === 'browser'}
+                  <div class="absolute inset-0 {on ? '' : 'pointer-events-none opacity-0'}" inert={!on} data-browser={on ? 'shown' : 'away'}>
+                    <BrowserPanel tabs={panelTabs} />
+                  </div>
                 {/if}
                 {#if app.shownTabs.length === 0}<PanelHome tabs={panelTabs} />{/if}
               </section>
             </div>
-          </div>
-        {/if}
+          {/if}
+        </div>
       </div>
     </main>
   </div>

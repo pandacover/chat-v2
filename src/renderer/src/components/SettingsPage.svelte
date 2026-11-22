@@ -21,6 +21,8 @@
   let keys = $state({ anthropicKey: '', elevenLabsKey: '' })
   let status = $state<'idle' | 'saving' | 'saved'>('idle')
   let scroller: HTMLDivElement | undefined = $state()
+  /** The page has scrolled under Close: the button gets a glass backing so it reads over what passes. */
+  let scrolled = $state(false)
 
   // One tab at a time, picked from the list on the left. Missing the API key it needs, the account comes first.
   type Tab = 'bots' | 'model' | 'memory' | 'voice' | 'account' | 'usage' | 'appearance' | 'about'
@@ -358,16 +360,18 @@
       {/each}
     </nav>
 
-    <div bind:this={scroller} class="relative min-w-0 flex-1 overflow-y-auto px-7 pt-[22px] pb-7 text-[14px]">
-      <div class="absolute top-3.5 right-3.5 flex items-center gap-2">
+    <div class="relative min-w-0 flex-1">
+      <!-- Outside the scroller, so Close stays put while the page scrolls under it. -->
+      <div class="absolute top-3.5 right-5 z-10 flex items-center gap-2" data-settings-close>
         <span class="text-[12px] text-fg-3" aria-live="polite">
           {#if status === 'saving'}<span in:fade>Saving…</span>{:else if status === 'saved'}<span class="flex items-center gap-1" in:fade><Icon name="check" size={12} /> Saved</span>{/if}
         </span>
-        <button class="icon-btn size-8" use:tip={{ text: 'Close', kbd: 'Esc' }} aria-label="Close settings" onclick={close}>
+        <button class="icon-btn size-8 transition-shadow {scrolled ? 'glass-float' : ''}" use:tip={{ text: 'Close', kbd: 'Esc' }} aria-label="Close settings" onclick={close}>
           <Icon name="x" size={16} />
         </button>
       </div>
 
+    <div bind:this={scroller} class="relative h-full overflow-y-auto px-7 pt-[22px] pb-7 text-[14px]" data-settings-scroller onscroll={() => (scrolled = (scroller?.scrollTop ?? 0) > 8)}>
       {#if tab === 'account'}
         <section id="settings-account">
           <h3 class="mt-1.5 mb-1 font-display text-[22px] leading-[1.2] font-normal tracking-[-0.02em]">Account</h3>
@@ -753,6 +757,7 @@
           </div>
         </section>
       {/if}
+    </div>
     </div>
   </section>
 </div>

@@ -62,7 +62,7 @@
   >
     <Icon name="sidebar" size={16} class="-scale-x-100" />
     <!-- The assistant is using the browser while the panel is hidden. -->
-    {#if app.control.active && !app.panelOpen}<span class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-blue"></span>{/if}
+    {#if app.browsingHere && !app.panelOpen}<span class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-blue"></span>{/if}
   </button>
 </div>
 

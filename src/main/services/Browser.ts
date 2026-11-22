@@ -1,7 +1,7 @@
 // Type-only: the Electron lookup is injected, so this module loads outside Electron (tests).
 import type { WebContents } from 'electron'
 import { Context, Effect, Layer, Schema } from 'effect'
-import type { BrowserEvent, ElementInfo } from '@shared/types'
+import type { BrowserEvent, BrowserOwner, ElementInfo } from '@shared/types'
 import { errorMessage } from '../errors'
 
 export class BrowserError extends Schema.TaggedError<BrowserError>()('BrowserError', {
@@ -259,8 +259,11 @@ export interface BrowserApi {
   readonly stopRecording: Effect.Effect<Recording | null, BrowserError>
   /** The panel answering a `record` event, or reporting an assistant recording that ended on its own. */
   readonly recordReply: (reply: PanelReply) => Effect.Effect<void>
-  /** Marks the agent as driving (misty border on) and says what it is doing. */
-  readonly status: (label: string) => Effect.Effect<void>
+  /**
+   * Marks the agent as driving (misty border on) and says what it is doing. `by` is the reply
+   * driving it: the browser shows in its thread's panel, and the step line in that reply only.
+   */
+  readonly status: (label: string, by?: BrowserOwner) => Effect.Effect<void>
   /** Hands the browser back to the user, saving a recording the assistant left running. Safe to call when not in control. */
   readonly release: Effect.Effect<void>
 }
@@ -276,6 +279,8 @@ export class Browser extends Context.Service<Browser, BrowserApi>()('chat-v2/Bro
       let agentRecording = false
       let unclaimed: Recording | null = null
       let answer: ((reply: PanelReply) => void) | null = null
+      /** The reply driving the browser now, if any. */
+      let owner: BrowserOwner | null = null
 
       const fail = (message: string) => new BrowserError({ message })
       const attempt = <A>(what: string, f: () => Promise<A>) =>
@@ -287,7 +292,7 @@ export class Browser extends Context.Service<Browser, BrowserApi>()('chat-v2/Bro
       const ensure = Effect.suspend(() => {
         const wc = live()
         if (wc) return Effect.succeed(wc)
-        emit({ type: 'open' })
+        emit({ type: 'open', sessionId: owner?.sessionId ?? null })
         return attempt('Opening the browser', () =>
           new Promise<WebContents>((resolve, reject) => {
             const timer = setTimeout(() => reject(new Error('the browser panel did not open')), 12000)
@@ -606,7 +611,11 @@ export class Browser extends Context.Service<Browser, BrowserApi>()('chat-v2/Bro
             }
           }),
 
-        status: (label) => Effect.sync(() => emit({ type: 'control', active: true, label })),
+        status: (label, by) =>
+          Effect.sync(() => {
+            owner = by ?? owner
+            emit({ type: 'control', active: true, label, by: owner })
+          }),
 
         // A recording left running is stopped without waiting: the panel saves it and says where.
         release: Effect.sync(() => {
@@ -614,7 +623,8 @@ export class Browser extends Context.Service<Browser, BrowserApi>()('chat-v2/Bro
             agentRecording = false
             emit({ type: 'record', on: false })
           }
-          emit({ type: 'control', active: false, label: '' })
+          emit({ type: 'control', active: false, label: '', by: owner })
+          owner = null
         })
       }
       return Browser.of(api)

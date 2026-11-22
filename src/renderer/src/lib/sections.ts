@@ -1,12 +1,15 @@
 // The sidebar's sections, worked out from the jobs and their threads alone (no app state), so they
-// can be tested: pinned jobs; the main section, of jobs that need the user; jobs where a reply
-// runs (Working); and the rest (Settled), newest first.
+// can be tested: pinned jobs; the main section, of jobs that need the user or were active in the
+// last hour; jobs where a reply runs (Working); and the rest (Settled), newest first.
 import type { Job, ListedSession } from '@shared/types'
 
 export type Section = 'pinned' | 'main' | 'working' | 'settled'
 
 /** Why a job needs the user, most pressing first. */
 export type Need = 'waiting' | 'draft' | 'paused' | 'failed' | 'unread'
+
+/** How long an open job stays in the main section after its last activity before it is settled. */
+export const SETTLE_AFTER_MS = 60 * 60 * 1000
 
 /** A job and its thread, as the sidebar lists it. */
 export interface SectionEntry {
@@ -27,6 +30,8 @@ export interface SectionInput<E extends SectionEntry> {
   waitingIn: string | null
   /** When each draft was last edited. */
   draftAt?: (key: string) => number | undefined
+  /** The time now, which decides whether a quiet job has been quiet long enough to settle. */
+  now?: number
 }
 
 export interface Sections<E> {
@@ -53,7 +58,12 @@ export const needOf = (e: SectionEntry, threads: readonly ListedSession[], openI
   return unread(e.session, openId) ? 'unread' : null
 }
 
+/** When anything last happened on a job: in the job itself or in any of its threads. */
+export const lastActive = (job: Job, threads: readonly ListedSession[]) =>
+  Math.max(job.updatedAt, ...threads.map((t) => Math.max(t.updatedAt, t.state.activityAt ?? 0)))
+
 export const sectionsOf = <E extends SectionEntry>(input: SectionInput<E>): Sections<E> & { needs: Map<string, Need> } => {
+  const now = input.now ?? Date.now()
   const byJob = new Map<string, ListedSession[]>()
   for (const t of input.threads) {
     if (!t.jobId) continue
@@ -73,6 +83,8 @@ export const sectionsOf = <E extends SectionEntry>(input: SectionInput<E>): Sect
     if (need) out.main.push(e)
     else if (e.session.pinnedAt != null) continue
     else if (threads.some((t) => t.state.streaming)) out.working.push(e)
+    // An open job settles only once it has been quiet for an hour; one marked finished settles at once.
+    else if (e.job.status === 'open' && now - lastActive(e.job, threads) < SETTLE_AFTER_MS) out.main.push(e)
     else out.settled.push(e)
   }
   const at = (e: E) => Math.max(e.job.updatedAt, e.session.state.activityAt ?? 0, (e.draft && input.draftAt?.(e.key)) || 0)

@@ -8,6 +8,7 @@ import type { Job, Message, Post, StreamEvent } from '../src/shared/types'
 import { AppPaths } from '../src/main/services/AppPaths'
 import { Attachments } from '../src/main/services/Attachments'
 import { BROWSER_AND_COMPUTER_NOTE, Broadcaster, Chat } from '../src/main/services/Chat'
+import { WRITING_GUIDELINES } from '../src/main/guidelines'
 import { Db, MIGRATIONS, makeDb } from '../src/main/services/Db'
 import { BOTS_AND_JOBS_MIGRATION } from '../src/main/services/jobsDb'
 import { Jobs } from '../src/main/services/Jobs'
@@ -435,6 +436,8 @@ describe('talking to the primary bot', () => {
     expect(systemOf(hello)).toContain('You have no other bots yet: hand work to yourself.')
     expect(systemOf(hello)).toContain('to yourself (bot "yourself")')
     expect(systemOf(hello)).not.toContain(BROWSER_AND_COMPUTER_NOTE)
+    // The writing rules (unslop) go with every reply: Tomo's in its chat with the user.
+    expect(systemOf(hello)).toContain(WRITING_GUIDELINES)
     // No mode tag: it isn't a computer reply.
     expect(hello.prompt.at(-1)!.text).toBe('Hello')
 
@@ -447,6 +450,8 @@ describe('talking to the primary bot', () => {
     // As the only bot it has no team tools there: there is nobody to ask.
     expect(servers(own)).not.toContain('team')
     expect(systemOf(own)).not.toContain('You lead a team')
+    // And in the thread doing the work, whose words come back to the chat as its report.
+    expect(systemOf(own)).toContain(WRITING_GUIDELINES)
     await t.runtime.dispose()
   })
 

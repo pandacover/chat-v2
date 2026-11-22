@@ -176,16 +176,14 @@ describe('stopping mid-task', () => {
 })
 
 describe('the reply ending', () => {
-  test('end() denies a pending approval, stops a Show-me step, and turns protection off', async () => {
+  test('end() denies a pending approval and stops a Show-me step', async () => {
     const h = await harness()
     const r = await h.reply()
-    expect(h.overlay.protect).toEqual([true])
     const approval = r.tool('ask_approval', { action: 'Send the email', detail: 'to bob@example.com' })
     await until(() => h.cu.waiting()?.kind === 'approval')
     await r.mod.end!()
     expect(textOf(await approval)).toContain('Denied')
     expect(h.cu.waiting()).toBeNull()
-    expect(h.overlay.protect).toEqual([true, false])
   })
 
   test('aborting the reply cuts off its tools at once', async () => {
@@ -198,14 +196,41 @@ describe('the reply ending', () => {
     expect(await r.tool('look_at_screen')).toEqual({ denied: STOPPED_TEXT })
   })
 
-  test('protection stays on until the last computer reply ends', async () => {
-    const h = await harness()
-    const a = await h.reply()
-    const b = await h.reply()
-    await a.mod.end!()
-    expect(h.overlay.protect).toEqual([true])
-    await b.mod.end!()
+  test("Tomo's windows are hidden from capture only while the model's screenshot is taken", async () => {
+    let during: boolean[] = []
+    let release = () => {}
+    let slow = false
+    const h = await harness(
+      {
+        screenshot: async () => {
+          during.push(h.overlay.protect.at(-1) === true)
+          if (slow) await new Promise<void>((r) => (release = r))
+          return { data: '', mime: 'image/jpeg', imageWidth: 1024, imageHeight: 576, screen: { x: 0, y: 0, width: 2048, height: 1152 }, window: { title: 'Notepad', process: 'notepad' } }
+        }
+      },
+      { protectMs: 20 }
+    )
+    // A reply with computer use that hasn't looked yet leaves the windows alone (the user's own
+    // screenshots and screen shares still show them).
+    const r = await h.reply()
+    expect(h.overlay.protect).toEqual([])
+    await r.tool('look_at_screen')
+    expect(during).toEqual([true])
     expect(h.overlay.protect).toEqual([true, false])
+    // Two at once (two displays, or two replies): one stretch of protection covers both.
+    during = []
+    slow = true
+    const first = r.rawTool('look_at_screen')
+    await until(() => during.length === 1)
+    slow = false
+    const second = r.rawTool('look_at_screen')
+    await until(() => during.length === 2)
+    release()
+    await Promise.all([first, second])
+    expect(during).toEqual([true, true])
+    expect(h.overlay.protect).toEqual([true, false, true, false])
+    await r.mod.end!()
+    expect(h.overlay.protect.at(-1)).toBe(false)
   })
 
   test("one reply's end leaves another reply's approval alone", async () => {

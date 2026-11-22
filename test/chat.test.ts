@@ -923,8 +923,9 @@ describe('computer use', () => {
         'Done.'
       ].join('\n')
     )
-    // Content protection and the Stop shortcut are on for the reply only.
-    expect(t.overlay.protect).toEqual([true, false])
+    // Content protection is on only while a screenshot is taken; the Stop shortcut for the reply.
+    expect(t.overlay.protect.length).toBeGreaterThan(0)
+    expect(t.overlay.protect).toEqual(t.overlay.protect.map((_, i) => i % 2 === 0))
     expect(t.overlay.stopKey).toEqual([true, false])
     await t.runtime.dispose()
   })
