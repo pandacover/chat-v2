@@ -79,7 +79,7 @@ class Meter {
     // Tomo's conversation the reply is a turn of a job's thread, so it's found by message.
     if (e.type === 'resumed' && app.view && this.inView(e.messageId)) {
       app.liveIds.add(e.messageId)
-      if (app.isPrimary) void app.openPrimary(app.target)
+      if (app.isPrimary) void app.openPrimary()
       else void app.open(app.view.session.id)
     }
     // Usage moved (a reply ended, a reading came): the shares shown are read again, once it settles.

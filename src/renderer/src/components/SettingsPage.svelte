@@ -439,8 +439,8 @@
           <p class="mb-5 text-fg-3">The small model and what replies can make. Each bot's own model is in Bots, and each job can pick its own in the composer.</p>
           <div class="group-card">
             <div class="srow">
-              <div class="l"><b>Small model</b><span>Names jobs, picks the job each message belongs to, and keeps each job's one-line summary. Haiku is enough, at a fraction of a cent a call. With none, a message stays in the current job.</span></div>
-              <div class="w-[200px] shrink-0"><ModelPicker block value={form.titleModel} onchange={(id) => (form.titleModel = id)} noneLabel="None: use the first message" /></div>
+              <div class="l"><b>Small model</b><span>Keeps each job's one-line summary up to date. Haiku is enough, at a fraction of a cent a call. With none, jobs keep no summary.</span></div>
+              <div class="w-[200px] shrink-0"><ModelPicker block value={form.titleModel} onchange={(id) => (form.titleModel = id)} noneLabel="None" /></div>
             </div>
             <div class="srow">
               <div class="l"><b>Interactive artifacts</b><span>The model can build small HTML apps that run in the side panel</span></div>

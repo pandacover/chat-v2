@@ -7,7 +7,7 @@ import { stepLine, summarizeSteps } from '@shared/steps'
 import type { Bot, Effort, MemoryRun, Message, MessageStatus, NewAttachmentInput, Post, Session, SessionView, Settings, StreamEvent, Usage } from '@shared/types'
 import { type ConfigError, type DbError, InvalidInput, type MissingApiKey, type NotFound, ProviderError, errorMessage } from '../errors'
 import { WRITING_GUIDELINES } from '../guidelines'
-import { chatNote, jobsBlock, jobsNote } from '../jobs'
+import { chatNote, jobsBlock, jobsNote, selfJobNote } from '../jobs'
 import { MEMORY_INSTRUCTIONS, askedQuestion, memoryPrompt, memorySource, parseMemoryReply, profileBlock } from '../memory'
 import { playbookBlock } from '../reconciler'
 import { browserModule } from '../agent/browser'
@@ -18,7 +18,7 @@ import { CHECKPOINT_PREFIX } from './stuckStore'
 import { SMALL_MODEL } from '@shared/models'
 import { recallModule } from '../agent/recall'
 import { jobNotesBlock, noteModule } from '../agent/notes'
-import { HISTORY_NOTE, type NameOf, type TurnPlan, continueNote, fromBotText, planTurn, transcriptText } from '../agent/history'
+import { HISTORY_NOTE, type NameOf, type TurnPlan, carriedText, continueNote, fromBotText, planTurn, transcriptText } from '../agent/history'
 import type { ToolModuleFactory } from '../agent/module'
 import { type Gate, decide as decideAccess, ruled } from '../agent/rules'
 import { ComputerUse, type Mode, decideMode, effortFor, handsOver, modeTag, teachAnswer } from '../computer'
@@ -122,6 +122,8 @@ export class Chat extends Context.Service<
       attachmentIds: string[]
       /** The bot sending it (a message to a worker, in its own thread); the user when left out. */
       from?: string | null
+      /** The conversation it shows in (the primary's, for what the user says to Tomo). */
+      via?: string | null
     }) => Effect.Effect<SessionView, ChatError>
     /**
      * A bot's message to a thread (a worker's own, or the primary's conversation): added at the end,
@@ -161,8 +163,11 @@ export class Chat extends Context.Service<
     ) => Effect.Effect<{ lines: string[]; status: MessageStatus }, ChatError>
     /** What happened to the last message memory looked at (this run of the app only). */
     readonly lastMemoryRun: Effect.Effect<MemoryRun | null>
-    /** Calls `listener` whenever a reply ends, however it ended. Returns the unsubscribe. */
-    readonly onReplyEnd: (listener: (end: { messageId: string; status: MessageStatus }) => void) => () => void
+    /**
+     * Calls `listener` whenever a reply ends, however it ended. `limited`: it was paused at a usage
+     * limit (status 'stopped'), and goes on by itself once the limit resets. Returns the unsubscribe.
+     */
+    readonly onReplyEnd: (listener: (end: { messageId: string; status: MessageStatus; limited?: boolean }) => void) => () => void
   }
 >()('chat-v2/Chat') {
   static readonly layer = Layer.effect(
@@ -186,7 +191,10 @@ export class Chat extends Context.Service<
       yield* Effect.addFinalizer(() => Effect.sync(undoing))
 
       // What a reply may use is its bot's: its modules, and its rules for each call (agent/rules.ts).
-      const computerOn = (bot: Bot) => bot.modules.includes('computer') && computer.supported
+      // Never the browser or the computer in the primary's own conversation: that work is handed off
+      // to a job's thread, so its tool calls and results stay out of the user's chat with Tomo.
+      const moduleOn = (session: Session, bot: Bot, id: 'browser' | 'computer') => session.kind !== 'primary' && bot.modules.includes(id)
+      const computerOn = (session: Session, bot: Bot) => moduleOn(session, bot, 'computer') && computer.supported
       /** Decides a reply's calls by its bot's rules, and asks on the approval card computer use shows. */
       const gateFor = (bot: Bot): Gate => ({
         decide: (tool, input) => decideAccess(bot, tool, input),
@@ -228,8 +236,8 @@ export class Chat extends Context.Service<
         return [
           ...providers.flatMap((p) => p(session, bot)),
           ...(session.jobId ? [ruled(notes, gate)] : []),
-          ...(bot.modules.includes('browser') ? [ruled(browserModule(browser), gate)] : []),
-          ...(computerOn(bot)
+          ...(moduleOn(session, bot, 'browser') ? [ruled(browserModule(browser), gate)] : []),
+          ...(computerOn(session, bot)
             ? [
                 (ctx: Parameters<ToolModuleFactory>[0]) =>
                   computer.module(ctx, {
@@ -255,7 +263,7 @@ export class Chat extends Context.Service<
       const remembering = yield* FiberMap.make<string>()
       const memoryLock = yield* Semaphore.make(1)
       let lastMemoryRun: MemoryRun | null = null
-      const replyEnds = new Set<(end: { messageId: string; status: MessageStatus }) => void>()
+      const replyEnds = new Set<(end: { messageId: string; status: MessageStatus; limited?: boolean }) => void>()
       // Replies running now, for presence, and who to tell when that changes.
       const runningReplies = new Map<string, RunningReply>()
       const activity = new Set<() => void>()
@@ -297,6 +305,8 @@ export class Chat extends Context.Service<
         const names = yield* db.use((d) => new Map(d.listBots().map((b) => [b.id, b.name])))
         const nameOf: NameOf = (id) => (id ? names.get(id) : undefined) ?? 'a bot'
         const blocks: PromptBlock[] = []
+        // A fresh session after a topic divider: what the divider hands on comes first.
+        if (plan.carried) blocks.push({ type: 'text', text: carriedText(plan.carried) })
         // A bot's report or message in the primary's conversation says which job it is about.
         const jobs = yield* db.use((d) => new Map(plan.turns.flatMap((m) => (m.role === 'user' && m.authorBotId ? [[m.id, d.jobOfTurn(m.id)] as const] : []))))
         // The message answered comes as it is, the earlier turns quoted. A held message may have had a
@@ -325,7 +335,8 @@ export class Chat extends Context.Service<
         error: string | null,
         tailPartial: boolean,
         usage: Usage | null,
-        model: string | null
+        model: string | null,
+        limited = false
       ) =>
         db
           .use((d) => {
@@ -335,7 +346,7 @@ export class Chat extends Context.Service<
           })
           .pipe(
             Effect.andThen(Effect.sync(() => broadcaster.send({ type: 'done', messageId, status, error, usage, model }))),
-            Effect.andThen(Effect.sync(() => replyEnds.forEach((l) => l({ messageId, status })))),
+            Effect.andThen(Effect.sync(() => replyEnds.forEach((l) => l({ messageId, status, ...(limited ? { limited } : {}) })))),
             Effect.ignore
           )
 
@@ -452,7 +463,7 @@ export class Chat extends Context.Service<
               exists: agent.hasSession
             })
           )
-          const usesComputer = computerOn(bot)
+          const usesComputer = computerOn(session, bot)
           let mode: Mode | null = null
           if (usesComputer) {
             // A new reply reads its message for what the user wants; continuing keeps the mode.
@@ -462,7 +473,7 @@ export class Chat extends Context.Service<
           }
           const prompt = yield* promptFor(plan, partial, mode, pausedFor)
           // A job's thread: the bot sees where this job stands and what else the user has going.
-          // The primary's own conversation (turns that belong to no job) sees the job list too.
+          // The primary's own conversation, where it hands work off, sees the job list too.
           const jobs =
             (session.jobId || session.kind === 'primary') && partial === null ? yield* db.use((d) => jobsBlock(d.jobOfSession(session.id) ?? null, d.listJobs())) : ''
           if (jobs) prompt.unshift({ type: 'text', text: jobs })
@@ -473,13 +484,22 @@ export class Chat extends Context.Service<
           // User instructions first so they win any conflict; the writing guideline is hidden from Settings.
           const instructions = [
             session.systemPrompt ?? bot.instructions ?? settings.systemPrompt,
-            // A worker's own thread: the team tools' section says what it is (agent/team.ts).
-            session.kind === 'primary' ? chatNote(bot.name) : session.jobId && session.kind !== 'worker' ? jobsNote(bot.name) : '',
+            // A worker's own thread: the team tools' section says what it is (agent/team.ts). The
+            // primary's own thread on a job it handed itself says so whether or not there are workers.
+            session.kind === 'primary'
+              ? chatNote(bot.name)
+              : session.kind === 'worker'
+                ? bot.isPrimary
+                  ? selfJobNote(bot.name)
+                  : ''
+                : session.jobId
+                  ? jobsNote(bot.name)
+                  : '',
             session.jobId ? yield* db.use((d) => jobNotesBlock(d.jobNotes(session.jobId!))) : '',
             WRITING_GUIDELINES,
             settings.artifactsEnabled ? ARTIFACT_INSTRUCTIONS : '',
             HISTORY_NOTE,
-            bot.modules.includes('browser') && usesComputer ? BROWSER_AND_COMPUTER_NOTE : ''
+            moduleOn(session, bot, 'browser') && usesComputer ? BROWSER_AND_COMPUTER_NOTE : ''
           ]
             .map((s) => s.trim())
             .filter(Boolean)
@@ -566,7 +586,7 @@ export class Chat extends Context.Service<
               // At a usage limit the reply pauses with its work kept, and continues once the limit resets.
               if (meter && shouldPause(limit)) {
                 meter.pause({ sessionId: assistant.sessionId, messageId: assistant.id, signal: limit })
-                return yield* finish(assistant.id, 'stopped', `Paused at your ${limitName(limit?.window ?? null)}.`, partial, usage, model)
+                return yield* finish(assistant.id, 'stopped', `Paused at your ${limitName(limit?.window ?? null)}.`, partial, usage, model, true)
               }
               const error = Cause.squash(exit.cause)
               return yield* end('error', errorMessage(error), partial)
@@ -717,6 +737,7 @@ export class Chat extends Context.Service<
         text: string
         attachmentIds: string[]
         from?: string | null
+        via?: string | null
       }) {
         yield* messageIn(input.sessionId, input.parentId)
         // While a Show-me step of this chat waits, a message answers it instead of starting a reply.
@@ -772,7 +793,7 @@ export class Chat extends Context.Service<
 
       /**
        * A reply ended: what was held while it ran is answered. Not when it was stopped (deleting a job
-       * or a bot, or moving a turn, stops replies; the user's own Stop drains after, in ipc.ts), cut off
+       * or a bot stops replies; the user's own Stop drains after, in ipc.ts), cut off
        * by quitting (startup drains), or paused at a usage limit (it goes on by itself).
        */
       const afterEnd = (sessionId: string, status: MessageStatus): Effect.Effect<void> =>

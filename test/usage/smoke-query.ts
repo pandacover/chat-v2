@@ -1,19 +1,23 @@
-// CHAT_V2_FAKE_QUERY for smoke.mjs (bundled to CommonJS): a scripted model on a Claude plan. A
+// CHAT_V2_FAKE_QUERY for smoke.mjs (bundled to CommonJS): a scripted model on a Claude plan. In
+// Tomo's chat, "Write …" is work Tomo hands itself with start_job; in its own thread on that job, a
 // message with "limit" in it runs into the 5-hour limit after a warning (the first time the limit
 // resets in a few seconds, the second time in a minute), and its continuation finishes. The usage
 // meter answers as the SDK's usage control request would.
-import { ROUTER_INSTRUCTIONS } from '../../src/main/jobs'
 import { fakeQuery, type Script } from '../fakeQuery'
+
+const systemOf = (o: { systemPrompt?: unknown }) => (o.systemPrompt as { prompt?: string } | undefined)?.prompt ?? ''
 
 let limited = 0
 const script: Script = async function* (t) {
   if (t.call.options.persistSession === false) {
-    // Tomo's router: the first message starts a job, the rest stay with the current one.
-    const system = (t.call.options.systemPrompt as { prompt: string }).prompt
-    const lines = t.call.prompt.flatMap((b) => (b.text ?? '').split(/\r?\n/))
-    const current = lines.find((l) => /^\d+\. .*\(current\)$/.test(l))?.split('.')[0]
-    yield* t.text(system === ROUTER_INSTRUCTIONS ? (current ? `{"job": ${current}}` : '{"job": "new", "title": "Long write-up"}') : 'Usage test')
+    yield* t.text('Usage test')
     yield t.result()
+    return
+  }
+  if (systemOf(t.call.options).includes('this is your one continuous chat with the user') && /^Write /.test(t.call.prompt.at(-1)?.text ?? '')) {
+    yield* t.tool('mcp__team__start_job', { bot: 'yourself', task: 'Please hit the limit while writing it up at length.', title: 'Long write-up' })
+    yield* t.text("I'm on it.")
+    yield t.result({ cost: 0.002 })
     return
   }
   const prompt = t.call.prompt.map((b) => b.text ?? '').join('\n')

@@ -1,12 +1,14 @@
 // Bots and jobs in chat.db: the schema change that brings them in, and the queries over them.
 //
-// A bot is a persistent agent; one of them is the primary (Tomo), which hears everything the user
-// says without picking a job. A job is one piece of work, which the user switches between as they
-// did chats. A thread is a `sessions` row: a job's thread (kind 'shared') is a chat as before, with
-// its branches, forks, Claude Code sessions and artifacts. The primary's conversation is a session
-// too (kind 'primary'): each turn the user sends it lands in a job's thread (or, for small talk, in
-// the conversation itself), marked with `via_session_id`, and the conversation is read back from
-// those turns. Bots' reports and messages to the primary arrive in it as turns of their own.
+// A bot is a persistent agent; one of them is the primary (Tomo), the one the user talks to. A job
+// is one piece of work handed off (to a worker, or to Tomo itself), which the user switches between
+// as they did chats. A thread is a `sessions` row: a job's thread (kind 'shared') is a chat as
+// before, with its branches, forks, Claude Code sessions and artifacts; each bot working on a job
+// has a thread of its own on it (kind 'worker'). The primary's conversation is a session too (kind
+// 'primary'): everything the user says to Tomo is a turn there, marked with `via_session_id`, and
+// bots' reports and messages to the primary arrive in it as turns of their own. Before that, each
+// turn the user sent landed in a job's thread (routed), marked the same way: the conversation is
+// read back from all those turns, old and new, in order.
 import { randomUUID } from 'node:crypto'
 import type { SQLInputValue } from 'node:sqlite'
 import type { Bot, BotPatch, Effort, Job, JobStatus, JobUsage, Message, MessageStatus, PathNode, Post, Role, Session } from '@shared/types'
@@ -385,45 +387,39 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
     })
 
   /**
-   * Files a user turn and everything under it (its replies) at the end of another thread, as they
-   * are: nothing is answered again. The turn's replies keep their Claude Code checkpoints only
-   * when `keepCheckpoints` (the new thread then carries on from that session, as the turn's own
-   * conversation had it); otherwise the next reply there resumes the thread's own session and
-   * reads the moved turn as text. Their session is kept either way, so the thread they left forks
-   * it instead of writing over them. The job the turn lands in is open again and the newest.
+   * New topic in the primary's conversation: a divider (agent/history.ts isTopicStart) after which
+   * its next reply starts a fresh Claude Code session. It goes after the reply on show, running or
+   * not; turns waiting at the end for a reply (held while one ran) go after it, so they open the
+   * new topic. `carry` is what the fresh session is handed (nothing yet). The conversation's memory
+   * is read afresh too. Returns the divider, or null when there is nothing to divide (an empty
+   * conversation, or one that starts a topic already).
    */
-  const refileTurn = (messageId: string, threadId: string, keepCheckpoints: boolean) =>
+  const newTopic = (primaryId: string, carry = ''): Message | null =>
     transaction(() => {
-      const turn = one<{ parent_id: string | null; session_id: string }>('select parent_id, session_id from messages where id = ?', messageId)
-      const thread = getSession(threadId)
-      if (!turn?.parent_id || !thread || turn.session_id === threadId) return
-      const parentId = leafOf(thread)
-      const ids = JSON.stringify(
-        all<{ id: string }>(
-          `with recursive sub(id) as (select ? union all select m.id from messages m join sub on m.parent_id = sub.id) select id from sub`,
-          messageId
-        ).map((r) => r.id)
-      )
-      run('update messages set session_id = ? where id in (select value from json_each(?))', threadId, ids)
-      if (!keepCheckpoints) run('update messages set agent_uuid = null where id in (select value from json_each(?))', ids)
-      run('update messages set parent_id = ? where id = ?', parentId, messageId)
-      run('update messages set active_child_id = ? where id = ?', messageId, parentId)
-      // The thread it left shows its newest remaining child there, or none.
-      run(
-        `update messages set active_child_id = (select id from messages c where c.parent_id = messages.id order by c.seq desc limit 1) where id = ?`,
-        turn.parent_id
-      )
-      run('update sessions set updated_at = ? where id = ?', Date.now(), threadId)
-      if (thread.jobId) run(`update jobs set status = 'open' where id = ? and status != 'open'`, thread.jobId)
+      const session = getSession(primaryId)
+      if (!session) return null
+      const path = activePath(session)
+      let at = path.length
+      while (at > 0 && path[at - 1]!.message.role === 'user') at--
+      const before = path[at - 1]?.message
+      if (!before || (before.role === 'assistant' && before.post?.kind === 'topic')) return null
+      const held = path[at]?.message
+      const mark = insertMessage({ sessionId: session.id, parentId: before.id, role: 'assistant', content: carry, status: 'complete', post: { kind: 'topic', to: null, state: null } })
+      // Shown in the conversation, and nobody's: the trigger signs assistant rows with the thread's bot.
+      run('update messages set via_session_id = ?, author_bot_id = null where id = ?', session.id, mark.id)
+      if (held) {
+        run('update messages set parent_id = ? where id = ?', mark.id, held.id)
+        run('update messages set active_child_id = ? where id = ?', held.id, mark.id)
+      }
+      run('update sessions set memory_rev = null where id = ?', session.id)
+      return getMessage(mark.id)!
     })
-
-  /** Whether a thread has nothing in it but its root. */
-  const threadEmpty = (sessionId: string) => !one(`select 1 from messages where session_id = ? and role != 'root'`, sessionId)
 
   /**
    * The primary's conversation: the latest turns the user sent it, each with the reply its thread
-   * shows, and the bots' reports to it, oldest first. A turn whose thread switched to another
-   * branch since drops out.
+   * shows, the bots' reports to it and New topic dividers, oldest first. A turn whose thread
+   * switched to another branch since drops out. The conversation's own turns keep their order in
+   * it: a turn held while a reply ran opens the topic after a divider made later.
    */
   const primaryPath = (primaryId: string, limit = PRIMARY_TURNS): PathNode[] => {
     const sent = all<{ id: string; session_id: string; seq: number }>(
@@ -437,13 +433,15 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
       const session = getSession(sessionId)
       if (!session) continue
       const path = activePath(session)
+      let floor = 0
       path.forEach((node, i) => {
-        const seq = order.get(node.message.id)
-        if (seq === undefined) return
+        const own = order.get(node.message.id)
+        if (own === undefined) return
+        const seq = session.kind === 'primary' ? (floor = Math.max(floor, own)) : own
         const next = path[i + 1]
         const answered = node.message.role === 'user' && next?.message.role === 'assistant' && !next.message.post
         // A bot's report or message here, and the primary's answer to it, are about the bot's job.
-        const jobId = session.kind === 'primary' && node.message.authorBotId ? (jobOfTurn(node.message.id)?.id ?? null) : null
+        const jobId = session.kind === 'primary' && node.message.authorBotId && node.message.post?.kind !== 'topic' ? (jobOfTurn(node.message.id)?.id ?? null) : null
         const tagged = (n: PathNode): PathNode => (jobId ? { ...n, jobId } : n)
         out.push({ seq, nodes: answered ? [tagged(node), tagged(next)] : [tagged(node)] })
       })
@@ -686,18 +684,8 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
       run('update messages set via_session_id = ? where id = ?', viaSessionId, messageId)
     },
     primaryPath,
-    /** The newest turn the user sent the primary, with its thread (a bot's report there isn't one). */
-    lastRouted: (primaryId: string): { messageId: string; sessionId: string; jobId: string | null } | null => {
-      const row = one<{ id: string; session_id: string; job_id: string | null }>(
-        `select m.id, m.session_id, s.job_id from messages m join sessions s on s.id = m.session_id
-          where m.via_session_id = ? and m.role = 'user' and m.author_bot_id is null order by m.seq desc limit 1`,
-        primaryId
-      )
-      return row ? { messageId: row.id, sessionId: row.session_id, jobId: row.job_id } : null
-    },
+    newTopic,
     removeTurn,
-    refileTurn,
-    threadEmpty,
     /** Jobs that lost every thread (an empty one cleared at startup). */
     pruneOrphanJobs: (): number => Number(run('delete from jobs where not exists (select 1 from sessions s where s.job_id = jobs.id)').changes)
   }

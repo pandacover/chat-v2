@@ -101,7 +101,12 @@ try {
   await page.getByRole('switch', { name: 'Computer', checked: true }).waitFor()
   await page.keyboard.press('Escape')
   await page.locator('button[data-tools~="computer"]').waitFor()
-  await send('Keep looking at the screen')
+  // Computer work runs in Tomo's own thread on a job it hands itself, not in its chat.
+  await send('Hand the screen watch to yourself')
+  const jobRow = page.locator('aside [data-row^="chat:"]', { hasText: 'Screen watch' })
+  await until(async () => (await jobRow.count()) === 1, 'the job needs you once its reply pauses', 15_000)
+  await jobRow.locator('button').first().click()
+  await until(async () => (await page.locator('[data-chat-title]').count()) === 1, "it opens on Tomo's own thread")
   await until(async () => (await card().count()) === 1, 'a computer reply looping on its look pauses too', 15_000)
   const why = await card().locator('[data-pause-reason]').innerText()
   ok(/^It made the same look at screen call [45] times in a row/.test(why), `and says why: “${why}”`)

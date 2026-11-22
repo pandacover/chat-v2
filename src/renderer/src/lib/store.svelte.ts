@@ -10,7 +10,6 @@ import type {
   Job,
   JobDetail,
   JobStatus,
-  JobTarget,
   ListedSession,
   MemoryView,
   Message,
@@ -69,7 +68,8 @@ class AppState {
   /** The open conversation: the primary bot's (kind 'primary'), or a job's thread. */
   view = $state<SessionView | null>(null)
 
-  // Bots and jobs. The user talks to the primary bot; each message goes to a job's thread.
+  // Bots and jobs. The user talks to the primary bot, in its own conversation; a job (and its thread)
+  // opens when work is handed off, to a worker or to the primary itself.
   bots = $state<Bot[]>([])
   jobs = $state<Job[]>([])
   primaryBot = $derived(this.bots.find((b) => b.isPrimary) ?? null)
@@ -87,20 +87,13 @@ class AppState {
   isPrimary = $derived(this.view?.session.kind === 'primary')
   /** Each job by its thread, for labelling turns and finding a thread's job. */
   jobByThread = $derived(new Map(this.jobs.flatMap((j) => (j.threadId ? [[j.threadId, j] as const] : []))))
-  /** Where the next message to the primary goes; the job chip sets it, and it is 'auto' again after a send. */
-  target = $state<JobTarget>('auto')
-  /** A message sent to the primary that is still being routed, shown until its turn lands. */
+  /** A message sent to the primary that is still on its way, shown until its turn lands. */
   pending = $state<{ text: string; attachments: Attachment[] } | null>(null)
-  /** The job the open conversation is on: the thread's, or in the primary's the one picked or last used. */
+  /** The job the open thread is on (a job's thread, or a bot's own thread on it); none in the primary's conversation. */
   currentJob = $derived.by<Job | null>(() => {
     const view = this.view
-    if (!view) return null
-    // A job's thread, or a bot's own thread on it.
-    if (!this.isPrimary) return this.jobByThread.get(view.session.id) ?? this.jobs.find((j) => j.id === view.session.jobId) ?? null
-    const t = this.target
-    if (typeof t === 'object') return this.jobs.find((j) => j.id === t.jobId) ?? null
-    const last = view.path.at(-1)?.message
-    return last ? (this.jobByThread.get(last.sessionId) ?? null) : null
+    if (!view || this.isPrimary) return null
+    return this.jobByThread.get(view.session.id) ?? this.jobs.find((j) => j.id === view.session.jobId) ?? null
   })
   settings = $state<SettingsView | null>(null)
   artifact = $state<OpenArtifact | null>(null)
@@ -164,7 +157,8 @@ class AppState {
   teaching = $derived(
     this.computerWait?.kind === 'teach' &&
       (this.computerWait.sessionId === this.view?.session.id ||
-        (this.isPrimary && this.view!.path.some((n) => n.message.sessionId === this.computerWait!.sessionId)))
+        // Talking to Tomo, a message answers a Show-me step waiting in any thread (Jobs.send).
+        this.isPrimary)
   )
   /** Point is under way: the user is marking part of the screen for their next message. */
   pointing = $state(false)
@@ -398,7 +392,7 @@ class AppState {
     // Drafts of chats that are gone (deleted elsewhere, or empty ones cleared at startup).
     for (const key of [...this.drafts.keys()])
       if (key !== primary?.session.id && !this.sessions.some((s) => s.id === key)) this.setDraft(key, '')
-    // Tomo opens on the primary bot's conversation: everything said there goes to the right job.
+    // Tomo opens on the primary bot's conversation, where everything is said to it.
     if (primary) this.setView(primary)
   }
 
@@ -446,9 +440,8 @@ class AppState {
     if (jobs) this.jobs = jobs
   }
 
-  /** Opens the primary bot's conversation; `target` picks where its next message goes. */
-  async openPrimary(target: JobTarget = 'auto') {
-    this.target = target
+  /** Opens the primary bot's conversation. */
+  async openPrimary() {
     if (this.isPrimary) return void (await this.reloadPrimary())
     const view = await this.attempt(() => api.jobs.primary())
     if (view) this.setView(view)
@@ -459,21 +452,20 @@ class AppState {
     if (view && this.isPrimary) this.setView(view)
   }
 
-  /** Opens a job's thread. */
-  async openJob(job: Job) {
-    if (job.threadId) await this.open(job.threadId)
+  /**
+   * The primary's own thread on a job it handed itself, where the work is: a job opens there. (A
+   * job's shared thread then only holds the task and the report.)
+   */
+  ownThreadOf(job: Job): ListedSession | null {
+    const primary = this.primaryBot
+    if (!primary || job.ownerBotId !== primary.id) return null
+    return this.sessions.find((s) => s.kind === 'worker' && s.jobId === job.id && s.botId === primary.id) ?? null
   }
 
-  /** Puts the primary's last turn in another job (or a new one): a wrong guess put right. */
-  async moveLast(target: 'new' | { jobId: string }) {
-    const last = this.isPrimary ? this.view?.path.findLast((n) => n.message.role === 'user')?.message : undefined
-    if (!last) return
-    const view = await this.attempt(() => api.jobs.move({ messageId: last.id, target: $state.snapshot(target) as typeof target }))
-    if (!view) return
-    const reply = view.path.at(-1)?.message
-    if (reply?.status === 'streaming') this.liveIds.add(reply.id)
-    this.setView(view)
-    await this.refreshSessions()
+  /** Opens a job: its thread, or the primary's own thread on it when it handed the job itself. */
+  async openJob(job: Job) {
+    const id = this.ownThreadOf(job)?.id ?? job.threadId
+    if (id) await this.open(id)
   }
 
   async setJobStatus(id: string, status: JobStatus) {
@@ -558,8 +550,11 @@ class AppState {
     const jobId = view.session.kind === 'primary' ? null : view.session.jobId
     if (jobId !== this.jobDetail?.job.id) this.jobDetail = null
     if (jobId && this.team) void this.loadJobDetail(jobId)
-    // An open thread is read: whatever ended in it is in front of the user.
+    // An open thread is read: whatever ended in it is in front of the user. The primary's own
+    // thread on a job it handed itself stands for the job, so its shared thread is read with it.
     if (view.session.kind !== 'primary') this.markRead(view.session.id)
+    const job = view.session.kind === 'worker' && view.session.botId === this.primaryBot?.id ? this.jobs.find((j) => j.id === view.session.jobId) : undefined
+    if (job?.threadId && job.threadId !== view.session.id) this.markRead(job.threadId)
     for (const node of view.path) {
       if (node.message.status === 'streaming') void this.backfill(node.message.id)
     }
@@ -570,9 +565,13 @@ class AppState {
     if (view) this.setView(view)
   }
 
-  /** A new topic: the primary's conversation, with its next message going to a new job. */
-  newSession() {
-    void this.openPrimary('new')
+  /**
+   * New topic: the primary's conversation, with a divider after which Tomo starts afresh (nothing
+   * before it is resumed). Nothing happens to a conversation that is empty or just divided.
+   */
+  async newSession() {
+    const view = await this.attempt(() => api.jobs.newTopic())
+    if (view) this.setView(view)
   }
 
   async rename(id: string, title: string) {
@@ -632,14 +631,12 @@ class AppState {
     await this.refreshSessions()
   }
 
-  /** A message to the primary bot: routed to a job (or the one the chip picked). */
+  /** A message to the primary bot, in its own conversation. */
   private async sendToPrimary(text: string, attachments: Attachment[]) {
-    const target = $state.snapshot(this.target) as JobTarget
     this.pending = { text, attachments }
     try {
-      const view = await this.attempt(() => api.jobs.send({ text, attachmentIds: attachments.map((a) => a.id), target }))
+      const view = await this.attempt(() => api.jobs.send({ text, attachmentIds: attachments.map((a) => a.id) }))
       if (!view) return false
-      this.target = 'auto'
       const reply = view.path.at(-1)?.message
       if (reply?.status === 'streaming') this.liveIds.add(reply.id)
       if (this.isPrimary) this.setView(view)

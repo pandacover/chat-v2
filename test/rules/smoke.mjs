@@ -1,6 +1,7 @@
 // Smoke test of rules in the built app, hidden (CHAT_V2_HEADLESS=1), with a scripted model
 // (smoke-query.ts): Settings › Bots (tools, rules, locked rules), the composer's read-only tools,
-// and a reply whose calls are asked about (approved with Ctrl+Enter, denied with Esc) or blocked.
+// and a reply (in Tomo's own thread on a job it hands itself) whose calls are asked about (approved
+// with Ctrl+Enter, denied with Esc) or blocked.
 // Captures, light and dark, go to <outDir>.
 //
 //   bun run build
@@ -131,10 +132,14 @@ try {
   await until(async () => (await tools.getAttribute('data-tools')) === 'browser', "the composer shows Tomo's browser")
   await capture('5-composer')
 
-  // A reply under those rules.
+  // A reply under those rules: work, which Tomo hands to itself and does in its own thread on a job.
   await composer.fill('Buy the camera on the shop page')
   await composer.press('Enter')
   await card.waitFor({ timeout: 15_000 })
+  ok((await page.locator('[data-approval-elsewhere]').count()) === 1, "the first ask shows in Tomo's chat too, above the composer")
+  await page.locator('aside [data-row^="chat:"]', { hasText: 'Buy the camera' }).locator('button').first().click()
+  await until(async () => (await page.locator('[data-chat-title]').count()) === 1 && (await page.locator('[data-chat-title]').innerText()) === 'Buy the camera', "the job, waiting on you, opens on Tomo's own thread")
+  await until(async () => (await page.locator('[data-approval-elsewhere]').count()) === 0 && (await lastReply().locator('[data-computer-wait="approval"]').count()) === 1, 'where the card is in the reply')
   ok((await card.innerText()).includes('Write a job note'), 'the first ask is on the approval card, saying what will be done')
   ok((await card.innerText()).includes('Looked at the shop page.'), 'and to what')
   await sleep(900)

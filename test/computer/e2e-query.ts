@@ -1,6 +1,9 @@
 // CHAT_V2_FAKE_QUERY for the end-to-end test (e2e.mjs bundles this to CommonJS): a scripted model
-// that calls the computer tools for real, through MCP and the permission check.
+// that calls the computer tools for real, through MCP and the permission check. Computer work runs
+// in a job's thread, not in Tomo's chat: there, "Hand …" makes Tomo hand it to itself with start_job.
 import { fakeQuery, type Script } from '../fakeQuery'
+
+const systemOf = (o: { systemPrompt?: unknown }) => (o.systemPrompt as { prompt?: string } | undefined)?.prompt ?? ''
 
 const script: Script = async function* (t) {
   // A title or memory read.
@@ -11,6 +14,17 @@ const script: Script = async function* (t) {
   }
   // The new message comes last, after any turns the session doesn't have.
   const prompt = t.call.prompt.at(-1)?.text ?? ''
+  // Tomo's chat: it hands the computer work to itself, and answers the report in a line.
+  if (systemOf(t.call.options).includes('this is your one continuous chat with the user')) {
+    if (/^Hand /.test(prompt)) yield* t.tool('mcp__team__start_job', { bot: 'yourself', task: 'Get ready for the computer tests', title: 'Computer tests' })
+    yield* t.text(/^Hand /.test(prompt) ? 'On it.' : 'Ready when you are.')
+    return void (yield t.result())
+  }
+  // Its own thread on the job: the task it handed itself.
+  if (/<from_bot [^>]*kind="task">/.test(prompt)) {
+    yield* t.text('Ready.')
+    return void (yield t.result())
+  }
   yield* t.tool('mcp__computer__look_at_screen')
   const said = (r: { result: { content: Array<{ text?: string }> } | null }) => (r.result?.content ?? []).map((c) => c.text ?? '').join('')
   // A message with a Point attached: say back what came with it.

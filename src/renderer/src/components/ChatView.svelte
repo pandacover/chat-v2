@@ -6,12 +6,13 @@
   import { fade, fly, pop } from '@/lib/motion'
   import { shortcut } from '@/lib/keys'
   import { app } from '@/lib/store.svelte'
+  import { meter } from '@/lib/meter.svelte'
+  import { jobUsageLine, sharesLine } from '@shared/usage'
   import { clock, voice } from '@/lib/voice.svelte'
   import type { PathNode } from '@shared/types'
   import Composer from './Composer.svelte'
   import ComputerWaitCard from './ComputerWaitCard.svelte'
   import JobBar from './JobBar.svelte'
-  import JobChip from './JobChip.svelte'
   import Mascot from './Mascot.svelte'
   import Icon from './Icon.svelte'
   import MessageItem from './MessageItem.svelte'
@@ -31,9 +32,9 @@
   let promptDraft = $state('')
 
   const view = $derived(app.view)
-  // A message to Tomo still being routed shows at once, so the conversation isn't empty meanwhile.
+  // A message to Tomo shows at once, so the conversation isn't empty while it is on its way.
   const empty = $derived((!view || view.path.length === 0) && !app.pending)
-  /** The routed message, and Tomo thinking, until the turn lands in its job. */
+  /** The message on its way, and Tomo thinking, until the turn lands. */
   const pendingNodes = $derived.by<PathNode[]>(() => {
     const p = app.pending
     if (!p || !app.isPrimary) return []
@@ -68,16 +69,29 @@
   const jobOf = (node: PathNode) => app.jobByThread.get(node.message.sessionId) ?? (node.jobId ? (app.jobs.find((j) => j.id === node.jobId) ?? null) : null)
   /** A bot's own thread on a job. */
   const worker = $derived(view?.session.kind === 'worker')
+  /** The job the open thread is on, and what it has used (with its estimated share of your plan). */
+  const job = $derived(app.currentJob)
+  $effect(() => {
+    if (job) void meter.loadJob(job.id)
+  })
+  const jobTip = $derived.by(() => {
+    if (!job) return null
+    const parts = [job.usage && job.usage.replies > 0 ? jobUsageLine(job.usage) : '', sharesLine((meter.shares.get(job.id) ?? []).filter((s) => s.percent > 0))]
+    const line = parts.filter(Boolean).join(', ')
+    return [job.status === 'done' ? 'This job is finished; writing here opens it again' : '', line ? `Used ${line}${parts[1] ? ' (an estimate)' : ''}` : ''].filter(Boolean).join(' · ') || null
+  })
   /** Several bots write here: replies say whose they are. */
   const showAuthor = $derived(!app.isPrimary && !!view && (worker || view.path.some((n) => n.message.post)))
   /**
    * Approvals always come to you: one asked in a thread that isn't open (a bot's own, asking to
-   * pass a request on) shows above the composer, saying where it is from.
+   * pass a request on) shows above the composer, saying where it is from. So does a Show-me step
+   * waiting in a thread while you talk to Tomo: what you say to Tomo then answers it (Jobs.send).
    */
   const elsewhere = $derived.by(() => {
     const w = app.computerWait
-    if (w?.kind !== 'approval' || view?.path.some((n) => n.message.id === w.messageId)) return null
-    return w
+    if (!w || view?.path.some((n) => n.message.id === w.messageId)) return null
+    if (w.kind === 'approval' || (w.kind === 'teach' && app.isPrimary)) return w
+    return null
   })
   const elsewhereFrom = $derived.by(() => {
     const s = elsewhere ? app.sessions.find((x) => x.id === elsewhere.sessionId) : undefined
@@ -317,7 +331,9 @@
     style="padding-right: {app.panelToggle && !app.panelOpen ? 46 : 12}px"
   >
     {#if !app.isPrimary}
-      <span class="min-w-0 truncate pl-1 font-medium" data-chat-title>{view?.session.title ?? ''}</span>
+      <span class="min-w-0 truncate pl-1 font-medium" data-chat-title use:tip={jobTip ? { text: jobTip, placement: 'bottom' } : null}>{view?.session.title ?? ''}</span>
+      <!-- With several bots the job bar below says so. -->
+      {#if job?.status === 'done' && !app.team}<span class="mono-label shrink-0 pl-1.5 !text-[10px] !text-fg-4" data-job-finished>Finished</span>{/if}
     {/if}
     <span class="flex-1"></span>
     <!-- The primary's instructions are its bot's, in Settings; a job's thread can have its own. -->
@@ -417,7 +433,6 @@
         <ComputerWaitCard wait={elsewhere} />
       </div>
     {/if}
-    <div class="mb-2 flex min-h-7 items-center px-1 empty:hidden"><JobChip /></div>
     <Composer
       bind:this={composer}
       tall={empty && !stage}

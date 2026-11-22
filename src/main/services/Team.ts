@@ -12,21 +12,26 @@
 // comes to it as a turn of its own. A worker that asked another worker for something doesn't
 // report the reply it asked in; its reply to the answer is its report.
 //
+// The primary can hand work to itself too: the job is its own, and the work runs in its own thread
+// on the job (a 'worker' session of the primary bot), with its tools, as a worker's would. Its reply
+// there reports back into its chat with the user, like any worker's.
+//
 // Access across bots: the primary hands out work freely. A worker asking another worker that can
 // do more than it can (agent/rules.ts `exceeds`) is held until the user approves it, on the same
 // card as every other approval; the doing bot's own rules still apply as it works. A request that
 // keeps bouncing between two bots is stopped (agent/stuck.ts `bouncing`).
 import { Cause, Context, Effect, Layer } from 'effect'
+import { parseContent } from '@shared/artifacts'
 import { splitSteps } from '@shared/steps'
 import { RULE_ITEMS } from '@shared/rules'
-import type { Bot, BotPatch, Job, JobDetail, Post, Presence, Session } from '@shared/types'
+import type { Bot, BotPatch, Job, JobDetail, Message, Post, Presence, Session } from '@shared/types'
 import { type DbError, type NotFound, errorMessage } from '../errors'
 import { ComputerUse } from '../computer'
 import { exceeds } from '../agent/rules'
 import { bouncing } from '../agent/stuck'
 import type { RunContext } from '../agent/module'
-import { type TeamDeps, type TeamResult, teamModule } from '../agent/team'
-import { ROUTE_OPEN } from '../jobs'
+import { SELF_NAMES, type TeamDeps, type TeamPlace, type TeamResult, teamModule } from '../agent/team'
+import { LIST_OPEN } from '../jobs'
 import { Broadcaster, Chat, titleFrom } from './Chat'
 import { Db, type DbApi } from './Db'
 
@@ -35,10 +40,14 @@ export const DONE_MS = 10 * 60 * 1000
 /** How much of a reply a report carries. */
 const REPORT_CHARS = 8000
 
-/** A reply's words, without its step lines: what a report says. */
+/**
+ * A reply's words, without its step lines: what a report says. An artifact it made is named, not
+ * carried: it stays in the thread it was made in, and the report goes into a chat.
+ */
 export const reportText = (content: string) =>
   splitSteps(content)
-    .flatMap((s) => (s.type === 'text' ? [s.content.trim()] : []))
+    .flatMap((s) => (s.type === 'text' ? parseContent(s.content) : []))
+    .map((b) => (b.type === 'artifact' ? `(Made “${b.title}”: it's in the job's thread.)` : b.content.trim()))
     .filter(Boolean)
     .join('\n\n')
     .slice(0, REPORT_CHARS)
@@ -179,6 +188,19 @@ export class Team extends Context.Service<
           return session.id
         })
 
+      /**
+       * A report or message to the primary about `job`, from a reply in `fromThread`: to the
+       * primary's own thread on the job when it works on it itself (a job it handed itself), unless
+       * that is where it comes from; to its conversation with the user otherwise.
+       */
+      const toPrimaryOn = (job: Job, from: Bot, fromThread: string, text: string, kind: Post['kind']) =>
+        Effect.gen(function* () {
+          const primary = sync((d) => d.primaryBot())
+          const own = sync((d) => d.workerThread(job.id, primary.id))
+          if (own && own.id !== fromThread) return (yield* deliver(job, from, primary, text, kind))?.id ?? own.id
+          return yield* toPrimary(from, text, kind)
+        })
+
       /** Posts in a job's shared thread; `via` also shows it in the primary's conversation (a notice for the user). */
       const post = (job: Job, author: Bot, text: string, p: Post, notice = false) =>
         sync((d) => d.appendPost({ threadId: job.threadId!, authorBotId: author.id, text, post: p, via: notice ? d.primarySession().id : null }))
@@ -200,19 +222,37 @@ export class Team extends Context.Service<
       }
 
       const deps: TeamDeps = {
-        who: (ctx) => sync((d) => ({ me: d.botOf(ctx.sessionId), primary: d.primaryBot(), bots: d.listBots() })),
+        who: (ctx) =>
+          sync((d) => {
+            const kind = d.getSession(ctx.sessionId)?.kind
+            const place: TeamPlace = kind === 'primary' ? 'chat' : kind === 'worker' ? 'own' : 'thread'
+            return { me: d.botOf(ctx.sessionId), primary: d.primaryBot(), bots: d.listBots(), place }
+          }),
 
         startJob: (ctx, input) =>
           Effect.runPromise(
             Effect.gen(function* () {
-              const { me, bots } = deps.who(ctx)
+              const { me, bots, place } = deps.who(ctx)
               if (!me.isPrimary) {
                 const primary = bots.find((b) => b.isPrimary)!
                 return fail(`Only ${primary.name}, the primary bot, opens jobs, and you post only in the job you were given. If this needs a job of its own, ask ${primary.name} with message.`)
               }
-              const doer = findBot(bots, input.bot)
-              if (!doer) return fail(`There is no bot called “${input.bot}”. Your bots: ${nameList(bots.filter((b) => !b.isPrimary))}.`)
-              if (doer.id === me.id) return fail("That's you: do it yourself, or hand it to one of your bots.")
+              if (place === 'own')
+                return fail("You're working on a job in its own thread: do the work here, or ask one of your bots on this job with message. If it needs a job of its own, say so in your report.")
+              // Answering the report of work it handed itself (and nothing the user said with it), the
+              // primary opens nothing again by accident.
+              const answering = sync((d) => {
+                const reply = d.getMessage(ctx.messageId)
+                const lineage = reply?.parentId ? d.lineage(reply.parentId) : []
+                const turns: Message[] = []
+                for (let i = lineage.length - 1; i >= 0 && lineage[i]!.role === 'user'; i--) turns.push(lineage[i]!)
+                return turns
+              })
+              if (answering.some((m) => m.authorBotId === me.id && m.post?.kind === 'report') && !answering.some((m) => !m.authorBotId))
+                return fail("This turn is your own report coming back: the work you handed yourself is done. Tell the user how it went; open another job only when they ask for more.")
+              const doer = SELF_NAMES.test(input.bot.trim()) ? me : findBot(bots, input.bot)
+              const workers = bots.filter((b) => !b.isPrimary)
+              if (!doer) return fail(`There is no bot called “${input.bot}”. ${workers.length ? `Your bots: ${nameList(workers)}, or yourself.` : 'You have no other bots: hand it to yourself.'}`)
               const task = input.task.trim()
               if (!task) return fail('The task is empty.')
               const title = titleFrom(input.title?.trim() || task)
@@ -223,10 +263,13 @@ export class Team extends Context.Service<
               const thread = yield* deliver(job, me, doer, task, 'task')
               changed(job.threadId, thread?.id)
               pushPresence()
+              const self = doer.id === me.id
               return {
                 ok: true,
-                text: `Opened the job “${title}” (id ${job.id}) and handed it to ${doer.name}, who has started on it in its own thread. You don't need to wait or check on it: its report arrives in your conversation with the user as a turn of its own when it is done. Tell the user who is on it and carry on.`,
-                step: { tool: 'team_start_job', label: `Handed “${title}” to ${doer.name}`, ok: true }
+                text: self
+                  ? `Opened the job “${title}” (id ${job.id}) and started on it yourself, in its own thread. Don't do the work here as well, and don't wait or check on it: its report arrives in your conversation with the user as a turn of its own when it is done. Tell the user you're on it and carry on.`
+                  : `Opened the job “${title}” (id ${job.id}) and handed it to ${doer.name}, who has started on it in its own thread. You don't need to wait or check on it: its report arrives in your conversation with the user as a turn of its own when it is done. Tell the user who is on it and carry on.`,
+                step: { tool: 'team_start_job', label: self ? `Started “${title}” in its own thread` : `Handed “${title}” to ${doer.name}`, ok: true }
               } satisfies TeamResult
             })
           ),
@@ -234,10 +277,13 @@ export class Team extends Context.Service<
         message: (ctx, input, signal) =>
           Effect.runPromise(
             Effect.gen(function* () {
-              const { me, primary, bots } = deps.who(ctx)
+              const { me, primary, bots, place } = deps.who(ctx)
+              // A worker, or the primary in its own thread on a job: it posts only in that job, and an
+              // answer it asks for comes back as its next turn.
+              const onlyHere = !me.isPrimary || place === 'own'
               const job = sync((d) => jobFor(d, ctx, input.thread))
               if (!job?.threadId) return fail(input.thread ? `There is no job “${input.thread}”. list_jobs shows them.` : "This conversation isn't on a job: name one with thread.")
-              if (!me.isPrimary && job.id !== ctx.jobId) return fail('You post only in the job you were given.')
+              if (onlyHere && job.id !== ctx.jobId) return fail('You post only in the job you are working on.')
               const text = input.text.trim()
               if (!text) return fail('The message is empty.')
               const everyone = !input.to?.trim() || /^(everyone|all|everybody)$/i.test(input.to.trim())
@@ -285,7 +331,7 @@ export class Team extends Context.Service<
               const threads: string[] = []
               for (const b of recipients) {
                 if (b.isPrimary) {
-                  threads.push(yield* toPrimary(me, text, 'message'))
+                  threads.push(yield* toPrimaryOn(job, me, ctx.sessionId, text, 'message'))
                   continue
                 }
                 if (!onJob.includes(b.id)) brought.push(b.name)
@@ -294,13 +340,13 @@ export class Team extends Context.Service<
               }
               const asked = recipients.some((b) => !b.isPrimary)
               // A worker that asked another: this reply isn't its report; the answer comes first.
-              if (asked && !me.isPrimary) asking.add(ctx.messageId)
+              if (asked && onlyHere) asking.add(ctx.messageId)
               changed(job.threadId, ...threads)
               pushPresence()
               const who = to ? to.name : 'everyone on the job'
               const next = !asked
                 ? ''
-                : me.isPrimary
+                : !onlyHere
                   ? ' The answer arrives in your conversation with the user as a turn of its own: carry on meanwhile.'
                   : ' End your reply here if you need the answer: it arrives as your next turn.'
               return {
@@ -314,7 +360,7 @@ export class Team extends Context.Service<
         listJobs: async () => {
           const { jobs, bots, presence } = sync((d) => ({ jobs: d.listJobs(), bots: d.listBots(), presence: currentPresence() }))
           const name = (id: string | null) => bots.find((b) => b.id === id)?.name ?? 'nobody'
-          const open = jobs.filter((j) => j.status === 'open').slice(0, ROUTE_OPEN)
+          const open = jobs.filter((j) => j.status === 'open').slice(0, LIST_OPEN)
           const lines = open.map((j) => {
             const on = sync((d) => d.botsOnJob(j.id)).map((b) => `${name(b.botId)} (${presence[b.botId] ?? 'idle'})`)
             return `- ${j.title} [id ${j.id}] · owner ${name(j.ownerBotId)} · bots: ${on.join(', ') || 'none'}${j.summary ? ` — ${j.summary}` : ''}`
@@ -323,17 +369,18 @@ export class Team extends Context.Service<
         }
       }
 
-      // Every reply on a job, and the primary's own conversation (where reports arrive), gets the
-      // team tools once there is more than one bot.
+      // The primary's own conversation always gets the team tools: it hands off there anything that
+      // takes steps, to a worker or to itself, and reports arrive there. Every reply on a job gets
+      // them once there is more than one bot.
       const module = teamModule(deps)
-      chat.provideTools((session: Session) => ((session.jobId || session.kind === 'primary') && sync((d) => d.listBots().length) > 1 ? [module] : []))
+      chat.provideTools((session: Session) => (session.kind === 'primary' || (session.jobId && sync((d) => d.listBots().length) > 1) ? [module] : []))
 
       /**
        * A worker's reply ended: what it said goes back as a report to whoever wrote to it (posted in
        * the job's shared thread, and delivered: to the primary, in its own conversation; to another
        * worker, as its next turn). What was held for it meanwhile is answered next (Chat.drain).
        */
-      const report = (messageId: string, status: string) =>
+      const report = (messageId: string, status: string, limited = false) =>
         Effect.gen(function* () {
           const wasAsking = asking.delete(messageId)
           const info = sync((d) => {
@@ -351,7 +398,11 @@ export class Team extends Context.Service<
           const { reply, job, bot, requester } = info
           // Quitting cuts replies off; they report when continued. A reply that asked another bot
           // reports once the answer is in.
-          if (!requester || status === 'interrupted' || status === 'streaming' || (wasAsking && status === 'complete')) return pushPresence()
+          // Paused at a usage limit, it goes on by itself at the reset, and reports when it ends.
+          if (!requester || limited || status === 'interrupted' || status === 'streaming' || (wasAsking && status === 'complete')) {
+            if (wasAsking && limited) asking.add(messageId)
+            return pushPresence()
+          }
           const said = reportText(reply.content)
           const text =
             status === 'complete'
@@ -365,14 +416,14 @@ export class Team extends Context.Service<
             changed(job.threadId, sync((d) => d.primarySession().id))
           } else {
             post(job, bot, text, { kind: 'report', to: requester.id, state: null })
-            const back = requester.isPrimary ? yield* toPrimary(bot, text, 'report') : (yield* deliver(job, bot, requester, text, 'report'))?.id
+            const back = requester.isPrimary ? yield* toPrimaryOn(job, bot, reply.sessionId, text, 'report') : (yield* deliver(job, bot, requester, text, 'report'))?.id
             changed(job.threadId, back)
           }
           pushPresence()
         }).pipe(
           Effect.catchCause((cause) => (Cause.hasInterruptsOnly(cause) ? Effect.void : Effect.logWarning(`A worker's report failed: ${errorMessage(Cause.squash(cause))}`)))
         )
-      const offEnd = chat.onReplyEnd(({ messageId, status }) => void Effect.runFork(report(messageId, status)))
+      const offEnd = chat.onReplyEnd(({ messageId, status, limited }) => void Effect.runFork(report(messageId, status, limited)))
       yield* Effect.addFinalizer(() => Effect.sync(offEnd))
 
       const resume = Effect.gen(function* () {

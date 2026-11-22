@@ -101,6 +101,15 @@ try {
   await early.keyboard.press('Escape')
   await until(async () => (await early.locator('[data-point]').count()) === 0, 'Esc ends it')
 
+  // Computer work isn't done in Tomo's chat: Tomo hands it to itself, and it runs in its own thread
+  // on a job, which the rest of this test talks to directly.
+  await send('Hand the computer tests to yourself')
+  await until(async () => (await page.locator('[data-post="report"]').count()) === 1, 'Tomo hands the work to itself, and its own thread reports back')
+  const jobRow = page.locator('aside [data-row^="chat:"]', { hasText: 'Computer tests' })
+  await until(async () => (await jobRow.count()) === 1, 'the job is in the sidebar')
+  await jobRow.locator('button').first().click()
+  await until(async () => (await page.locator('[data-chat-title]').count()) === 1 && (await page.locator('[data-chat-title]').innerText()) === 'Computer tests', "the job opens on Tomo's own thread")
+
   // 1. An approval, clicked.
   await send('Delete the old files in Downloads')
   // A card that is over folds away for a moment, inert meanwhile: only a live one counts.
