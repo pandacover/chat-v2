@@ -8,7 +8,6 @@
   import { app } from '@/lib/store.svelte'
   import { clock, voice } from '@/lib/voice.svelte'
   import type { PathNode } from '@shared/types'
-  import BotAvatar from './BotAvatar.svelte'
   import Composer from './Composer.svelte'
   import ComputerWaitCard from './ComputerWaitCard.svelte'
   import JobBar from './JobBar.svelte'
@@ -293,19 +292,15 @@
   class:voice={stage}
 >
   <!-- The top bar keeps room for the panel's fixed toggle at the right while the panel is shut (the
-       sidebar's sits in the app bar above). -->
+       sidebar's sits in the app bar above). It names the job a thread is on, never the bot: the
+       sidebar shows whose conversation is open, and the app bar does while the sidebar is shut. -->
   <header
     class="topbar flex h-[52px] shrink-0 items-center gap-1 pl-4 transition-[opacity,padding] duration-300 ease-out"
     style="padding-right: {app.panelToggle && !app.panelOpen ? 46 : 12}px"
   >
-    {#if app.isPrimary}<BotAvatar bot={app.primaryBot} size={22} class="ml-1" />{/if}
-    {#if worker && app.currentBot}
-      <!-- A bot's own thread: whose it is, then its job. -->
-      <BotAvatar bot={app.currentBot} size={22} class="ml-1" presence={app.presence[app.currentBot.id] ?? null} />
-      <span class="shrink-0 pl-1 font-medium" data-thread-bot>{app.currentBot.name}</span>
-      <span class="text-fg-4">·</span>
+    {#if !app.isPrimary}
+      <span class="min-w-0 truncate pl-1 font-medium" data-chat-title>{view?.session.title ?? ''}</span>
     {/if}
-    <span class="min-w-0 truncate pl-1 font-medium {worker ? '!font-normal text-fg-2' : ''}" data-chat-title>{app.isPrimary ? (app.primaryBot?.name ?? 'Tomo') : (view?.session.title ?? '')}</span>
     <span class="flex-1"></span>
     <!-- The primary's instructions are its bot's, in Settings; a job's thread can have its own. -->
     {#if !app.isPrimary}

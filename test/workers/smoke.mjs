@@ -143,15 +143,18 @@ try {
 
   // Scout's own thread: talk to it directly.
   await page.locator('[data-job-bar] [data-job-bot="Scout"]').click()
-  await until(async () => (await page.locator('[data-thread-bot]').innerText()) === 'Scout', "Scout's own thread opens")
-  ok((await page.locator('[data-post="task"]').count()) === 1, 'it starts with the task from Tomo')
+  await until(async () => (await page.locator('[data-post="task"]').count()) === 1, "Scout's own thread opens, starting with the task from Tomo")
+  // With the sidebar shut, the app bar names whose thread it is.
+  await page.locator('[data-sidebar-toggle]').click()
+  await until(async () => (await page.locator('[data-bar-bot-name]').count()) === 1 && (await page.locator('[data-bar-bot-name]').innerText()).trim() === 'Scout', 'the app bar shows Scout')
+  await page.locator('[data-sidebar-toggle]').click()
   await send('Also check the trains')
   await until(async () => (await page.locator('[data-reply-scope]').last().innerText()).includes('Scout done: Also check the trains'), 'Scout answers you there')
   await capture('4-worker-thread')
 
   // A worker asking a worker with more access: held, on a card naming both. Ctrl+Enter approves.
   await page.locator('[data-primary-entry]').click()
-  await until(async () => (await page.locator('[data-chat-title]').innerText()) === 'Tomo', "back in Tomo's conversation")
+  await until(async () => (await page.locator('[data-primary-entry].on').count()) === 1 && (await page.locator('[data-chat-title]').count()) === 0, "back in Tomo's conversation")
   await send('delegate: ask Builder | Book the cheaper one ; waitfor Builder 20')
   await card.waitFor({ timeout: 15_000 })
   const text = await card.innerText()

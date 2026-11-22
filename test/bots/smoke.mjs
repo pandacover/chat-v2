@@ -88,7 +88,9 @@ try {
   await composer.waitFor({ timeout: 15_000 })
   await page.locator('[data-primary-entry]').waitFor()
   ok((await page.locator('[data-primary-entry]').innerText()).includes('Tomo'), 'the sidebar starts with Tomo')
-  ok((await page.locator('[data-chat-title]').innerText()) === 'Tomo', "the app opens on Tomo's conversation")
+  ok((await page.locator('[data-primary-entry].on').count()) === 1, "the app opens on Tomo's conversation")
+  ok((await page.locator('[data-chat-title]').count()) === 0, 'whose it is is not repeated in the chat header')
+  ok((await page.locator('[data-bar-bot]').count()) === 0, 'nor in the app bar while the sidebar shows it')
   const rows = await sidebarRows()
   ok(rows.length === 5, `every old chat is a job in the sidebar (${rows.length})`)
   const groups = await groupLabels()
@@ -96,6 +98,12 @@ try {
   ok(groups.some((g) => /pinned/i.test(g)), 'a pinned chat stays pinned')
   ok((await chip.innerText()).includes('Tomo picks the job'), 'the chip says Tomo picks the job')
   await capture('1-home')
+  // The sidebar shut: the app bar names whose conversation is open, after New topic.
+  await page.locator('[data-sidebar-toggle]').click()
+  await until(async () => (await page.locator('[data-bar-bot-name]').count()) === 1 && (await page.locator('[data-bar-bot-name]').innerText()).trim() === 'Tomo', 'the app bar shows Tomo with the sidebar shut')
+  await capture('1b-bar-bot')
+  await page.locator('[data-sidebar-toggle]').click()
+  await until(async () => (await page.locator('[data-bar-bot]').count()) === 0, 'and not once it is open again')
 
   // Back to an old (finished) job, picked by the router; it opens again.
   await send('Help, the printer is jammed again')

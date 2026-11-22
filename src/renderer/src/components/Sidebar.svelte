@@ -202,6 +202,15 @@
     <button class="icon-btn size-8" use:tip={{ text: 'New topic', kbd: shortcut('N') }} onclick={() => app.newSession()} in:fade={{ duration: 160 }}>
       <Icon name="compose" size={16} />
     </button>
+    <!-- Whose conversation is open, while the sidebar that shows it is shut. Part of the bar: it
+         moves the window like the rest of it. -->
+    {#if app.currentBot}
+      {@const bot = app.currentBot}
+      <span class="app-drag ml-1.5 flex h-8 min-w-0 items-center gap-2 pr-2 select-none" data-bar-bot in:fade={{ duration: 160 }}>
+        <BotAvatar {bot} size={20} presence={app.presence[bot.id] ?? null} />
+        <span class="truncate text-[13.5px] font-medium" data-bar-bot-name>{bot.name}</span>
+      </span>
+    {/if}
   {/if}
 </div>
 
