@@ -6,11 +6,13 @@
   import ChatView from './components/ChatView.svelte'
   import FindModal from './components/FindModal.svelte'
   import Icon from './components/Icon.svelte'
+  import PanelHome from './components/PanelHome.svelte'
+  import PanelTabs from './components/PanelTabs.svelte'
   import SettingsPage from './components/SettingsPage.svelte'
   import Sidebar from './components/Sidebar.svelte'
   import { modKey } from './lib/keys'
   import { ease, fade, fly } from './lib/motion'
-  import { app } from './lib/store.svelte'
+  import { app, tabKey } from './lib/store.svelte'
 
   let ready = $state(false)
   let resizing = $state(false)
@@ -96,32 +98,13 @@
     target.addEventListener('pointerup', up)
   }
 
-  const tabs = $derived([
-    ...(app.hasArtifact ? [{ id: 'artifact' as const, label: app.artifactVersions[0]?.block.title ?? 'Artifact', icon: 'window' as const }] : []),
-    ...(app.browserOpen ? [{ id: 'browser' as const, label: app.browser.title || 'Browser', icon: 'globe' as const }] : [])
-  ])
 </script>
 
 <svelte:window {onkeydown} onresize={() => (panelWidth = clampPanel(panelWidth))} />
 
-<!-- The panel's tabs, at the start of whichever panel's header shows. -->
+<!-- The panel's tabs, at the start of whichever header shows. -->
 {#snippet panelTabs()}
-  <div class="mr-auto inline-flex min-w-0 rounded-full bg-wash p-[3px]" role="tablist" aria-label="Panel">
-    {#each tabs as t (t.id)}
-      <button
-        role="tab"
-        aria-selected={app.activeTab === t.id}
-        class="inline-flex h-7 min-w-0 max-w-[180px] items-center gap-1.5 rounded-full px-3 text-[13px] font-medium transition-colors {app.activeTab === t.id
-          ? 'glass text-fg'
-          : 'text-fg-3 hover:text-fg'}"
-        onclick={() => (app.panelTab = t.id)}
-      >
-        <Icon name={t.icon} size={14} />
-        <span class="truncate">{t.label}</span>
-        {#if t.id === 'browser' && app.control.active}<span class="size-1.5 shrink-0 rounded-full bg-blue"></span>{/if}
-      </button>
-    {/each}
-  </div>
+  <PanelTabs />
 {/snippet}
 
 <!-- The app bar: the strip above the cards moves the window where nothing clickable sits (app.css). -->
@@ -155,13 +138,19 @@
               <section
                 class="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-[var(--r-card)] bg-card shadow-[0_0_0_1px_var(--ring),var(--shadow-sm)] {resizing ? 'pointer-events-none' : ''}"
               >
-                <!-- Both stay mounted so switching tabs never reloads the page or the artifact. -->
-                {#if app.hasArtifact}
-                  <div class="absolute inset-0 {app.activeTab === 'artifact' ? '' : 'invisible'}" inert={app.activeTab !== 'artifact'}><ArtifactPanel tabs={panelTabs} /></div>
-                {/if}
+                <!-- Every tab stays mounted, so switching tabs never reloads the page or an artifact. The
+                     browser is outside the list: a list moves its items, and a moved webview reloads. -->
+                {#each app.shownTabs as t (tabKey(t))}
+                  {#if t.kind === 'artifact'}
+                    {@const on = app.activeTab !== null && tabKey(app.activeTab) === tabKey(t)}
+                    <div class="absolute inset-0 {on ? '' : 'invisible'}" inert={!on}><ArtifactPanel tabs={panelTabs} open={t} active={on} /></div>
+                  {/if}
+                {/each}
                 {#if app.browserOpen}
-                  <div class="absolute inset-0 {app.activeTab === 'browser' ? '' : 'invisible'}" inert={app.activeTab !== 'browser'}><BrowserPanel tabs={panelTabs} /></div>
+                  {@const on = app.activeTab?.kind === 'browser'}
+                  <div class="absolute inset-0 {on ? '' : 'invisible'}" inert={!on}><BrowserPanel tabs={panelTabs} /></div>
                 {/if}
+                {#if app.shownTabs.length === 0}<PanelHome tabs={panelTabs} />{/if}
               </section>
             </div>
           </div>
