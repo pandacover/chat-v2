@@ -7,6 +7,7 @@ import type {
   Bot,
   BotPatch,
   BrowserEvent,
+  BrowserOwner,
   Job,
   JobDetail,
   JobStatus,
@@ -37,6 +38,13 @@ export interface OpenArtifact {
 /** A tab of the right panel: the built-in browser, or an artifact of the open chat at a version. */
 export type PanelTab = { kind: 'browser' } | ({ kind: 'artifact' } & OpenArtifact)
 export const tabKey = (t: PanelTab) => (t.kind === 'browser' ? 'browser' : `artifact:${t.identifier}`)
+
+/** A chat's panel: its tabs, the one picked, and whether it shows. Each chat has its own. */
+export interface PanelState {
+  tabs: PanelTab[]
+  active: string | null
+  shown: boolean
+}
 
 /** An artifact of the open chat, with every complete version of it along the visible branch. */
 export interface ChatArtifact {
@@ -128,6 +136,8 @@ class AppState {
   sidebarWidth = $state(Number(localStorage.getItem('chat-v2:sidebar-width')) || 252)
 
   update = $state<UpdateState | null>(null)
+  /** The time, to the minute: what reads it (the sidebar's sections) is worked out again each minute. */
+  minute = $state(Date.now())
 
   /** Pending composer attachments of the open chat. Shared so the browser panel can add captures. */
   draftAttachments = $state<Attachment[]>([])
@@ -149,14 +159,31 @@ class AppState {
 
   // The right panel: tabs, each the built-in browser (there is one) or an artifact of the open chat,
   // and whether it shows. Its toggle at the right of the app bar hides it with its tabs kept; the
-  // + in its tab strip opens the browser or any of the chat's artifacts.
+  // + in its tab strip opens the browser or any of the chat's artifacts. Each chat has a panel of
+  // its own: these are the open chat's, and the others wait in `panels` until their chat opens.
   panelTabs = $state<PanelTab[]>([])
   /** The tab picked, by its key (tabKey). */
   panelActive = $state<string | null>(null)
   panelShown = $state(false)
+  /** The panels of the chats that aren't open, by chat id. */
+  private panels = new Map<string, PanelState>()
+  /**
+   * The chat whose panel has the browser, or null while it is closed. There is one browser: it
+   * opens in the chat it was opened in, or that the reply driving it runs in, and stays there
+   * (running out of sight while another chat is open) until it is closed or moves to another.
+   */
+  browserSession = $state<string | null>(null)
+  /** The browser is open in some chat's panel, so its page stays loaded (App.svelte keeps it mounted). */
+  browserAlive = $derived(this.browserSession !== null)
   browser = $state({ url: '', title: '', loading: false, canBack: false, canForward: false })
-  /** Set while the model is driving the browser. */
-  control = $state({ active: false, label: '' })
+  /** Set while the model is driving the browser; `by` is the reply driving it. */
+  control = $state<{ active: boolean; label: string; by: BrowserOwner | null }>({ active: false, label: '', by: null })
+  /** A reply of the open chat drives the browser, which is in this chat's panel. */
+  browsingHere = $derived(this.control.active && this.browserSession !== null && this.browserSession === (this.view?.session.id ?? ''))
+  /** What the browser is doing for reply `messageId`, if it is the one driving it. */
+  browsingFor(messageId: string): string | null {
+    return this.control.active && this.control.by?.messageId === messageId ? this.control.label || 'Working' : null
+  }
   /** Where the agent's pointer is, in page pixels; `clicks` increments per click for the ripple. */
   cursor = $state({ x: 0, y: 0, visible: false, clicks: 0 })
 
@@ -262,6 +289,56 @@ class AppState {
     else this.panelTabs[at] = tab
     this.panelActive = key
     this.panelShown = true
+    if (tab.kind === 'browser') this.browserSession = this.view?.session.id ?? ''
+  }
+
+  /**
+   * Puts the browser in a chat's panel, on show there: the open chat's, or (a reply in another
+   * chat drives it) that chat's, which shows it when the user opens it. It leaves the panel it
+   * was in, so it never shows in a chat it has nothing to do with.
+   */
+  private placeBrowser(sessionId: string) {
+    const here = this.view?.session.id ?? ''
+    const was = this.browserSession
+    if (was !== null && was !== sessionId) {
+      if (was === here) this.closeTab('browser')
+      else {
+        const p = this.panels.get(was)
+        if (p) {
+          p.tabs = p.tabs.filter((t) => t.kind !== 'browser')
+          if (p.active === 'browser') p.active = null
+          if (p.tabs.length === 0) p.shown = false
+        }
+      }
+    }
+    if (sessionId === here) return this.openTab({ kind: 'browser' })
+    const p = this.panels.get(sessionId) ?? { tabs: [], active: null, shown: false }
+    if (!p.tabs.some((t) => t.kind === 'browser')) p.tabs.push({ kind: 'browser' })
+    p.active = 'browser'
+    p.shown = true
+    this.panels.set(sessionId, p)
+    this.browserSession = sessionId
+  }
+
+  /** Switches the panel to another chat's: the one open keeps its tabs for when it comes back. */
+  private switchPanel(from: string, to: string) {
+    if (from === to) return
+    this.panels.set(from, { tabs: this.panelTabs, active: this.panelActive, shown: this.panelShown })
+    const next = this.panels.get(to)
+    this.panels.delete(to)
+    this.panelTabs = next?.tabs ?? []
+    this.panelActive = next?.active ?? null
+    this.panelShown = next?.shown ?? false
+  }
+
+  /**
+   * Forgets the panels of chats that were deleted; a browser left in one of them closes. Only
+   * chats that were listed and aren't any more: a thread made a moment ago may not be listed yet.
+   */
+  private prunePanels(gone: ReadonlySet<string>) {
+    for (const id of gone) this.panels.delete(id)
+    const b = this.browserSession
+    if (b !== null && gone.has(b) && b !== (this.view?.session.id ?? '')) this.browserSession = null
   }
 
   /** Opens an artifact of the open chat in a tab of its own, at the given version. */
@@ -294,6 +371,7 @@ class AppState {
     this.panelTabs = this.panelTabs.filter((t) => tabKey(t) !== key)
     if (this.panelActive === key || this.panelActive === null) this.panelActive = shown[at + 1] ?? shown[at - 1] ?? null
     if (this.panelTabs.length === 0) this.panelShown = false
+    if (key === 'browser' && this.browserSession === (this.view?.session.id ?? '')) this.browserSession = null
   }
 
   /** The bar's panel toggle: shows or hides the panel, its tabs kept. Empty, it offers what to open. */
@@ -394,10 +472,11 @@ class AppState {
   }
 
   private onBrowserEvent(e: BrowserEvent) {
-    if (e.type === 'open') this.openBrowser()
+    // The browser opens in the thread of the reply that needs it, not in whichever chat is open.
+    if (e.type === 'open') this.placeBrowser(e.sessionId ?? this.view?.session.id ?? '')
     else if (e.type === 'control') {
-      this.control = { active: e.active, label: e.label }
-      if (e.active) this.openBrowser()
+      this.control = { active: e.active, label: e.label, by: e.by }
+      if (e.active) this.placeBrowser(e.by?.sessionId ?? this.view?.session.id ?? '')
       else this.cursor.visible = false
     } else if (e.type === 'cursor') {
       this.cursor.x = e.x
@@ -416,6 +495,7 @@ class AppState {
     void api.updates.get().then((s) => (this.update = s))
     void api.bots.presence().then((p) => (this.presence = p)).catch(() => {})
     addEventListener('beforeunload', () => this.saveDrafts())
+    setInterval(() => (this.minute = Date.now()), 60_000)
     const [, , , primary] = await Promise.all([this.refreshSessions(), this.loadSettings(), this.loadBots(), this.attempt(() => api.jobs.primary())])
     // The new chat's unsent draft (from before bots) is now said to the primary.
     const loose = this.drafts.get('')
@@ -544,7 +624,11 @@ class AppState {
   async refreshSessions() {
     clearTimeout(this.sessionsTimer)
     const [list] = await Promise.all([this.attempt(() => api.sessions.list()), this.refreshJobs()])
-    if (list) this.sessions = list
+    if (!list) return
+    const now = new Set(list.map((s) => s.id))
+    const gone = new Set(this.sessions.flatMap((s) => (now.has(s.id) ? [] : [s.id])))
+    this.sessions = list
+    if (gone.size > 0) this.prunePanels(gone)
   }
 
   /** Replies start and end in bursts (a job's bots, a reply and its report): one reload for them all. */
@@ -575,11 +659,9 @@ class AppState {
   /** Installs a fresh view and catches up any replies that are still streaming. */
   setView(view: SessionView) {
     if (view.session.kind === 'primary') this.primaryId = view.session.id
-    // Another chat: its artifacts aren't this one's. The browser stays; with nothing left the panel goes.
-    if (this.view?.session.id !== view.session.id) {
-      this.panelTabs = this.panelTabs.filter((t) => t.kind === 'browser')
-      if (this.panelTabs.length === 0) this.panelShown = false
-    }
+    // Another chat: its own panel shows, with the artifacts and the browser opened in it; this
+    // chat's waits for it to come back.
+    this.switchPanel(this.view?.session.id ?? '', view.session.id)
     this.view = view
     // A job's thread, or a bot's own thread on it: the job bar shows its bots and notes.
     const jobId = view.session.kind === 'primary' ? null : view.session.jobId
@@ -729,6 +811,13 @@ class AppState {
   async stop() {
     const id = this.view?.path.findLast((n) => n.message.status === 'streaming')?.message.id
     if (id) await this.attempt(() => api.chat.stop(id))
+  }
+
+  /** Take over in the browser: the reply driving it stops, wherever it runs. */
+  async takeOverBrowser() {
+    const id = this.control.by?.messageId
+    if (id) await this.attempt(() => api.chat.stop(id))
+    else await this.stop()
   }
 
   async approve(id: string, approved: boolean) {

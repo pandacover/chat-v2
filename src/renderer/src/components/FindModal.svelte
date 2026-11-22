@@ -19,10 +19,11 @@
     const parts = sections()
     const first = new Set(parts.main)
     const working = new Set(parts.working)
+    const settled = new Set(parts.settled)
     const rest = [...parts.pinned.filter((e) => !first.has(e)), ...parts.working, ...parts.settled].sort((a, b) => b.job.updatedAt - a.job.updatedAt)
     const label = (e: Entry) => {
       const need = parts.needs.get(e.key)
-      return need ? NEED_LABELS[need] : working.has(e) ? 'Working' : e.session.pinnedAt != null ? 'Pinned' : e.job.status === 'done' ? 'Finished' : 'Settled'
+      return need ? NEED_LABELS[need] : working.has(e) ? 'Working' : e.session.pinnedAt != null ? 'Pinned' : e.job.status === 'done' ? 'Finished' : settled.has(e) ? 'Settled' : 'Recent'
     }
     return { list: [...parts.main, ...rest], label }
   })

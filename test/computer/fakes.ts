@@ -114,12 +114,12 @@ export const disposeAll = async () => {
   for (const rt of open.splice(0)) await rt.dispose()
 }
 
-export const harness = async (over: Partial<Platform> = {}, opts: { settleMs?: number } = {}) => {
+export const harness = async (over: Partial<Platform> = {}, opts: { settleMs?: number; protectMs?: number } = {}) => {
   const { p, calls, moveMouse } = fakePlatform(over)
   const overlay = fakeOverlay()
   const facts: string[] = []
   const rt = ManagedRuntime.make(
-    ComputerUse.layer({ platform: p, overlay: overlay.port, remember: async (fact) => void facts.push(fact), settleMs: opts.settleMs ?? 5 })
+    ComputerUse.layer({ platform: p, overlay: overlay.port, remember: async (fact) => void facts.push(fact), settleMs: opts.settleMs ?? 5, protectMs: opts.protectMs ?? 0 })
   )
   open.push(rt)
   const cu = await rt.runPromise(ComputerUse.use((c) => Effect.succeed(c)))

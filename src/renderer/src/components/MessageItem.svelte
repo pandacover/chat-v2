@@ -106,16 +106,18 @@
    * "Thinking" and back.
    */
   const hasSteps = $derived(blocks.some((b) => b.type === 'steps'))
+  /** What the browser is doing for this reply, when this reply drives it (never another thread's). */
+  const browsing = $derived(streaming ? app.browsingFor(message.id) : null)
   let computerLatched = $state(false)
   $effect.pre(() => {
-    const on = streaming && (app.control.active || !!doing) && !hasSteps
+    const on = streaming && (!!browsing || !!doing) && !hasSteps
     const still = streaming
     untrack(() => {
       if (!still) computerLatched = false
       else if (on) computerLatched = true
     })
   })
-  const placeholder = $derived(streaming && blocks.at(-1)?.type !== 'steps' && (app.control.active || !!doing || (computerLatched && !hasSteps)))
+  const placeholder = $derived(streaming && blocks.at(-1)?.type !== 'steps' && (!!browsing || !!doing || (computerLatched && !hasSteps)))
   /** Doing it, or showing how: read from the message, and switchable while the reply runs. */
   const mode = $derived(computerRun ? (app.computerModes.get(message.id) ?? null) : null)
   // The turn you just sent slides in; opening, switching or forking a chat renders still.
@@ -136,7 +138,7 @@
       if (b.type === 'artifact' && b.complete && !announced.has(b.identifier)) {
         announced.add(b.identifier)
         // Don't pull focus away from the browser while the agent is using it.
-        if (!app.control.active) app.showArtifact({ identifier: b.identifier, messageId: message.id })
+        if (!app.browsingHere) app.showArtifact({ identifier: b.identifier, messageId: message.id })
       }
     }
   })
@@ -309,7 +311,7 @@
       {#if block.type === 'text'}
         <Markdown source={block.content} streaming={streaming && i === blocks.length - 1} live={live && i === blocks.length - 1} />
       {:else if block.type === 'steps'}
-        <StepList steps={block.steps} {live} running={streaming && i === blocks.length - 1} done={!streaming} doing={i === blocks.length - 1 ? doing : null} />
+        <StepList steps={block.steps} {live} running={streaming && i === blocks.length - 1} done={!streaming} doing={i === blocks.length - 1 ? doing : null} {browsing} />
       {:else}
         {@const active = app.artifact?.identifier === block.identifier && app.artifact?.messageId === message.id}
         <button
@@ -359,7 +361,7 @@
     {#if shownWait}
       <ComputerWaitCard wait={shownWait} held={waitHeld} />
     {:else if placeholder}
-      <StepList steps={[]} live running {doing} />
+      <StepList steps={[]} live running {doing} {browsing} />
     {:else if streaming && blocks.length === 0}
       <div class="flex h-[26px] items-center gap-2.5 text-[14px]" aria-live="polite">
         <Mascot size={20} state="thinking" /><span class="thinking">Thinking</span>

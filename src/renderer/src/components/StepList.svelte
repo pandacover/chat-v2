@@ -3,17 +3,20 @@
   import type { ComputerDoing } from '@shared/computer'
   import { type Step, isDesktopRun, isMemoryRun, isTeamRun } from '@shared/steps'
   import { fly, slide } from '@/lib/motion'
-  import { app } from '@/lib/store.svelte'
   import Icon from './Icon.svelte'
 
-  /** `doing`: the computer tool running now in this reply, shown live until its step lands. */
+  /**
+   * `doing`: the computer tool running now in this reply, shown live until its step lands.
+   * `browsing`: what the browser is doing for this reply, when it is the one driving it.
+   */
   let {
     steps,
     live = false,
     running = false,
     done = false,
-    doing = null
-  }: { steps: Step[]; live?: boolean; running?: boolean; done?: boolean; doing?: ComputerDoing | null } = $props()
+    doing = null,
+    browsing = null
+  }: { steps: Step[]; live?: boolean; running?: boolean; done?: boolean; doing?: ComputerDoing | null; browsing?: string | null } = $props()
 
   /** A line's roll in and out (the dwell below waits it out). */
   const ROLL = 200
@@ -42,7 +45,7 @@
   const liveDoing = $derived(landed ? null : doing)
 
   const now = $derived<{ label: string; detail?: string; quiet: boolean } | null>(
-    !running ? null : liveDoing ? liveDoing : app.control.active ? { label: app.control.label || 'Working', quiet: false } : null
+    !running ? null : liveDoing ? liveDoing : browsing ? { label: browsing, quiet: false } : null
   )
 
   type Line = { key: string; label: string; detail?: string; tone: 'live' | 'quiet' | 'done' | 'failed' | 'summary'; summary?: string }

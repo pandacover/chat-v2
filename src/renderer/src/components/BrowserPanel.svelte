@@ -458,7 +458,7 @@
     <div class="flex bg-canvas px-3 pb-2" transition:fly={{ y: -4, duration: 180 }}>
       <div class="flex min-w-0 flex-1 items-center gap-2 rounded-full bg-blue-wash py-1 pr-1 pl-3.5 text-[12.5px]">
         <span class="min-w-0 flex-1 truncate text-fg">{app.control.label || 'The assistant is using the browser'}</span>
-        <button class="btn solid sm !h-6" onclick={() => app.stop()}>Take over</button>
+        <button class="btn solid sm !h-6" onclick={() => app.takeOverBrowser()}>Take over</button>
       </div>
     </div>
   {:else if mode !== 'none'}

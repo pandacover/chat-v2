@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { Job, ListedSession, ThreadState } from '../src/shared/types'
-import { sectionsOf, unread, type SectionEntry } from '../src/renderer/src/lib/sections'
+import { SETTLE_AFTER_MS, lastActive, sectionsOf, unread, type SectionEntry } from '../src/renderer/src/lib/sections'
 
 const thread = (id: string, jobId: string, state: Partial<ThreadState> = {}, over: Partial<ListedSession> = {}): ListedSession => ({
   id,
@@ -152,5 +152,30 @@ describe('sidebar sections', () => {
       [job('fresh', { updatedAt: 10 }), thread('t-fresh', 'fresh', { activityAt: 400 })]
     ])
     expect(out.main).toEqual(['fresh', 'old'])
+  })
+
+  test('an open job stays in the main section until it has been quiet for an hour', () => {
+    const now = 10 * SETTLE_AFTER_MS
+    const at = (j: string, quiet: number, over: Partial<Job> = {}) => job(j, { updatedAt: now - quiet, ...over })
+    const sectionsAt = (rows: Array<[Job, ListedSession]>, extra: ListedSession[] = []) => {
+      const out = sectionsOf({ entries: rows.map(([j, s]) => entry(j, s)), threads: [...rows.map(([, s]) => s), ...extra], openId: null, waitingIn: null, now })
+      return { main: out.main.map((e) => e.job.id), settled: out.settled.map((e) => e.job.id), needs: out.needs }
+    }
+    const out = sectionsAt(
+      [
+        [at('recent', 59 * 60_000), thread('t-recent', 'recent')],
+        [at('quiet', SETTLE_AFTER_MS), thread('t-quiet', 'quiet')],
+        // Finished by the user: settled at once.
+        [at('finished', 60_000, { status: 'done' }), thread('t-finished', 'finished')],
+        // Quiet itself, but one of its bots' threads was busy a minute ago.
+        [at('helped', 3 * SETTLE_AFTER_MS), thread('t-helped', 'helped')]
+      ],
+      [thread('w-helped', 'helped', { readAt: now, activityAt: now - 60_000 }, { kind: 'worker', botId: 'scout' })]
+    )
+    expect(out.main).toEqual(['recent', 'helped'])
+    expect(out.settled).toEqual(['finished', 'quiet'])
+    // In the main section for being recent, not for needing anything: no badge.
+    expect(out.needs.size).toBe(0)
+    expect(lastActive(at('x', 5), [thread('t-x', 'x', {}, { updatedAt: now })])).toBe(now)
   })
 })

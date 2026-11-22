@@ -11,6 +11,7 @@ import type { Bot, BotPatch, Message, StreamEvent } from '../src/shared/types'
 import { AppPaths } from '../src/main/services/AppPaths'
 import { Attachments } from '../src/main/services/Attachments'
 import { Broadcaster, Chat, unanswered } from '../src/main/services/Chat'
+import { WRITING_GUIDELINES } from '../src/main/guidelines'
 import { Db } from '../src/main/services/Db'
 import { Jobs } from '../src/main/services/Jobs'
 import { SettingsStore } from '../src/main/services/SettingsStore'
@@ -240,6 +241,8 @@ describe('the team tools', () => {
     expect(systemOf(scoutCall)).toContain('end your reply there: its answer arrives as your next turn')
     expect(systemOf(scoutCall)).not.toMatch(/\bwait\(/)
     expect(systemOf(scoutCall)).not.toContain("this conversation is one job's thread")
+    // A worker writes by the same rules (unslop) as Tomo: its reply is the report Tomo passes on.
+    expect(systemOf(scoutCall)).toContain(WRITING_GUIDELINES)
 
     // In the primary's conversation: the report once, as a turn from Scout about the job, then Tomo's answer.
     const primaryId = (await t.d((x) => x.primarySession())).id

@@ -99,6 +99,9 @@ export const browserModule =
     const refs = new Map<string, string>()
     let used = false
     const nameOf = (ref: string | undefined) => (ref && refs.get(ref)) || ref || 'the page'
+    /** What the browser is doing, said for this reply: the browser shows in its thread, the line in it alone. */
+    const by = { sessionId: ctx.sessionId, messageId: ctx.messageId }
+    const status = (label: string) => browser.status(label, by)
     const remember = (snap: PageSnapshot) => {
       refs.clear()
       for (const line of snap.elements.split('\n')) {
@@ -127,7 +130,7 @@ export const browserModule =
 
     const withSnap = (label: string, effect: Effect.Effect<PageSnapshot, { message: string }>, budget = 2500) =>
       Effect.gen(function* () {
-        yield* browser.status(label)
+        yield* status(label)
         const snap = yield* effect
         remember(snap)
         return say(describe(snap, budget), { label, ok: true })
@@ -141,7 +144,7 @@ export const browserModule =
         (a) =>
           run('search', Effect.gen(function* () {
             const query = a.query.trim()
-            yield* browser.status(`Searching “${clip(query, 50)}”`)
+            yield* status(`Searching “${clip(query, 50)}”`)
             const results = yield* browser.search(query)
             return say(describeResults(query, results), { label: `Searched “${clip(query, 60)}”`, ok: true, ...(results.length ? {} : { detail: 'No results' }) })
           }))(),
@@ -154,7 +157,7 @@ export const browserModule =
         (a) =>
           run('read', Effect.gen(function* () {
             const url = a.url?.trim() || null
-            yield* browser.status(url ? `Reading ${host(url)}` : 'Reading the page')
+            yield* status(url ? `Reading ${host(url)}` : 'Reading the page')
             const page = yield* browser.read(url)
             refs.clear()
             return say(describeReading(page, a.offset ?? 0), { label: `Read ${clip(page.title || host(page.url), 70)}`, ok: true, detail: host(page.url) })
@@ -221,7 +224,7 @@ export const browserModule =
         { save: z.boolean().optional().describe('Attach the screenshot to your reply (when the user asked for one)') },
         (a) =>
           run('screenshot', Effect.gen(function* () {
-            yield* browser.status(a.save ? 'Taking a screenshot' : 'Looking at the page')
+            yield* status(a.save ? 'Taking a screenshot' : 'Looking at the page')
             const shot = yield* browser.screenshot()
             const image = { type: 'image' as const, data: shot.dataUrl.replace(/^data:[^,]*,/, ''), mimeType: 'image/jpeg' }
             if (!a.save) return { content: [image], step: { label: 'Looked at the page', ok: true } }
@@ -246,12 +249,12 @@ export const browserModule =
         (a) =>
           run('record', a.action === 'start'
             ? Effect.gen(function* () {
-                yield* browser.status('Starting a recording')
+                yield* status('Starting a recording')
                 yield* browser.startRecording
                 return say('Recording the browser panel. Do what the user wants to see, then record with stop.', { label: 'Started recording', ok: true })
               })
             : Effect.gen(function* () {
-                yield* browser.status('Saving the recording')
+                yield* status('Saving the recording')
                 const video = yield* browser.stopRecording
                 if (!video) return say('Nothing was being recorded. Start with record start.', { label: 'No recording to stop', ok: false })
                 return say(`Recording stopped after ${video.seconds}s and saved to ${video.path}`, { label: `Recorded ${video.seconds}s of the browser`, ok: true, detail: video.path })
@@ -264,7 +267,7 @@ export const browserModule =
         { code: z.string() },
         (a) =>
           run('evaluate', Effect.gen(function* () {
-            yield* browser.status('Running a script on the page')
+            yield* status('Running a script on the page')
             return say(yield* browser.evaluate(a.code), { label: 'Ran a script on the page', ok: true })
           }))(),
         { searchHint: 'run JavaScript in the web page, read the DOM, extract data with a script' }
@@ -276,7 +279,7 @@ export const browserModule =
         (a) => {
           const seconds = Math.min(15, Math.max(0.2, a.seconds || 1))
           return run('wait', Effect.gen(function* () {
-            yield* browser.status(`Waiting ${seconds}s`)
+            yield* status(`Waiting ${seconds}s`)
             yield* Effect.sleep(`${seconds} seconds`)
             return yield* withSnap(`Waited ${seconds}s`, browser.snapshot, 2500)
           }))()

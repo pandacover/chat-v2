@@ -179,7 +179,9 @@ try {
   await until(async () => (await page.locator('[data-chat-title]').count()) === 1 && (await page.locator('[data-chat-title]').innerText()) === 'Cat page', "the card opens the job, on Tomo's own thread")
   ok((await lastReply().innerText()).includes('Here it is.'), 'which holds the work')
   ok((await page.locator('aside [data-row^="chat:"] .nav-item.on', { hasText: 'Cat page' }).count()) === 1, 'its row shows as open')
-  await until(async () => !(await inSection('main', 'Cat page')), 'and opened, it needs you no more')
+  // Opened, it isn't new any more; it stays in the main section until it has been quiet for an hour.
+  const needOf = (title) => page.locator('aside [data-section="main"] [data-row^="chat:"]', { hasText: title }).first().getAttribute('data-need')
+  await until(async () => (await inSection('main', 'Cat page')) && (await needOf('Cat page')) === null, 'and opened, it needs you no more (no badge, still recent)')
   await sleep(400)
   await capture('3-own-thread')
   await page.locator('[data-primary-entry]').click()
@@ -248,13 +250,13 @@ try {
   await page.getByRole('radio', { name: 'Light' }).click()
   await sectionRows('main').filter({ hasText: 'Rust lifetimes' }).locator('button').first().click()
   await until(async () => (await page.locator('[data-chat-title]').innerText()) === 'Rust lifetimes', 'the job opens')
-  await until(async () => !(await inSection('main', 'Rust lifetimes')) && (await inSection('settled', 'Rust lifetimes')), 'opened, it leaves the main section for Settled')
-  ok((await page.locator('aside [data-nothing-needs-you]').count()) === 1, 'and nothing needs you again')
+  await until(async () => (await inSection('main', 'Rust lifetimes')) && (await needOf('Rust lifetimes')) === null, 'opened, it is new no more, and stays in the main section while recent')
+  ok((await page.locator('aside [data-section="main"] [data-need]').count()) === 0, 'and nothing needs you again')
   // Read stays read after a reload (it is saved).
   await page.locator('[data-primary-entry]').click()
   await page.reload()
   await composer.waitFor({ timeout: 15_000 })
-  await until(async () => (await inSection('settled', 'Rust lifetimes')) && !(await inSection('main', 'Rust lifetimes')), 'and stays read after a reload')
+  await until(async () => (await inSection('main', 'Rust lifetimes')) && (await needOf('Rust lifetimes')) === null, 'and stays read after a reload')
   ok((await dividers()) === 2 && (await page.locator('[data-post="report"]').count()) === 1, 'the chat keeps its dividers and the report after a reload')
 
   // Tomo starting afresh by itself: once its chat is past the budget and the prompt cache has gone

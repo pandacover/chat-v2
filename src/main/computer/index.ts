@@ -88,7 +88,15 @@ export interface ComputerUseOptions {
   readonly remember: (fact: string, ctx: RunContext) => Promise<void>
   /** How long an action gets to show its effect before the screenshot after it (tests shorten it). */
   readonly settleMs?: number
+  /** How long content protection gets to reach the screen before a screenshot is taken (tests shorten it). */
+  readonly protectMs?: number
 }
+
+/**
+ * Content protection is turned on this long before the model's screenshot is captured: the
+ * compositor leaves protected windows out from its next frame on, not the moment it is asked.
+ */
+export const PROTECT_MS = 80
 
 /** The notch is narrow: longer step lines are cut (it ellipsizes any remainder itself). */
 const NOTCH_MAX = 60
@@ -105,8 +113,25 @@ const CLICK_SLOP = 6
 export const POINT_GRACE_MS = 400
 
 const make = (o: ComputerUseOptions): ComputerUseApi => {
-  const p = o.platform
   const overlay = o.overlay
+  /**
+   * Tomo's windows are left out of the model's screenshots, so it never sees (or clicks) its own
+   * chat. Only while a screenshot is being taken: protected for a whole reply, they vanished from
+   * the user's own screenshots and screen shares too, for as long as any computer reply ran.
+   */
+  let shooting = 0
+  let shielded: Promise<void> = Promise.resolve()
+  const shielding = <A>(take: () => Promise<A>): Promise<A> => {
+    if (shooting++ === 0) {
+      overlay.protect(true)
+      const ms = o.protectMs ?? PROTECT_MS
+      shielded = ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve()
+    }
+    return shielded.then(take).finally(() => {
+      if (--shooting === 0) overlay.protect(false)
+    })
+  }
+  const p: Platform | null = o.platform ? Object.assign(Object.create(o.platform) as Platform, { screenshot: (...args: Parameters<Platform['screenshot']>) => shielding(() => o.platform!.screenshot(...args)) }) : null
   let acting: Owner | null = null
   let spot: TeachTarget | null = null
   let live = 0
@@ -323,16 +348,12 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
       modeSetters.delete(owner.messageId)
       doing(null)
       if (--live === 0) {
-        overlay.protect(false)
         overlay.stopKey(false)
         lastStep = null
       }
       draw()
     }
-    if (live++ === 0) {
-      overlay.protect(true)
-      overlay.stopKey(true)
-    }
+    if (live++ === 0) overlay.stopKey(true)
     draw()
     stops.add(stopReply)
     // The reply's waits resolve as denied or stopped the moment it ends, even before `end` is called.

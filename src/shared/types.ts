@@ -606,10 +606,18 @@ export interface ElementInfo {
 }
 
 /** Main → renderer events for the built-in browser. */
+/** The reply driving the browser, and its thread: the browser shows in that thread's panel. */
+export interface BrowserOwner {
+  sessionId: string
+  messageId: string
+}
+
 export type BrowserEvent =
-  | { type: 'open' }
+  /** The browser is needed: in `sessionId`'s panel (the reply's thread), or the open chat's when null. */
+  | { type: 'open'; sessionId: string | null }
   | { type: 'cursor'; x: number; y: number; click: boolean }
-  | { type: 'control'; active: boolean; label: string }
+  /** A reply drives the browser (or, inactive, has handed it back); `by` is that reply, null for none. */
+  | { type: 'control'; active: boolean; label: string; by: BrowserOwner | null }
   | { type: 'frame'; data: string }
   /** The assistant starts or stops recording the panel; the panel answers with recordReply. */
   | { type: 'record'; on: boolean }
