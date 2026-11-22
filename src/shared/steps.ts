@@ -69,7 +69,11 @@ export const isDesktopRun = (steps: Step[]) => steps.some((s) => s.tool.startsWi
 /** Whether a run of steps only searched memory or wrote job notes (agent/recall.ts, agent/notes.ts). */
 export const isMemoryRun = (steps: Step[]) => steps.length > 0 && steps.every((s) => s.tool.startsWith('memory_') || s.tool.startsWith('notes_'))
 
-const usedWhat = (steps: Step[]) => (isDesktopRun(steps) ? 'Used the computer' : isMemoryRun(steps) ? 'Used memory' : 'Used the browser')
+/** Whether a run of steps only worked with the other bots: handing out jobs, messages, waiting (agent/team.ts). */
+export const isTeamRun = (steps: Step[]) => steps.length > 0 && steps.every((s) => s.tool.startsWith('team_'))
+
+const usedWhat = (steps: Step[]) =>
+  isDesktopRun(steps) ? 'Used the computer' : isMemoryRun(steps) ? 'Used memory' : isTeamRun(steps) ? 'Worked with the bots' : 'Used the browser'
 
 /** History sent back to a model: step lines become one plain-language summary per run. */
 export const summarizeSteps = (content: string): string =>
