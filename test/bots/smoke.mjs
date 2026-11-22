@@ -3,8 +3,9 @@
 // migration as the sidebar shows it, the sidebar's sections (Pinned, the jobs that need you,
 // Working, Settled), talking to Tomo (everything stays in its one chat; work it hands itself runs in
 // its own thread on a job and reports back as a card and a line), New topic (a divider, and a
-// fresh session after it), continuing a finished job, and the Tomo card in Settings. Captures go to
-// <outDir>.
+// fresh session after it), Tomo starting afresh by itself after a pause (tiny limits here: a gap of
+// 15 s and a budget of 100 tokens; nothing shows, and the fresh session is handed the chat so far),
+// continuing a finished job, and the Tomo card in Settings. Captures go to <outDir>.
 //
 //   bun run build
 //   node test/bots/smoke.mjs <playwright-core dir> <outDir>
@@ -32,7 +33,14 @@ writeFileSync(join(data, 'config.json'), JSON.stringify({ titleModel: 'claude-ha
 const seed = spawnSync('bun', [join(repo, 'test/bots/seed-old-db.ts'), join(data, 'chat.db')], { stdio: 'inherit', shell: true })
 if (seed.status !== 0) throw new Error('seeding failed')
 
-const env = { ...process.env, CHAT_V2_HEADLESS: '1', CHAT_V2_FAKE_QUERY: join(work, 'smoke-query.cjs') }
+const ROLLOVER_GAP_MS = 15_000
+const env = {
+  ...process.env,
+  CHAT_V2_HEADLESS: '1',
+  CHAT_V2_FAKE_QUERY: join(work, 'smoke-query.cjs'),
+  CHAT_V2_ROLLOVER_GAP_MS: String(ROLLOVER_GAP_MS),
+  CHAT_V2_ROLLOVER_BUDGET: '100'
+}
 delete env.ELECTRON_RUN_AS_NODE
 const app = await _electron.launch({ executablePath: require(join(repo, 'node_modules/electron')), args: [repo, `--user-data-dir=${data}`], env })
 const log = []
@@ -249,6 +257,30 @@ try {
   await until(async () => (await inSection('settled', 'Rust lifetimes')) && !(await inSection('main', 'Rust lifetimes')), 'and stays read after a reload')
   ok((await dividers()) === 2 && (await page.locator('[data-post="report"]').count()) === 1, 'the chat keeps its dividers and the report after a reload')
 
+  // Tomo starting afresh by itself: once its chat is past the budget and the prompt cache has gone
+  // cold, the next reply is a fresh session handed the summary and the last turns. Nothing shows.
+  const shownCount = () => page.locator('.msg').count()
+  let n = await replies().count()
+  await send('Tell me about otters')
+  await until(async () => (await replies().count()) === n + 1 && (await lastReply().innerText()).includes('That is all for now.'), 'after the dividers, Tomo answers')
+  await send('What came before?')
+  await until(async () => (await lastReply().innerText()).includes('I remember what came before.'), 'within the gap, Tomo carries on its session')
+  const shown = await shownCount()
+  n = await replies().count()
+  await sleep(ROLLOVER_GAP_MS + 1500)
+  await send('What came before?')
+  await until(
+    async () => (await replies().count()) === n + 1 && (await lastReply().innerText()).includes('This is a fresh start. I was handed the chat so far (summary: yes, last turns: yes).'),
+    'after the gap, past the budget, the reply starts fresh with the summary and the last turns carried'
+  )
+  ok((await shownCount()) === shown + 2, 'nothing but the turn and its reply shows')
+  ok((await dividers()) === 2, 'no divider for it')
+  await sleep(400)
+  await capture('5d-rollover')
+  await page.reload()
+  await composer.waitFor({ timeout: 15_000 })
+  await until(async () => (await shownCount()) === shown + 2 && (await dividers()) === 2, 'nor after a reload')
+
   // Settings › Bots: Tomo's card, with the instructions it was given from Settings.
   await page.keyboard.press('Control+,')
   await page.locator('[data-bot="tomo"]').waitFor()
@@ -279,9 +311,15 @@ const jobs = db.prepare('select title, status from jobs order by title').all()
 console.log(jobs.map((j) => `${j.status}  ${j.title}`).join('\n'))
 ok(db.prepare(`select count(*) as n from sessions where kind = 'primary'`).get().n === 1, 'one primary conversation')
 ok(db.prepare(`select count(*) as n from jobs`).get().n === 6, 'one job more than the old chats: the one handed off')
-ok(db.prepare(`select count(*) as n from messages m join sessions s on s.id = m.session_id where s.kind = 'primary' and m.role = 'user' and m.author_bot_id is null`).get().n === 6, "the six things said to Tomo are all in its chat")
+ok(db.prepare(`select count(*) as n from messages m join sessions s on s.id = m.session_id where s.kind = 'primary' and m.role = 'user' and m.author_bot_id is null`).get().n === 9, "the nine things said to Tomo are all in its chat")
 ok(db.prepare(`select count(*) as n from messages where via_session_id is not null and role = 'user' and author_bot_id is null and session_id != (select id from sessions where kind = 'primary')`).get().n === 0, 'none of them went to a job')
 ok(db.prepare(`select count(*) as n from messages where post_kind = 'topic'`).get().n === 2, 'two dividers')
+const rolled = db.prepare(`select content, via_session_id from messages where post_kind = 'rollover'`).all()
+ok(rolled.length === 1 && rolled[0].via_session_id === null, 'one automatic boundary, not shown in the conversation')
+ok(
+  rolled[0].content.includes('<summary>\nThe user asked about a jammed printer, a cat page and otters.\n</summary>') && rolled[0].content.includes('<user>\nTell me about otters\n</user>'),
+  'carrying the summary and the last turns'
+)
 const own = db.prepare(`select s.kind, s.bot_id from sessions s join jobs j on j.id = s.job_id where j.title = 'Cat page' and s.kind = 'worker'`).all()
 ok(own.length === 1 && own[0].bot_id === 'tomo', "the cat page was made in Tomo's own thread on its job")
 ok(db.prepare(`select instructions, effort from bots where is_primary = 1`).get().effort === 'high', "Tomo's effort came from Settings")

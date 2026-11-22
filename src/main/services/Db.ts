@@ -325,7 +325,7 @@ const parseUsageJson = (raw: string | null): Usage | null => {
 
 export type { NewMessage }
 
-const POST_KINDS = ['task', 'message', 'report', 'topic'] as const
+const POST_KINDS = ['task', 'message', 'report', 'topic', 'rollover'] as const
 const POST_STATES = ['held', 'declined', 'stopped'] as const
 const postOf = (r: MessageRow): Post | null => {
   const kind = POST_KINDS.find((k) => k === r.post_kind)

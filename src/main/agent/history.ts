@@ -41,8 +41,9 @@ export interface TurnPlan {
   /** The messages the prompt carries, oldest first. The last is the user message being answered, unless continuing from the reply's own checkpoint. */
   turns: Message[]
   /**
-   * What the topic boundary the turns start after hands on to a fresh session (its text), or null.
-   * Only when nothing after the boundary is resumed: a resumed session had it in its first prompt.
+   * What the topic boundary the turns start after hands on to a fresh session (its text, framed as
+   * the prompt's first block), or null. Only when nothing after the boundary is resumed: a resumed
+   * session had it in its first prompt.
    */
   carried: string | null
 }
@@ -50,17 +51,24 @@ export interface TurnPlan {
 /**
  * Topic boundaries. In the primary's conversation, New topic puts a divider in the message tree
  * (an assistant row with post kind 'topic', which answers nothing): the next reply starts a fresh
- * Claude Code session, and nothing before the divider is resumed or carried as transcript. The
- * divider's text, when it has any, is handed to that reply instead (a running summary, say). This
- * is the one place that knows where a conversation's history starts.
+ * Claude Code session, and nothing before the divider is resumed or carried as transcript. Tomo
+ * makes the same boundary itself (post kind 'rollover', never shown) when its chat has grown past
+ * its budget and a pause has let the prompt cache go cold (rollover.ts): that one's text, a running
+ * summary and the last few turns, is handed to the fresh session instead. This is the one place
+ * that knows where a conversation's history starts.
  */
-export const isTopicStart = (m: Pick<Message, 'role' | 'post'>): boolean => m.role === 'assistant' && m.post?.kind === 'topic'
+export const isTopicStart = (m: Pick<Message, 'role' | 'post'>): boolean =>
+  m.role === 'assistant' && (m.post?.kind === 'topic' || m.post?.kind === 'rollover')
+
+/** A boundary Tomo made itself, which the user never sees (the New topic divider is the user's). */
+export const isRollover = (m: Pick<Message, 'role' | 'post'>): boolean => m.role === 'assistant' && m.post?.kind === 'rollover'
 
 /** Where the history a reply may see starts in `lineage` (root first): the index of its last topic divider, or -1. */
 export const topicStart = (lineage: readonly Pick<Message, 'role' | 'post'>[]): number => lineage.findLastIndex(isTopicStart)
 
-/** A topic divider's text, as the first block of the fresh session after it. */
-export const carriedText = (text: string) => `<earlier_topics>\n${text.trim()}\n</earlier_topics>`
+/** A boundary's text, as the first block of the fresh session after it. */
+export const carriedText = (mark: Pick<Message, 'role' | 'post' | 'content'>) =>
+  isRollover(mark) ? `<earlier_conversation>\n${mark.content.trim()}\n</earlier_conversation>` : `<earlier_topics>\n${mark.content.trim()}\n</earlier_topics>`
 
 /**
  * Plans the reply to the user message that ends `lineage` (root first). `reply` is the
@@ -86,12 +94,12 @@ export const planTurn = (lineage: readonly Message[], reply: Message, continuing
     if (p) return { ...from(lineage[i]!, p), turns: lineage.slice(i + 1), carried: null }
   }
   const mark = start >= 0 ? lineage[start]! : null
-  return { resume: null, baseCost: 0, turns: lineage.slice(start + 1), carried: mark?.content.trim() ? mark.content : null }
+  return { resume: null, baseCost: 0, turns: lineage.slice(start + 1), carried: mark?.content.trim() ? carriedText(mark) : null }
 }
 
 /** In every system prompt, so it never changes between turns (which would miss the cache). */
 export const HISTORY_NOTE =
-  "If a message starts with earlier turns of this chat inside <user> and <assistant> tags, those are turns you don't have in your history. Answer only what comes after them. Turns inside <post> tags are what the user's bots said in this job's shared thread (who wrote each, and to whom); <from_bot> is a message or report another bot sent you (with the job it is about when it comes outside that job)."
+  "If a message starts with earlier turns of this chat inside <user> and <assistant> tags, those are turns you don't have in your history. Answer only what comes after them. Turns inside <post> tags are what the user's bots said in this job's shared thread (who wrote each, and to whom); <from_bot> is a message or report another bot sent you (with the job it is about when it comes outside that job). An <earlier_conversation> block is your chat with the user before this point, which you don't otherwise have: a summary of it, then its last few turns word for word. Carry on from it as one continuous conversation, without mentioning the block; for older detail, search memory with recall when you have it."
 
 /** A bot's name for a prompt, by id; an unknown (deleted) bot is "a bot". */
 export type NameOf = (botId: string | null) => string

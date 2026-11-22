@@ -14,6 +14,7 @@ import type { SQLInputValue } from 'node:sqlite'
 import type { Bot, BotPatch, Effort, Job, JobStatus, JobUsage, Message, MessageStatus, PathNode, Post, Role, Session } from '@shared/types'
 import { AVATAR_TINTS } from '@shared/bots'
 import { cleanModules, cleanRules } from '@shared/rules'
+import { isTopicStart } from '../agent/history'
 
 /** The primary bot and its conversation, as the migration makes them. */
 export const PRIMARY_BOT_ID = 'tomo'
@@ -402,7 +403,7 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
       let at = path.length
       while (at > 0 && path[at - 1]!.message.role === 'user') at--
       const before = path[at - 1]?.message
-      if (!before || (before.role === 'assistant' && before.post?.kind === 'topic')) return null
+      if (!before || isTopicStart(before)) return null
       const held = path[at]?.message
       const mark = insertMessage({ sessionId: session.id, parentId: before.id, role: 'assistant', content: carry, status: 'complete', post: { kind: 'topic', to: null, state: null } })
       // Shown in the conversation, and nobody's: the trigger signs assistant rows with the thread's bot.
@@ -412,6 +413,26 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
         run('update messages set active_child_id = ? where id = ?', held.id, mark.id)
       }
       run('update sessions set memory_rev = null where id = ?', session.id)
+      return getMessage(mark.id)!
+    })
+
+  /**
+   * Tomo's own boundary (rollover.ts): between its reply `afterId` and the turn `firstId` that
+   * answers it, which with everything under it moves below the boundary. Never shown in the
+   * conversation (no via_session_id, so primaryPath skips it). `carry` is what the fresh session
+   * is handed. The conversation's memory is read afresh, as after New topic. Null when `afterId`
+   * isn't one of the conversation's replies with `firstId` under it.
+   */
+  const rollOver = (primaryId: string, afterId: string, firstId: string, carry: string): Message | null =>
+    transaction(() => {
+      const after = getMessage(afterId)
+      const first = getMessage(firstId)
+      if (!after || !first || after.sessionId !== primaryId || first.parentId !== after.id || after.role !== 'assistant' || after.post) return null
+      const mark = insertMessage({ sessionId: primaryId, parentId: after.id, role: 'assistant', content: carry, status: 'complete', post: { kind: 'rollover', to: null, state: null } })
+      run('update messages set author_bot_id = null where id = ?', mark.id)
+      run('update messages set parent_id = ? where id = ?', mark.id, first.id)
+      run('update messages set active_child_id = ? where id = ?', first.id, mark.id)
+      run('update sessions set memory_rev = null where id = ?', primaryId)
       return getMessage(mark.id)!
     })
 
@@ -685,6 +706,7 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
     },
     primaryPath,
     newTopic,
+    rollOver,
     removeTurn,
     /** Jobs that lost every thread (an empty one cleared at startup). */
     pruneOrphanJobs: (): number => Number(run('delete from jobs where not exists (select 1 from sessions s where s.job_id = jobs.id)').changes)

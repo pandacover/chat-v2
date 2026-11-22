@@ -182,11 +182,25 @@ const explain = (failure: Failure | null, said: string, auth: Auth, model: strin
   return describeFailure(failure?.kind ?? kindOf(detail), detail, auth, model)
 }
 
-const usageOf = (r: SDKResultMessage, cost: number | null): Usage => {
+type CallUsage = { input_tokens?: number | null; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null; output_tokens?: number | null }
+
+/** What one model call read (all of its input) and wrote: the session's size after it. */
+const callSize = (u: CallUsage | null | undefined): number | null => {
+  if (!u || typeof u.input_tokens !== 'number') return null
+  return u.input_tokens + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.output_tokens ?? 0)
+}
+
+/**
+ * The reply's usage. The result sums every model call, so the session's size is the last call's
+ * (`lastCall`); without one, a one-call reply's sum is that call.
+ */
+const usageOf = (r: SDKResultMessage, cost: number | null, lastCall: number | null = null): Usage => {
   const u = r.usage
   const input = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
   const thinking = (u as { output_tokens_details?: { thinking_tokens?: number } }).output_tokens_details?.thinking_tokens ?? 0
+  const contextTokens = lastCall ?? (r.num_turns <= 1 ? input + u.output_tokens : null)
   return {
+    ...(contextTokens !== null ? { contextTokens } : {}),
     promptTokens: input,
     completionTokens: u.output_tokens,
     totalTokens: input + u.output_tokens,
@@ -317,12 +331,14 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
       }
     }
     const watch = req.watch?.(control) ?? null
+    /** The size of the session after the reply's latest model call, as that call reported it. */
+    let lastCall: number | null = null
     /** The reply's pause, if the watch paused it (and the user didn't stop it meanwhile). */
     const pausedResult = (result: SDKResultMessage | null): ReplyResult | null => {
       const p = watch?.paused ?? pausing
       if (!p || signal.aborted) return null
       const sessionCost = result?.total_cost_usd ?? null
-      return { usage: result ? usageOf(result, Math.max(0, result.total_cost_usd - req.session.baseCost)) : null, sessionCost, paused: p }
+      return { usage: result ? usageOf(result, Math.max(0, result.total_cost_usd - req.session.baseCost), lastCall) : null, sessionCost, paused: p }
     }
     try {
       for (const make of req.modules) modules.push(make(ctx))
@@ -387,6 +403,7 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
             }
           } else if (m.type === 'assistant') {
             hooks.checkpoint(m.uuid)
+            lastCall = callSize((m.message as { usage?: CallUsage }).usage) ?? lastCall
             // One model call can come as several assistant messages, all with its message id.
             watch?.step((m.message as { id?: string }).id ?? m.uuid)
             if (m.error) failure = { kind: m.error, text: textOf(m.message.content) }
@@ -430,7 +447,7 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
       if (abort.signal.aborted) throw abortError()
       if (!result) throw new AgentError(failure ? explain(failure, '', req.auth, req.model) : 'Claude Code ended before the reply did.')
       const sessionCost = result.total_cost_usd
-      const usage = usageOf(result, Math.max(0, sessionCost - req.session.baseCost))
+      const usage = usageOf(result, Math.max(0, sessionCost - req.session.baseCost), lastCall)
       if (result.subtype !== 'success' || result.is_error) {
         const said = result.subtype === 'success' ? result.result : result.errors.join(' ')
         limited(said)
