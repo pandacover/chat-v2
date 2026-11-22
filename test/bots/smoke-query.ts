@@ -2,8 +2,10 @@
 // that names and summarises jobs, and streams short replies. In Tomo's chat, "make a page …" is work:
 // Tomo hands it to itself with start_job, the page is made in its own thread, and the report comes
 // back as a turn that Tomo answers in a line. "What came before?" says whether the reply resumed an
-// earlier session (it doesn't after New topic).
+// earlier session (it doesn't after New topic), and starting afresh, whether it was handed the chat
+// so far (it is when Tomo rolls its chat over by itself after a pause).
 import { SUMMARY_INSTRUCTIONS } from '../../src/main/jobs'
+import { CHAT_SUMMARY_INSTRUCTIONS } from '../../src/main/rollover'
 import { fakeQuery, type Script } from '../fakeQuery'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -15,7 +17,8 @@ const script: Script = async function* (t) {
   if (t.call.options.persistSession === false) {
     const system = systemOf(t.call.options)
     let answer = 'Printer trouble'
-    if (system === SUMMARY_INSTRUCTIONS) answer = `Talked about ${(prompt.split('<user>\n')[1] ?? '').split('\n')[0]!.slice(0, 40)}; nothing pending.`
+    if (system === CHAT_SUMMARY_INSTRUCTIONS) answer = 'The user asked about a jammed printer, a cat page and otters.'
+    if (system === SUMMARY_INSTRUCTIONS) answer =`Talked about ${(prompt.split('<user>\n')[1] ?? '').split('\n')[0]!.slice(0, 40)}; nothing pending.`
     yield* t.text(answer)
     yield t.result()
     return
@@ -40,7 +43,11 @@ const script: Script = async function* (t) {
       return
     }
     if (/what came before/i.test(said)) {
-      yield* t.text(`${t.call.options.resume ? 'I remember what came before.' : 'This is a fresh start.'}\n\n${END}`)
+      const carried = /<earlier_conversation>([\s\S]*)<\/earlier_conversation>/.exec(prompt)?.[1] ?? ''
+      const handed = carried
+        ? ` I was handed the chat so far (summary: ${carried.includes('<summary>') ? 'yes' : 'no'}, last turns: ${carried.includes('<recent_turns>') ? 'yes' : 'no'}).`
+        : ''
+      yield* t.text(`${t.call.options.resume ? 'I remember what came before.' : `This is a fresh start.${handed}`}\n\n${END}`)
       yield t.result()
       return
     }

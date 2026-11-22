@@ -204,7 +204,9 @@
   </div>
 {/snippet}
 
-{#if message.post?.kind === 'topic'}
+{#if message.post?.kind === 'rollover'}
+  <!-- Tomo started afresh by itself here: never shown, the chat reads as one. -->
+{:else if message.post?.kind === 'topic'}
   <!-- New topic: Tomo starts afresh from here; nothing above is carried into its next reply. -->
   <div class="msg flex items-center gap-3 {far ? 'far' : ''}" role="separator" aria-label="New topic" data-topic in:fade={{ duration: fresh ? 200 : 0 }}>
     <span class="flex-1 border-t border-line"></span>

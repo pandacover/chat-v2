@@ -7,7 +7,7 @@ import type { RecallHit, RecallScope } from '../services/memoryStore'
 import { plainBody } from '../memory'
 import type { RunContext, ToolModuleFactory } from './module'
 
-export const RECALL_INSTRUCTIONS = `You can search Tomo's long-term memory with recall (mcp__memory__recall; load it with ToolSearch "select:mcp__memory__recall"). It holds what Tomo knows about the user and summaries of finished jobs and earlier conversations, found by the words in their names and text. Use it when the user refers to something from before that this conversation doesn't show ("the trip we planned", "my usual setup"), searching for the names and words they would have used. Memory is read-only to you and may be out of date; when you rely on something it says, mention that it comes from an earlier conversation.`
+export const RECALL_INSTRUCTIONS = `You can search Tomo's long-term memory with recall (mcp__memory__recall; load it with ToolSearch "select:mcp__memory__recall"). It holds what Tomo knows about the user, summaries of finished jobs and earlier conversations, and the older parts of Tomo's chat with the user, found by the words in their names and text. Use it when the user refers to something from before that this conversation doesn't show ("the trip we planned", "my usual setup"), searching for the names and words they would have used. Memory is read-only to you and may be out of date; when you rely on something it says, mention that it comes from an earlier conversation.`
 
 /** How much of one record's text a result shows. */
 const BODY_CHARS = 1200
@@ -21,11 +21,26 @@ const kindOf = (h: RecallHit) =>
       ? 'Playbook'
       : h.scope === 'job'
         ? 'Job note'
-        : h.type === 'conversation'
+        : h.type === 'conversation' || h.type === 'chat'
           ? 'Earlier conversation'
           : 'Finished job'
 
 const day = (at: number) => new Date(at).toISOString().slice(0, 10)
+
+/**
+ * A long record's text for a result: its start (a stretch of chat starts with its summary) and,
+ * when the words asked for come later, the passage around where they first do.
+ */
+export const excerpt = (body: string, query: string, n = BODY_CHARS): string => {
+  if (body.length <= n) return body
+  const lower = body.toLowerCase()
+  const words = (query.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter((w) => w.length >= 3 || /^\p{N}+$/u.test(w))
+  const at = Math.min(...words.map((w) => lower.indexOf(w)).filter((i) => i >= 0))
+  const head = Math.floor(n / 3)
+  if (!Number.isFinite(at) || at < n - head) return clip(body, n)
+  const from = Math.max(head, at - head)
+  return `${body.slice(0, head).trimEnd()}\n…\n${clip(body.slice(from).trimStart(), n - head)}`
+}
 
 /** The tool result: each hit with what it is, its names, when it was written and its text. */
 export const describeHits = (query: string, hits: readonly RecallHit[]) =>
@@ -36,7 +51,7 @@ export const describeHits = (query: string, hits: readonly RecallHit[]) =>
         ...hits.map((h) => {
           const names = [h.title, ...h.aliases].filter(Boolean)
           const head = `[${h.id}] ${kindOf(h)}${names.length ? `: ${names.join(' / ')}` : ''} (${day(h.updatedAt)})`
-          return `${head}\n${clip(plainBody(h.body), BODY_CHARS)}`
+          return `${head}\n${excerpt(plainBody(h.body), query)}`
         })
       ].join('\n\n')
 

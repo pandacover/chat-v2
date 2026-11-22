@@ -63,6 +63,13 @@ export interface Usage {
   cost: number | null
   /** Model calls behind the reply (more than one when it used tools). */
   requests: number
+  /**
+   * How big the reply's Claude Code session is once it ends: what its last model call read
+   * (input, cached or not) plus what it wrote. Missing on replies from before it was kept.
+   */
+  contextTokens?: number
+  /** When the reply ended, in ms since the epoch: the prompt cache was last written then. */
+  endedAt?: number
 }
 
 export interface Message {
@@ -98,9 +105,11 @@ export interface Message {
  *
  * 'topic' isn't a bot's post: it is the New topic divider in the primary's conversation (an
  * assistant row that answers nothing), where the next reply starts afresh (agent/history.ts).
+ * 'rollover' is the same boundary made by Tomo itself, after a pause in a chat grown too big to
+ * resume cheaply: it is never shown, and hands the fresh session a summary and the last turns.
  */
 export interface Post {
-  kind: 'task' | 'message' | 'report' | 'topic'
+  kind: 'task' | 'message' | 'report' | 'topic' | 'rollover'
   to: string | null
   state: 'held' | 'declined' | 'stopped' | null
 }

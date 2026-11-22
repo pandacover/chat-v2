@@ -18,6 +18,19 @@ import { ComputerUse, noOverlay } from '../src/main/computer'
 import { Browser } from '../src/main/services/Browser'
 import { SUMMARY_INSTRUCTIONS, cleanSummary, jobsBlock, listedJobs } from '../src/main/jobs'
 import { isTopicStart, topicStart } from '../src/main/agent/history'
+import { describeHits, excerpt } from '../src/main/agent/recall'
+import {
+  CHAT_SUMMARY_INSTRUCTIONS,
+  ROLLOVER_BUDGET,
+  ROLLOVER_GAP_MS,
+  carryText,
+  cleanChatSummary,
+  recentExchanges,
+  rolloverLimits,
+  segmentRecord,
+  shouldRollOver,
+  summaryIn
+} from '../src/main/rollover'
 import { type Call, type Script, fakeQuery } from './fakeQuery'
 import { fakeOverlay, fakePlatform } from './computer/fakes'
 
@@ -256,14 +269,27 @@ const inChat = (c: Call) => systemOf(c).includes('this is your one continuous ch
 /** Tomo's own thread on a job it handed itself. */
 const inOwnThread = (c: Call) => systemOf(c).includes('working on a task you handed yourself')
 
+/** How the small model answers asks for Tomo's running summary: as it should, or failing. */
+const summaryAsks = { fail: false }
 /**
  * Asks answered by kind; replies echo the message. In Tomo's chat, "do: <task>" hands the task to
  * Tomo itself with start_job; answering a report of its own that says "again", it tries to start
- * the same job again (which it mustn't).
+ * the same job again (which it mustn't). Tomo's running summary says how many user turns it read.
  */
 const script: Script = async function* (t) {
   if (isAsk(t.call)) {
     const system = systemOf(t.call)
+    if (system === CHAT_SUMMARY_INSTRUCTIONS) {
+      if (summaryAsks.fail) {
+        yield* t.apiError('overloaded', 'Overloaded')
+        return
+      }
+      const text = promptText(t.call)
+      const had = /<summary_so_far>\n([\s\S]*?)\n<\/summary_so_far>/.exec(text)?.[1]
+      yield* t.text(`RUNNING SUMMARY of ${(text.match(/<user>/g) ?? []).length} user turns${had && had !== '(none)' ? `, after [${had}]` : ''}`)
+      yield t.result()
+      return
+    }
     yield* t.text(system === SUMMARY_INSTRUCTIONS ? `Summary of: ${promptText(t.call).split('<user>\n')[1]?.split('\n')[0]}` : 'Named job')
     yield t.result()
     return
@@ -294,6 +320,19 @@ const script: Script = async function* (t) {
     const found = yield* t.tool('mcp__memory__recall', { query })
     yield* t.text(`Recalled: ${(found.result?.content ?? []).map((c) => c.text ?? '').join('')}`)
     yield t.result()
+    return
+  }
+  // "big: words" is a reply of three model calls whose last one read a big session.
+  if (/^big: /.test(said)) {
+    yield* t.text(`Reply to ${said}`)
+    yield {
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: '' }], usage: { input_tokens: 5, cache_read_input_tokens: 30_000, cache_creation_input_tokens: 100, output_tokens: 50 } },
+      uuid: '00000000-0000-4000-8000-00000000b16b',
+      session_id: t.call.session,
+      parent_tool_use_id: null
+    } as never
+    yield t.result({ turns: 3 })
     return
   }
   // "hold: name" waits for the test.
@@ -670,5 +709,290 @@ describe('jobs and memory', () => {
     })
     expect(versions[0]).toMatchObject({ sourceJobId: job.id, sourceSessionId: job.threadId, sourceTitle: job.title })
     await t.runtime.dispose()
+  })
+})
+
+describe('Tomo’s chat starting afresh by itself', () => {
+  const m = (role: Message['role'], content = '', post: Post['kind'] | null = null) => ({ role, content, post: post ? { kind: post, to: null, state: null } : null })
+
+  test('rolls over only in the primary’s chat, after more than the gap, past more than the budget', () => {
+    const limits = { gapMs: 1000, budget: 500 }
+    const at = (over: Partial<Parameters<typeof shouldRollOver>[0]>) => shouldRollOver({ kind: 'primary', endedAt: 0, contextTokens: 501, now: 1001, ...over }, limits)
+    expect(at({})).toBe(true)
+    // Exactly the gap or the budget isn't past it.
+    expect(at({ now: 1000 })).toBe(false)
+    expect(at({ contextTokens: 500 })).toBe(false)
+    // A job's thread or a worker's keeps resuming.
+    expect(at({ kind: 'shared' })).toBe(false)
+    expect(at({ kind: 'worker' })).toBe(false)
+    // A reply from before sizes were kept, or that never ended, is resumed.
+    expect(at({ endedAt: undefined })).toBe(false)
+    expect(at({ contextTokens: null })).toBe(false)
+  })
+
+  test('the limits default to five minutes and 25k tokens; the env sets them for tests', () => {
+    expect(ROLLOVER_GAP_MS).toBe(300_000)
+    expect(ROLLOVER_BUDGET).toBe(25_000)
+    expect(rolloverLimits({})).toEqual({ gapMs: 300_000, budget: 25_000 })
+    expect(rolloverLimits({ CHAT_V2_ROLLOVER_GAP_MS: '250', CHAT_V2_ROLLOVER_BUDGET: '100' })).toEqual({ gapMs: 250, budget: 100 })
+    expect(rolloverLimits({ CHAT_V2_ROLLOVER_GAP_MS: 'soon', CHAT_V2_ROLLOVER_BUDGET: '-3' })).toEqual({ gapMs: 300_000, budget: 25_000 })
+    // Read when asked, so a run can change them.
+    const was = process.env.CHAT_V2_ROLLOVER_BUDGET
+    process.env.CHAT_V2_ROLLOVER_BUDGET = '7'
+    expect(rolloverLimits().budget).toBe(7)
+    if (was === undefined) delete process.env.CHAT_V2_ROLLOVER_BUDGET
+    else process.env.CHAT_V2_ROLLOVER_BUDGET = was
+  })
+
+  test('the last three exchanges, the summary they carry, and a stretch as memory files it', () => {
+    const stretch = [m('user', 'a'), m('assistant', 'A'), m('user', 'b'), m('user', 'b2'), m('assistant', 'B'), m('user', 'c'), m('assistant', 'C'), m('user', 'd'), m('assistant', 'D')]
+    expect(recentExchanges(stretch).map((x) => x.content)).toEqual(['b', 'b2', 'B', 'c', 'C', 'd', 'D'])
+    expect(recentExchanges(stretch.slice(0, 4)).map((x) => x.content)).toEqual(['a', 'A', 'b', 'b2'])
+    const carried = carryText('They like 42.', ['<user>\nhi\n</user>'])
+    expect(carried).toBe('<summary>\nThey like 42.\n</summary>\n<recent_turns>\n<user>\nhi\n</user>\n</recent_turns>')
+    expect(summaryIn(carried)).toBe('They like 42.')
+    expect(summaryIn(carryText(null, ['x']))).toBeNull()
+    expect(cleanChatSummary('Summary:\nThe user likes 42.')).toBe('The user likes 42.')
+    expect(cleanChatSummary('  ')).toBeNull()
+    expect(cleanChatSummary('word '.repeat(600))!.split(/\s+/).length).toBeLessThanOrEqual(321)
+    const at = Date.UTC(2026, 10, 20, 9)
+    const record = segmentRecord({
+      botName: 'Tomo',
+      turns: [
+        { ...m('user', 'Plan Lisbon'), authorBotId: null, createdAt: at },
+        { ...m('assistant', 'On it.'), authorBotId: 'tomo', createdAt: at },
+        { ...m('user', 'Flights found', 'report'), authorBotId: 'tomo', createdAt: at + 2 * 86_400_000 },
+        { ...m('assistant', 'Done!'), authorBotId: 'tomo', createdAt: at + 2 * 86_400_000 }
+      ],
+      summary: 'Lisbon trip planned.',
+      nameOf: () => 'Tomo',
+      jobOf: (i) => (i === 2 ? { title: 'Lisbon' } : null)
+    })!
+    expect(record.title).toBe('Chat with Tomo, 2026-11-20 to 2026-11-22')
+    expect(record.body).toBe('Summary: Lisbon trip planned.\n\nUser: Plan Lisbon\n\nTomo: On it.\n\nReport from Tomo on “Lisbon”: Flights found\n\nTomo: Done!')
+    // A rollover is a boundary as a New topic is, and the one place that knows says so.
+    expect(isTopicStart(m('assistant', '', 'rollover'))).toBe(true)
+    expect(topicStart([m('root'), m('user'), m('assistant'), m('assistant', '', 'rollover'), m('user')])).toBe(3)
+  })
+
+  test('recall shows a long stretch of chat by its start and the passage that matches', () => {
+    const body = `Summary: trip.\n\n${'User: filler words here\n\n'.repeat(200)}User: the zanzibar bolts arrived\n\n${'Tomo: more filler\n\n'.repeat(50)}`
+    const shown = excerpt(body, 'zanzibar')
+    expect(shown.startsWith('Summary: trip.')).toBe(true)
+    expect(shown).toContain('zanzibar bolts arrived')
+    expect(shown.length).toBeLessThan(1300)
+    expect(describeHits('zanzibar', [{ id: 9, scope: 'archive', scopeId: 'tomo', type: 'chat', title: 'Chat with Tomo, 2026-11-20', aliases: [], body, updatedAt: Date.UTC(2026, 10, 21), sourceSessionId: null }])).toContain(
+      '[9] Earlier conversation: Chat with Tomo, 2026-11-20 (2026-11-21)'
+    )
+  })
+
+  // Tiny limits: a gap of a few hundred ms, and a budget the fake's 135-token sessions are past.
+  const env = { gap: process.env.CHAT_V2_ROLLOVER_GAP_MS, budget: process.env.CHAT_V2_ROLLOVER_BUDGET }
+  const limits = (gap: number, budget: number) => {
+    process.env.CHAT_V2_ROLLOVER_GAP_MS = String(gap)
+    process.env.CHAT_V2_ROLLOVER_BUDGET = String(budget)
+  }
+  afterEach(() => {
+    summaryAsks.fail = false
+    for (const [k, v] of [['CHAT_V2_ROLLOVER_GAP_MS', env.gap], ['CHAT_V2_ROLLOVER_BUDGET', env.budget]] as const)
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+  })
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+  const summaryCalls = (calls: Call[]) => calls.filter((c) => isAsk(c) && systemOf(c) === CHAT_SUMMARY_INSTRUCTIONS)
+  const chatted = async (t: ReturnType<typeof setup>, ...texts: string[]) => {
+    for (const text of texts) {
+      const n = t.doneCount()
+      await t.run(send(text))
+      await t.settle(() => t.doneCount() > n)
+    }
+  }
+
+  test('a reply keeps how big its session got and when it ended: its last model call, not the sum', async () => {
+    const t = setup({ titleModel: '', memoryModel: '', systemPrompt: 'Be a fox.' })
+    await chatted(t, 'big: a long one', 'small one')
+    const [big, small] = (await t.run(Jobs.use((j) => j.primary))).path.filter((n) => n.message.role === 'assistant').map((n) => n.message.usage!)
+    expect(big!.contextTokens).toBe(30_155)
+    expect(big!.promptTokens).toBe(130)
+    expect(small!.contextTokens).toBe(135)
+    expect(Math.abs(small!.endedAt! - Date.now())).toBeLessThan(5000)
+    await t.runtime.dispose()
+  })
+
+  test('after a gap past the budget the next turn starts fresh, carrying the summary written ahead and the last exchanges; nothing shows', async () => {
+    limits(400, 100)
+    const t = setup()
+    await chatted(t, 'Remember the number 42', 'And the colour blue', 'And the city Porto', 'And the dog Rex')
+    // Within the gap: resumed as ever.
+    const before = replies(t.calls)
+    expect(before[3]!.options.resume).toBe(before[0]!.session)
+    // The summary is written after the last reply, in the background.
+    await until(() => summaryCalls(t.calls).length > 0)
+    await sleep(500)
+    const asked = summaryCalls(t.calls).length
+    expect(asked).toBeGreaterThanOrEqual(1)
+    await chatted(t, 'What was the number?')
+    const fresh = replies(t.calls).at(-1)!
+    expect(fresh.options.resume).toBeUndefined()
+    expect(fresh.session).not.toBe(before[0]!.session)
+    const carried = fresh.prompt[0]!.text!
+    expect(carried).toStartWith('<earlier_conversation>\n<summary>\nRUNNING SUMMARY of 4 user turns\n</summary>\n<recent_turns>\n<user>\nAnd the colour blue\n</user>')
+    expect(carried).toContain('<assistant>\nReply to And the dog Rex\n</assistant>\n</recent_turns>\n</earlier_conversation>')
+    // The last three exchanges only: the first is in the summary.
+    expect(carried).not.toContain('Remember the number 42')
+    expect(fresh.prompt.at(-1)!.text).toBe('What was the number?')
+    expect(systemOf(fresh)).toBe(systemOf(before[0]!))
+    // Reused, not written again.
+    expect(summaryCalls(t.calls).length).toBe(asked)
+    // Tomo's conversation shows one chat, with nothing where it started afresh.
+    expect((await rows(t)).map((r) => r[1])).toEqual([
+      'Remember the number 42',
+      'Reply to Remember the number 42',
+      'And the colour blue',
+      'Reply to And the colour blue',
+      'And the city Porto',
+      'Reply to And the city Porto',
+      'And the dog Rex',
+      'Reply to And the dog Rex',
+      'What was the number?',
+      'Reply to What was the number?'
+    ])
+    const tree = await t.d((x) => x.activePath(x.primarySession()).map((n) => n.message.post?.kind ?? n.message.role))
+    expect(tree.filter((k) => k === 'rollover')).toHaveLength(1)
+    // Then it carries on in the fresh session, and the next rollover's summary builds on this one.
+    await chatted(t, 'Thanks')
+    expect(replies(t.calls).at(-1)!.options.resume).toBe(fresh.session)
+    await until(() => summaryCalls(t.calls).length > asked)
+    await sleep(500)
+    await chatted(t, 'Back again')
+    const again = replies(t.calls).at(-1)!
+    expect(again.options.resume).toBeUndefined()
+    expect(again.prompt[0]!.text).toContain('RUNNING SUMMARY of 2 user turns, after [RUNNING SUMMARY of 4 user turns]')
+    await t.runtime.dispose()
+  })
+
+  test('under the budget, or within the gap, a turn resumes as before', async () => {
+    limits(300, 1000)
+    const t = setup()
+    await chatted(t, 'One', 'Two')
+    await sleep(400)
+    await chatted(t, 'Three')
+    const [first, , third] = replies(t.calls)
+    expect(third!.options.resume).toBe(first!.session)
+    expect(third!.prompt.map((b) => b.text)).toEqual(['Three'])
+    // Nothing is summed up under the budget.
+    expect(summaryCalls(t.calls)).toHaveLength(0)
+    await t.runtime.dispose()
+  })
+
+  test('a failed summary, or no small model, still lets the turn run with the last exchanges', async () => {
+    limits(300, 100)
+    summaryAsks.fail = true
+    const t = setup()
+    await chatted(t, 'Hello there')
+    await sleep(450)
+    await chatted(t, 'Still there?')
+    const fresh = replies(t.calls).at(-1)!
+    expect(fresh.options.resume).toBeUndefined()
+    expect(fresh.prompt.map((b) => b.text)).toEqual([
+      '<earlier_conversation>\n<recent_turns>\n<user>\nHello there\n</user>\n<assistant>\nReply to Hello there\n</assistant>\n</recent_turns>\n</earlier_conversation>',
+      'Still there?'
+    ])
+    expect(summaryCalls(t.calls).length).toBeGreaterThan(0)
+    await t.runtime.dispose()
+
+    const u = setup({ titleModel: '', memoryModel: '', systemPrompt: 'Be a fox.' })
+    await chatted(u, 'Hello there')
+    await sleep(450)
+    await chatted(u, 'Still there?')
+    expect(replies(u.calls).at(-1)!.prompt[0]!.text).toStartWith('<earlier_conversation>\n<recent_turns>\n<user>\nHello there')
+    expect(u.calls.filter(isAsk)).toHaveLength(0)
+    await u.runtime.dispose()
+  })
+
+  test('New topic still carries nothing, past the budget after a gap too', async () => {
+    limits(300, 100)
+    const t = setup()
+    await chatted(t, 'Remember 42')
+    await sleep(450)
+    await t.run(Jobs.use((j) => j.newTopic))
+    await chatted(t, 'Something new')
+    const fresh = replies(t.calls).at(-1)!
+    expect(fresh.options.resume).toBeUndefined()
+    expect(fresh.prompt.map((b) => b.text)).toEqual(['Something new'])
+    expect((await rows(t)).map((r) => r[1])).toEqual(['Remember 42', 'Reply to Remember 42', '—', 'Something new', 'Reply to Something new'])
+    await t.runtime.dispose()
+  })
+
+  test('turns waiting across a rollover are all answered', async () => {
+    limits(300, 100)
+    const t = setup()
+    const primaryId = (await t.run(Jobs.use((j) => j.primary))).session.id
+    await chatted(t, 'Hello')
+    await sleep(450)
+    // Two turns waiting with nothing answering them (as a restart leaves them), then drained.
+    await t.d((x) => {
+      const leaf = x.activePath(x.primarySession()).at(-1)!.message
+      const a = x.insertMessage({ sessionId: primaryId, parentId: leaf.id, role: 'user', content: 'First waiting', status: 'complete' })
+      x.markVia(a.id, primaryId)
+      const b = x.insertMessage({ sessionId: primaryId, parentId: a.id, role: 'user', content: 'Second waiting', status: 'complete' })
+      x.markVia(b.id, primaryId)
+    })
+    await t.run(Chat.use((c) => c.drain(primaryId)))
+    await t.settle(() => t.doneCount() >= 2)
+    const fresh = replies(t.calls).at(-1)!
+    expect(fresh.options.resume).toBeUndefined()
+    expect(fresh.prompt[0]!.text).toContain('<recent_turns>\n<user>\nHello\n</user>')
+    expect(fresh.prompt.slice(1).map((b) => b.text)).toEqual(['<user>\nFirst waiting\n</user>', 'Second waiting'])
+    // One sent while a fresh reply runs waits, and is answered in that fresh session after it.
+    await sleep(450)
+    const n = t.doneCount()
+    await t.run(send('hold: fresh2'))
+    await until(() => replies(t.calls).at(-1)!.prompt.at(-1)!.text === 'hold: fresh2')
+    await t.run(send('Meanwhile'))
+    gate('fresh2').open()
+    await t.settle(() => t.doneCount() >= n + 2)
+    const [rolled, after] = replies(t.calls).slice(-2)
+    expect(rolled!.options.resume).toBeUndefined()
+    expect(after!.options.resume).toBe(rolled!.session)
+    expect(after!.prompt.at(-1)!.text).toBe('Meanwhile')
+    expect((await rows(t)).map((r) => r[1]).slice(-4)).toEqual(['hold: fresh2', 'Reply to hold: fresh2', 'Meanwhile', 'Reply to Meanwhile'])
+    await t.runtime.dispose()
+  })
+
+  test('the stretch a boundary ends is filed in memory, where recall finds it; nothing while memory is off', async () => {
+    limits(300, 100)
+    const t = setup({ titleModel: 'claude-haiku-5-5', memoryModel: 'claude-haiku-5-5', systemPrompt: 'Be a fox.' })
+    await chatted(t, 'My locksmith is called Zebulon')
+    await sleep(450)
+    await chatted(t, 'Hi again')
+    const chats = Db.use((db) => db.use((d) => d.records('archive', 'tomo')))
+    await until(async () => (await t.run(chats)).length > 0)
+    const [record] = await t.run(chats)
+    expect(record).toMatchObject({ type: 'chat', title: expect.stringMatching(/^Chat with Tomo, \d{4}-\d\d-\d\d$/) })
+    expect(record!.body).toContain('User: My locksmith is called Zebulon')
+    expect(record!.body).toContain('Tomo: Reply to My locksmith is called Zebulon')
+    expect(record!.body).toStartWith('Summary: RUNNING SUMMARY')
+    await chatted(t, 'recall: zebulon')
+    const said = (await t.run(Jobs.use((j) => j.primary))).path.at(-1)!.message.content
+    expect(said).toContain('Earlier conversation: Chat with Tomo')
+    expect(said).toContain('My locksmith is called Zebulon')
+    // A New topic files the stretch it ends too.
+    await t.run(Jobs.use((j) => j.newTopic))
+    await until(async () => (await t.run(chats)).length > 1)
+    expect((await t.run(chats))[1]!.body).toContain('User: Hi again')
+    // Another bot's recall doesn't see Tomo's chat.
+    expect(await t.d((x) => x.recall('zebulon', { botId: 'someone-else' }))).toEqual([])
+    await t.runtime.dispose()
+
+    const off = setup({ titleModel: 'claude-haiku-5-5', memoryModel: '', systemPrompt: 'Be a fox.' })
+    await chatted(off, 'My locksmith is called Zebulon')
+    await sleep(450)
+    await chatted(off, 'Hi again')
+    expect(replies(off.calls).at(-1)!.options.resume).toBeUndefined()
+    await off.run(Jobs.use((j) => j.newTopic))
+    await sleep(100)
+    expect(await off.run(chats)).toEqual([])
+    await off.runtime.dispose()
   })
 })

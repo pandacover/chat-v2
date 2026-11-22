@@ -18,7 +18,8 @@ import { CHECKPOINT_PREFIX } from './stuckStore'
 import { SMALL_MODEL } from '@shared/models'
 import { recallModule } from '../agent/recall'
 import { jobNotesBlock, noteModule } from '../agent/notes'
-import { HISTORY_NOTE, type NameOf, type TurnPlan, carriedText, continueNote, fromBotText, planTurn, transcriptText } from '../agent/history'
+import { HISTORY_NOTE, type NameOf, type TurnPlan, continueNote, fromBotText, planTurn, transcriptText } from '../agent/history'
+import { makeRollover } from './chatRollover'
 import type { ToolModuleFactory } from '../agent/module'
 import { type Gate, decide as decideAccess, ruled } from '../agent/rules'
 import { ComputerUse, type Mode, decideMode, effortFor, handsOver, modeTag, teachAnswer } from '../computer'
@@ -83,7 +84,9 @@ const sumUsage = (a: Usage | null, b: Usage): Usage =>
         cacheWriteTokens: (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0),
         reasoningTokens: a.reasoningTokens + b.reasoningTokens,
         cost: a.cost === null && b.cost === null ? null : (a.cost ?? 0) + (b.cost ?? 0),
-        requests: a.requests + b.requests
+        requests: a.requests + b.requests,
+        // The session's size is where the latest run left it.
+        ...((b.contextTokens ?? a.contextTokens) !== undefined ? { contextTokens: b.contextTokens ?? a.contextTokens } : {})
       }
     : b
 
@@ -168,6 +171,8 @@ export class Chat extends Context.Service<
      * limit (status 'stopped'), and goes on by itself once the limit resets. Returns the unsubscribe.
      */
     readonly onReplyEnd: (listener: (end: { messageId: string; status: MessageStatus; limited?: boolean }) => void) => () => void
+    /** A New topic divider was made in Tomo's chat: the stretch it ends is filed in memory (chatRollover.ts). */
+    readonly topicMade: (markId: string) => Effect.Effect<void>
   }
 >()('chat-v2/Chat') {
   static readonly layer = Layer.effect(
@@ -306,7 +311,7 @@ export class Chat extends Context.Service<
         const nameOf: NameOf = (id) => (id ? names.get(id) : undefined) ?? 'a bot'
         const blocks: PromptBlock[] = []
         // A fresh session after a topic divider: what the divider hands on comes first.
-        if (plan.carried) blocks.push({ type: 'text', text: carriedText(plan.carried) })
+        if (plan.carried) blocks.push({ type: 'text', text: plan.carried })
         // A bot's report or message in the primary's conversation says which job it is about.
         const jobs = yield* db.use((d) => new Map(plan.turns.flatMap((m) => (m.role === 'user' && m.authorBotId ? [[m.id, d.jobOfTurn(m.id)] as const] : []))))
         // The message answered comes as it is, the earlier turns quoted. A held message may have had a
@@ -341,7 +346,8 @@ export class Chat extends Context.Service<
         db
           .use((d) => {
             d.setStatus(messageId, status, error, tailPartial)
-            if (usage) d.setUsage(messageId, usage)
+            // When it ended, too: how long the prompt cache has been cold decides a rollover (rollover.ts).
+            if (usage) d.setUsage(messageId, { ...usage, endedAt: Date.now() })
             if (model) d.setModel(messageId, model)
           })
           .pipe(
@@ -418,7 +424,8 @@ export class Chat extends Context.Service<
         }
       }
 
-      const generate = (assistant: Message, partial: string | null, carry: string | null, pausedFor: string | null = null) => {
+      /** `opening`: a new reply to new turns (not a regeneration or a continuation), which in Tomo's chat may start it afresh. */
+      const generate = (assistant: Message, partial: string | null, carry: string | null, pausedFor: string | null = null, opening = false) => {
         const buffer = makeLineBuffer()
         if (carry !== null) buffer.push(carry)
         // Continuing after a complete line: a leading newline would add a blank line.
@@ -454,7 +461,9 @@ export class Chat extends Context.Service<
           const runOn = isClaudeModel(assistant.model) ? assistant.model : isClaudeModel(bot.model) ? bot.model : settings.defaultModel
           model = runOn
           const auth = yield* authFor(settings)
-          const lineage = yield* db.use((d) => d.lineage(assistant.parentId!))
+          let lineage: readonly Message[] = yield* db.use((d) => d.lineage(assistant.parentId!))
+          // Tomo's chat, past its budget after a pause: an automatic boundary first (rollover.ts).
+          if (opening && partial === null) lineage = yield* rollover.check(session, lineage)
           const plan = yield* db.use((d) =>
             planTurn(lineage, assistant, partial !== null, {
               point: d.agentPoint,
@@ -595,8 +604,8 @@ export class Chat extends Context.Service<
         )
       }
 
-      const start = (assistant: Message, partial: string | null = null, carry: string | null = null, pausedFor: string | null = null) =>
-        FiberMap.run(generations, assistant.id, generate(assistant, partial, carry, pausedFor), { onlyIfMissing: true }).pipe(
+      const start = (assistant: Message, partial: string | null = null, carry: string | null = null, pausedFor: string | null = null, opening = false) =>
+        FiberMap.run(generations, assistant.id, generate(assistant, partial, carry, pausedFor, opening), { onlyIfMissing: true }).pipe(
           Effect.asVoid
         )
 
@@ -712,7 +721,7 @@ export class Chat extends Context.Service<
             previous: parent?.role === 'assistant' ? summarizeSteps(parent.content) : null
           }
         })
-        if (assistant) yield* start(assistant)
+        if (assistant) yield* start(assistant, null, null, null, true)
         // Memory learns from what the user says, not from what bots tell each other.
         if (settings?.memoryModel && !fromBot) {
           const message = input.text.replace(/\s+/g, ' ').trim().slice(0, 120)
@@ -786,7 +795,7 @@ export class Chat extends Context.Service<
           return d.insertMessage({ sessionId, parentId: path.at(-1)!.message.id, role: 'assistant', content: '', status: 'streaming', model: chatModel(session, settings, d.botOf(session.id).model) })
         })
         if (!assistant) return false
-        yield* start(assistant)
+        yield* start(assistant, null, null, null, true)
         broadcaster.send({ type: 'thread', sessionId })
         return true
       })
@@ -885,6 +894,12 @@ export class Chat extends Context.Service<
         return yield* db.require('Message', (d) => d.linesSince(messageId, fromIndex))
       })
 
+      // Tomo's chat starting afresh after a pause once it is past its budget, and its running summary.
+      const rollover = yield* makeRollover({ db, settings: settingsStore.get.pipe(Effect.orElseSucceed(() => null)), ask })
+      replyEnds.add(({ messageId, status }) => {
+        if (status === 'complete') Effect.runFork(rollover.afterReply(messageId))
+      })
+
       // A paused reply continues by itself once its limit resets, as Continue would.
       meter?.onResume((p) => Effect.runPromise(continueReply({ sessionId: p.sessionId, assistantId: p.messageId }).pipe(Effect.asVoid)))
 
@@ -910,7 +925,8 @@ export class Chat extends Context.Service<
         onReplyEnd: (listener) => {
           replyEnds.add(listener)
           return () => void replyEnds.delete(listener)
-        }
+        },
+        topicMade: (markId) => rollover.file(markId)
       })
     })
   )

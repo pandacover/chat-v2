@@ -91,7 +91,11 @@ export class Jobs extends Context.Service<
 
       const newTopic = Effect.gen(function* () {
         const made = yield* db.use((d) => d.newTopic(d.primarySession().id))
-        if (made) broadcaster.send({ type: 'thread', sessionId: made.sessionId })
+        if (made) {
+          broadcaster.send({ type: 'thread', sessionId: made.sessionId })
+          // The stretch of chat it ends goes into memory, where recall finds it.
+          yield* chat.topicMade(made.id)
+        }
         return yield* primary
       })
 

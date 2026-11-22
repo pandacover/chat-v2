@@ -620,6 +620,21 @@ export const makeMemoryStore = ({ all, one, run, transaction, exec }: SqlHelpers
   const archiveConversation = (sessionId: string, summary: string, opts: { title: string; aliases?: string[]; jobId?: string | null; writer?: MemoryWriter }) =>
     archive('conversation', sessionId, summary, { ...opts, sessionId })
 
+  /**
+   * Files a stretch of the primary's chat with the user in the archive (type 'chat', scope id the
+   * bot whose chat it is), where only that bot's recall finds it. Each stretch is a record of its
+   * own; `sessionId` is the conversation it came from.
+   */
+  const archiveChat = (botId: string, record: { title: string; body: string }, opts: { sessionId: string | null }): { id: number; rev: number } =>
+    transaction(() => {
+      const saved = apply([{ body: record.body, type: 'chat', title: record.title, aliases: [], scope: 'archive', scopeId: botId }], [], {
+        kind: 'archived',
+        writer: 'archiver',
+        sessionId: opts.sessionId
+      })
+      return { id: saved.ids[0]!, rev: saved.rev }
+    })
+
   /** Deletes a job's notes and its archive record for good (when the job itself is deleted). */
   const forgetJob = (jobId: string): number =>
     destroy(() =>
@@ -631,6 +646,7 @@ export const makeMemoryStore = ({ all, one, run, transaction, exec }: SqlHelpers
   /**
    * Full-text search over the titles, aliases and current versions of the profile and the
    * archive, plus the playbook of `botId` and the notes of `jobId` when given. Best match first.
+   * The archive's stretches of a bot's chat with the user are that bot's alone.
    */
   const recall = (query: string, scope: RecallScope = {}): RecallHit[] => {
     const match = ftsQuery(query)
@@ -649,9 +665,11 @@ export const makeMemoryStore = ({ all, one, run, transaction, exec }: SqlHelpers
       `select c.id, c.scope, c.scope_id, c.type, c.title, c.aliases, c.body, c.updated_at, c.source_session_id
          from memory_search join memory_current c on c.id = memory_search.rowid
         where memory_search match ?
-          and (c.scope in ('profile', 'archive') or (c.scope = 'bot' and c.scope_id = ?) or (c.scope = 'job' and c.scope_id = ?))
+          and (c.scope = 'profile' or (c.scope = 'archive' and (c.type != 'chat' or c.scope_id = ?))
+               or (c.scope = 'bot' and c.scope_id = ?) or (c.scope = 'job' and c.scope_id = ?))
         order by bm25(memory_search, 4.0, 4.0, 1.0) limit ?`,
       match,
+      scope.botId ?? null,
       scope.botId ?? null,
       scope.jobId ?? null,
       Math.max(1, Math.min(50, scope.limit ?? 8))
@@ -744,6 +762,7 @@ export const makeMemoryStore = ({ all, one, run, transaction, exec }: SqlHelpers
     jobNotes,
     archiveJob,
     archiveConversation,
+    archiveChat,
     forgetJob,
     recall,
     /**
