@@ -1,7 +1,8 @@
 <script lang="ts">
   // Search: a modal over everything, opened from the sidebar or Ctrl K (Cmd K). Empty, it lists the
-  // latest jobs; typed, the jobs whose title matches, best first, with the match in bold.
-  import { entries, groupOf, openEntry, type Entry } from '@/lib/chats.svelte'
+  // jobs that need you, then the latest others; typed, the jobs whose title matches, best first,
+  // with the match in bold.
+  import { NEED_LABELS, openEntry, sections, type Entry } from '@/lib/chats.svelte'
   import { fade, pop } from '@/lib/motion'
   import { shortcut } from '@/lib/keys'
   import { dimsBar } from '@/lib/theme.svelte'
@@ -13,8 +14,20 @@
   let list: HTMLDivElement | undefined = $state()
 
   const q = $derived(query.trim().toLowerCase())
+  /** Jobs that need you first, then the rest by recency; each with what it shows on the right. */
+  const ranked = $derived.by(() => {
+    const parts = sections()
+    const first = new Set(parts.main)
+    const working = new Set(parts.working)
+    const rest = [...parts.pinned.filter((e) => !first.has(e)), ...parts.working, ...parts.settled].sort((a, b) => b.job.updatedAt - a.job.updatedAt)
+    const label = (e: Entry) => {
+      const need = parts.needs.get(e.key)
+      return need ? NEED_LABELS[need] : working.has(e) ? 'Working' : e.session.pinnedAt != null ? 'Pinned' : e.job.status === 'done' ? 'Finished' : 'Settled'
+    }
+    return { list: [...parts.main, ...rest], label }
+  })
   const hits = $derived.by(() => {
-    const all = entries()
+    const all = ranked.list
     if (!q) return all.slice(0, 6)
     return all
       .filter((e) => e.title.toLowerCase().includes(q))
@@ -95,9 +108,9 @@
           onpointermove={(ev) => hover(ev, i)}
           onclick={() => pick(e)}
         >
-          <Icon name={e.draft ? 'pen' : e.session?.forkedFromSessionId ? 'branch' : 'chat'} size={16} class="text-fg-4" />
-          <span class="min-w-0 flex-1 truncate {e.session ? '' : 'italic'}">{a}{#if m}<mark class="bg-transparent font-semibold text-fg">{m}</mark>{/if}{b}</span>
-          <span class="mono-label shrink-0 !text-fg-4">{groupOf(e) === 'Drafts' ? 'Draft' : groupOf(e)}</span>
+          <Icon name={e.draft ? 'pen' : e.session.forkedFromSessionId ? 'branch' : 'chat'} size={16} class="text-fg-4" />
+          <span class="min-w-0 flex-1 truncate">{a}{#if m}<mark class="bg-transparent font-semibold text-fg">{m}</mark>{/if}{b}</span>
+          <span class="mono-label shrink-0 !text-fg-4">{ranked.label(e)}</span>
         </button>
       {/each}
     </div>

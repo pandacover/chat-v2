@@ -14,6 +14,7 @@ const call = async <A>(channel: string, ...args: unknown[]): Promise<A> => {
 const api: Api = {
   sessions: {
     list: () => call('sessions:list'),
+    markRead: (id) => call('sessions:markRead', id),
     create: () => call('sessions:create'),
     get: (id) => call('sessions:get', id),
     rename: (id, title) => call('sessions:rename', id, title),

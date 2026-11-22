@@ -145,6 +145,25 @@ export interface Session {
 
 export type SessionKind = 'primary' | 'shared' | 'worker'
 
+/** Where a thread stands, as the sidebar sorts it: what runs in it, how its last reply ended, what the user hasn't seen. */
+export interface ThreadState {
+  /** When the user last opened it; null for one never opened. */
+  readAt: number | null
+  /** When a reply last ended in it or a bot reported back in it; null for neither (the user's own messages never count). */
+  activityAt: number | null
+  /** A reply is streaming in it now. */
+  streaming: boolean
+  /** How its latest reply (not a post) ended, or that it still runs; null with none. */
+  lastReply: MessageStatus | null
+  /** A reply in it waits for a usage limit to reset. */
+  limitPaused: boolean
+}
+
+/** A thread in the list: the session and where it stands. */
+export interface ListedSession extends Session {
+  state: ThreadState
+}
+
 /** A persistent agent. The primary bot (Tomo) hears all untargeted input; primary is a setting, not a kind of bot. */
 export interface Bot {
   id: string
@@ -444,7 +463,9 @@ export interface UpdateState {
 /** Everything the renderer can call on `window.api`. */
 export interface Api {
   sessions: {
-    list(): Promise<Session[]>
+    list(): Promise<ListedSession[]>
+    /** The user opened a thread (or saw a reply end in it): it isn't unread any more. */
+    markRead(id: string): Promise<void>
     create(): Promise<SessionView>
     get(id: string): Promise<SessionView>
     rename(id: string, title: string): Promise<void>

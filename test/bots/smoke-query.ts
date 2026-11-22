@@ -42,7 +42,8 @@ const script: Script = async function* (t) {
   yield* t.text('Sure. ')
   await sleep(150)
   yield* t.text(`You said: ${said.slice(0, 80)}\n\n`)
-  await sleep(150)
+  // Asked to take it slowly: long enough for the user to look elsewhere before it ends.
+  await sleep(/slowly/i.test(said) ? 5000 : 150)
   yield* t.text('That is all for now.')
   yield t.result()
 }

@@ -81,6 +81,11 @@ const reports = page.locator('[data-post="report"]')
 const reportWith = (text) => reports.filter({ hasText: text })
 const roster = page.locator('[data-roster] [data-roster-bot]')
 const card = page.locator('[data-approval-elsewhere] [data-computer-wait="approval"]')
+/** A job's row in the sidebar, in whichever section; shut sections are opened first. */
+const jobRow = async (title) => {
+  for (const head of await page.locator('aside [data-row^="section:"][aria-expanded="false"]').all()) await head.click()
+  return page.locator('aside [data-row^="chat:"]', { hasText: title }).first()
+}
 const setTheme = async (name) => {
   await page.getByRole('radio', { name }).first().click()
   await sleep(400)
@@ -125,7 +130,7 @@ try {
   const report = reportWith('Scout done: Compare the flights')
   ok((await report.locator('[data-post-job]').innerText()).trim() === 'Compare the flights', 'the card is labelled with its job')
   ok((await report.locator('[data-post-head]').innerText()).includes('Scout'), 'and names who reports')
-  await until(async () => (await page.locator('aside [data-row^="group:"]').allTextContents()).some((g) => g.includes('Open · Scout')), 'the sidebar groups the job under its owner, Scout')
+  await until(async () => (await (await jobRow('Compare the flights')).locator('[data-row-owner="Scout"]').count()) === 1, "the job's row shows its owner, Scout")
   await sleep(500)
   await capture('2-report-card')
 
@@ -182,7 +187,7 @@ try {
   await until(async () => (await reportWith("didn't approve").count()) === 1, 'Scout reports it was not passed on')
   await sleep(400)
   await capture('7-conversation-dark')
-  await page.locator('aside [data-row^="chat:"]', { hasText: 'Cancel the old booking' }).locator('button').first().click()
+  await (await jobRow('Cancel the old booking')).locator('button').first().click()
   await until(async () => (await page.locator('[data-post-state="declined"]').count()) === 1, 'the job shows the declined message')
   await capture('8-job-dark')
   await setTheme('Light')

@@ -1,6 +1,7 @@
 // Smoke test of bots and jobs in the built app, hidden (CHAT_V2_HEADLESS=1), on a chat.db seeded
 // with chats from before bots (seed-old-db.ts) and a scripted model (smoke-query.ts). It checks the
-// migration as the sidebar shows it, talking to Tomo (routing, the reply's author and job, the job
+// migration as the sidebar shows it, the sidebar's sections (Pinned, the jobs that need you,
+// Working, Settled), talking to Tomo (routing, the reply's author and job, the job
 // chip moving a wrong guess), sending while another job's reply runs, continuing a finished job,
 // and the Tomo card in Settings. Captures go to <outDir>.
 //
@@ -51,7 +52,7 @@ const until = async (f, what, ms = 10_000) => {
   ok(true, what)
 }
 /** A capture of the chat window. The hidden window paints only when captured, so this takes a few. */
-const capture = async (name) => {
+const capture = async (name, tries = 3) => {
   try {
     const png = await app.evaluate(async ({ BrowserWindow }) => {
       const w = BrowserWindow.getAllWindows().find((w) => w.webContents.getURL().includes('index.html'))
@@ -63,6 +64,8 @@ const capture = async (name) => {
     })
     writeFileSync(join(outDir, `${name}.png`), Buffer.from(png, 'base64'))
   } catch (e) {
+    // The hidden window's compositor sometimes isn't ready for the first capture.
+    if (tries > 1) return capture(name, tries - 1)
     console.log(`(no capture of ${name}: ${String(e).split('\n')[0]})`)
   }
 }
@@ -78,7 +81,12 @@ const send = async (text) => {
   await composer.press('Enter')
 }
 const sidebarRows = () => page.locator('aside [data-row^="chat:"]').allTextContents()
-const groupLabels = () => page.locator('aside [data-row^="group:"]').allTextContents()
+/** A section's label (Pinned, Working, Settled), which folds it. */
+const head = (id) => page.locator(`aside [data-row="section:${id}"]`)
+const headText = async (id) => ((await head(id).count()) ? (await head(id).textContent()).replace(/\s+/g, ' ').trim() : '')
+const expanded = async (id) => (await head(id).getAttribute('aria-expanded')) === 'true'
+const sectionRows = (id) => page.locator(`aside [data-section="${id}"] [data-row^="chat:"]`)
+const inSection = async (id, title) => (await sectionRows(id).allTextContents()).some((r) => r.includes(title))
 const authors = () => page.locator('[data-reply-author]').allInnerTexts()
 const lastReply = () => page.locator('[data-reply-scope]').last()
 const chip = page.locator('[data-job-chip] button[aria-haspopup="menu"]')
@@ -91,13 +99,31 @@ try {
   ok((await page.locator('[data-primary-entry].on').count()) === 1, "the app opens on Tomo's conversation")
   ok((await page.locator('[data-chat-title]').count()) === 0, 'whose it is is not repeated in the chat header')
   ok((await page.locator('[data-bar-bot]').count()) === 0, 'nor in the app bar while the sidebar shows it')
-  const rows = await sidebarRows()
-  ok(rows.length === 5, `every old chat is a job in the sidebar (${rows.length})`)
-  const groups = await groupLabels()
-  ok(!groups.some((g) => g.trim() === 'Open'), `old chats are finished, none open (${groups.join(', ')})`)
-  ok(groups.some((g) => /pinned/i.test(g)), 'a pinned chat stays pinned')
+  // The sections as they start: Pinned and Settled shut, nothing that needs you, nothing running.
+  ok(/^Pinned ?1$/.test(await headText('pinned')), `a pinned chat stays pinned (${await headText('pinned')})`)
+  ok(/^Settled ?4$/.test(await headText('settled')), `the other old chats are settled, being finished (${await headText('settled')})`)
+  ok(!(await expanded('pinned')) && !(await expanded('settled')), 'Pinned and Settled start shut')
+  ok((await head('working').count()) === 0, 'with nothing running there is no Working section')
+  ok((await page.locator('aside [data-nothing-needs-you]').innerText()).trim() === 'Nothing needs you', 'the main section says nothing needs you')
+  ok((await sidebarRows()).length === 0, 'shut sections show no rows')
+  const layout = await page.evaluate(() => {
+    const box = (sel) => document.querySelector(sel)?.getBoundingClientRect()
+    return { pinned: box('aside [data-section="pinned"]'), main: box('aside [data-section="main"]'), settled: box('aside [data-section="settled"]') }
+  })
+  ok(layout.pinned.bottom <= layout.main.top && layout.main.bottom <= layout.settled.top, 'Pinned, then the main section, then Settled at the foot')
+  ok(layout.main.height > 200, `the main section takes the free room (${Math.round(layout.main.height)}px)`)
   ok((await chip.innerText()).includes('Tomo picks the job'), 'the chip says Tomo picks the job')
   await capture('1-home')
+  await head('pinned').click()
+  await head('settled').click()
+  ok((await expanded('pinned')) && (await expanded('settled')), 'a section opens from its label')
+  await until(async () => (await sidebarRows()).length === 5, 'every old chat is a job in the sidebar')
+  ok(await inSection('pinned', 'Tomato soup recipe'), 'the pinned one in Pinned')
+  // Kept across a reload.
+  await page.reload()
+  await composer.waitFor({ timeout: 15_000 })
+  await until(async () => (await sidebarRows()).length === 5 && (await expanded('pinned')) && (await expanded('settled')), 'open sections stay open after a reload')
+  await capture('1a-sections-open')
   // The sidebar shut: the app bar names whose conversation is open, after New topic.
   await page.locator('[data-sidebar-toggle]').click()
   await until(async () => (await page.locator('[data-bar-bot-name]').count()) === 1 && (await page.locator('[data-bar-bot-name]').innerText()).trim() === 'Tomo', 'the app bar shows Tomo with the sidebar shut')
@@ -110,7 +136,7 @@ try {
   await until(() => repliesDone(1), 'the reply streams in')
   let a = await authors()
   ok(a.length === 1 && a[0].includes('Tomo') && a[0].includes('Printer keeps jamming'), `the reply is signed by Tomo, in the printer job (${a})`)
-  await until(async () => (await groupLabels()).some((g) => g.trim() === 'Open'), 'the printer job is open again')
+  await until(async () => !/finished/i.test(await chip.innerText()), 'the printer job is open again')
   ok((await chip.innerText()).includes('Printer keeps jamming'), 'the chip shows the current job')
 
   // Something new: a new job, named by the router.
@@ -118,7 +144,7 @@ try {
   await until(() => repliesDone(2), 'the second reply streams in')
   a = await authors()
   ok(a.at(-1).includes('Trip to Lisbon'), 'a new topic gets a new job')
-  ok((await sidebarRows()).some((r) => r.includes('Trip to Lisbon')), 'the new job is in the sidebar')
+  await until(async () => (await sidebarRows()).some((r) => r.includes('Trip to Lisbon')), 'the new job is in the sidebar (in Settled, once its reply ended)')
   await capture('2-routed')
 
   // Changing the topic with nothing typed sends nothing again: it only picks where the next message goes.
@@ -203,6 +229,38 @@ try {
   await until(async () => (await lastReply().innerText()).includes('That is all for now.'), 'writing in it gets a reply')
   await until(async () => !/finished/i.test(await chip.innerText()), 'and opens the job again')
   await capture('5-job-thread')
+
+  // A reply that ends while its thread isn't open: the job needs you (it is new) until you open it.
+  await send('Explain it slowly')
+  await until(async () => /^Working ?1$/.test(await headText('working')), 'a running reply puts the job in Working')
+  ok(!(await expanded('working')), 'Working starts shut')
+  await head('working').click()
+  await until(() => inSection('working', 'Rust lifetimes'), 'open, Working shows the job')
+  await page.locator('[data-primary-entry]').click()
+  const order = await page.evaluate(() => {
+    const top = (sel) => document.querySelector(sel)?.getBoundingClientRect().top ?? 0
+    return [top('aside [data-section="main"]'), top('aside [data-section="working"]'), top('aside [data-section="settled"]')]
+  })
+  ok(order[0] < order[1] && order[1] < order[2], 'Working sits below the main section and above Settled')
+  await capture('5a-working')
+  await until(() => inSection('main', 'Rust lifetimes'), 'when the reply ends there unseen, the job moves into the main section', 10_000)
+  ok((await page.locator('aside [data-section="main"] [data-need="unread"]', { hasText: 'Rust lifetimes' }).count()) === 1, 'marked as new')
+  ok((await head('working').count()) === 0, 'and Working is gone with nothing running')
+  await sleep(300)
+  await capture('5b-unread')
+  await page.getByRole('radio', { name: 'Dark' }).click()
+  await sleep(500)
+  await capture('5c-unread-dark')
+  await page.getByRole('radio', { name: 'Light' }).click()
+  await sectionRows('main').filter({ hasText: 'Rust lifetimes' }).locator('button').first().click()
+  await until(async () => (await page.locator('[data-chat-title]').innerText()) === 'Rust lifetimes', 'the job opens')
+  await until(async () => !(await inSection('main', 'Rust lifetimes')) && (await inSection('settled', 'Rust lifetimes')), 'opened, it leaves the main section for Settled')
+  ok((await page.locator('aside [data-nothing-needs-you]').count()) === 1, 'and nothing needs you again')
+  // Read stays read after a reload (it is saved).
+  await page.locator('[data-primary-entry]').click()
+  await page.reload()
+  await composer.waitFor({ timeout: 15_000 })
+  await until(async () => (await inSection('settled', 'Rust lifetimes')) && !(await inSection('main', 'Rust lifetimes')), 'and stays read after a reload')
 
   // Settings › Bots: Tomo's card, with the instructions it was given from Settings.
   await page.keyboard.press('Control+,')

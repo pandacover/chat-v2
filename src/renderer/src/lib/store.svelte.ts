@@ -11,10 +11,10 @@ import type {
   JobDetail,
   JobStatus,
   JobTarget,
+  ListedSession,
   MemoryView,
   Message,
   Presence,
-  Session,
   SessionPatch,
   SessionView,
   SettingsView,
@@ -64,7 +64,8 @@ export const draftTitle = (text: string) => {
 const describe = (e: unknown) => (e instanceof Error ? e.message : String(e)).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
 
 class AppState {
-  sessions = $state<Session[]>([])
+  /** Every thread but the primary's conversation, each with where it stands (running, unread…). */
+  sessions = $state<ListedSession[]>([])
   /** The open conversation: the primary bot's (kind 'primary'), or a job's thread. */
   view = $state<SessionView | null>(null)
 
@@ -434,7 +435,7 @@ class AppState {
   }
 
   /** A bot's latest thread of its own (on its newest job), or null when it has none yet. */
-  latestThreadOf(botId: string): Session | null {
+  latestThreadOf(botId: string): ListedSession | null {
     return this.sessions.filter((s) => s.kind === 'worker' && s.botId === botId).sort((a, b) => b.updatedAt - a.updatedAt)[0] ?? null
   }
 
@@ -518,8 +519,23 @@ class AppState {
   }
 
   async refreshSessions() {
+    clearTimeout(this.sessionsTimer)
     const [list] = await Promise.all([this.attempt(() => api.sessions.list()), this.refreshJobs()])
     if (list) this.sessions = list
+  }
+
+  /** Replies start and end in bursts (a job's bots, a reply and its report): one reload for them all. */
+  private sessionsTimer: ReturnType<typeof setTimeout> | undefined
+  private refreshSessionsSoon() {
+    clearTimeout(this.sessionsTimer)
+    this.sessionsTimer = setTimeout(() => void this.refreshSessions(), 150)
+  }
+
+  /** The user has seen what is in a thread: it isn't unread any more. */
+  markRead(id: string) {
+    const s = this.sessions.find((x) => x.id === id)
+    if (s) s.state.readAt = Date.now()
+    void api.sessions.markRead(id).catch(() => {})
   }
 
   async loadSettings() {
@@ -542,6 +558,8 @@ class AppState {
     const jobId = view.session.kind === 'primary' ? null : view.session.jobId
     if (jobId !== this.jobDetail?.job.id) this.jobDetail = null
     if (jobId && this.team) void this.loadJobDetail(jobId)
+    // An open thread is read: whatever ended in it is in front of the user.
+    if (view.session.kind !== 'primary') this.markRead(view.session.id)
     for (const node of view.path) {
       if (node.message.status === 'streaming') void this.backfill(node.message.id)
     }
@@ -811,6 +829,8 @@ class AppState {
   private onEvent(e: StreamEvent) {
     if (e.type === 'presence') {
       this.presence = e.presence
+      // A reply started or ended somewhere: what runs (Working) and what is new change with it.
+      this.refreshSessionsSoon()
       return
     }
     if (e.type === 'thread') {
@@ -868,6 +888,12 @@ class AppState {
       return
     }
     const message = this.find(e.messageId)
+    if (e.type === 'done') {
+      // A reply that ended where the user is looking (its thread, or Tomo's conversation it shows
+      // in) is seen; one that ended elsewhere makes its thread unread.
+      if (message) this.markRead(message.sessionId)
+      this.refreshSessionsSoon()
+    }
     if (!message) return
     if (e.type === 'line') {
       if (e.index < message.lineCount) return // already have it

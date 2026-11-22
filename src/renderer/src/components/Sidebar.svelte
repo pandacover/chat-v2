@@ -1,10 +1,10 @@
 <script lang="ts">
   import { tip } from '@/lib/tooltip'
   import { untrack } from 'svelte'
-  import { SvelteSet } from 'svelte/reactivity'
   import type { Bot, Session } from '@shared/types'
   import { openBotSettings } from '@/lib/settingsNav'
-  import { draftTitle, entries, grouped, openEntry, type Entry } from '@/lib/chats.svelte'
+  import { entries, NEED_LABELS, openEntry, sections, type Entry, type Need } from '@/lib/chats.svelte'
+  import type { Section } from '@/lib/sections'
   import { fade } from '@/lib/motion'
   import { shortcut } from '@/lib/keys'
   import { app } from '@/lib/store.svelte'
@@ -18,14 +18,9 @@
   let confirming = $state<string | null>(null)
   let draft = $state('')
 
-  // Drafts first, then pinned jobs, then open ones (by owner, with several bots), then finished ones by day.
-  const groups = $derived(grouped(entries()))
-
-  /** The job an approval waits in (its shared thread or a bot's own thread on it): its row gets a badge. */
-  const waitJob = $derived.by(() => {
-    const w = app.computerWait
-    return w ? (app.sessions.find((s) => s.id === w.sessionId)?.jobId ?? null) : null
-  })
+  /** Pinned jobs; the jobs that need you (no label); then, at the foot, Working and Settled. */
+  const all = $derived(entries())
+  const parts = $derived(sections(all))
 
   /** A bot in the roster opens its latest thread of its own; the primary, its conversation. */
   const openBot = (b: Bot) => {
@@ -35,94 +30,101 @@
     else openBotSettings(b.id)
   }
 
-  // Collapsed groups, by label, kept across launches.
-  const COLLAPSED_KEY = 'chat-v2:collapsed-groups'
-  const collapsed = new SvelteSet<string>(JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '[]') as string[])
-  const toggleGroup = (label: string) => {
-    if (collapsed.has(label)) collapsed.delete(label)
-    else collapsed.add(label)
-    localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsed]))
+  // Which sections are open, kept across launches. All but the main one start shut.
+  type Folding = Exclude<Section, 'main'>
+  const OPEN_KEY = 'tomo:sidebar-sections'
+  localStorage.removeItem('chat-v2:collapsed-groups')
+  const readOpen = (): Record<Folding, boolean> => {
+    try {
+      const raw = JSON.parse(localStorage.getItem(OPEN_KEY) ?? '{}') as Partial<Record<Folding, unknown>>
+      return { pinned: raw.pinned === true, working: raw.working === true, settled: raw.settled === true }
+    } catch {
+      return { pinned: false, working: false, settled: false }
+    }
+  }
+  const unfolded = $state(readOpen())
+  const toggle = (id: Folding) => {
+    unfolded[id] = !unfolded[id]
+    localStorage.setItem(OPEN_KEY, JSON.stringify(unfolded))
   }
 
-  // Headers and chats in one keyed list, so a header moves with the same flip as the chats around it.
-  type Row = { key: string; label: string; open: boolean; entry?: undefined } | { key: string; entry: Entry }
-  /**
-   * What a row shows. The new chat's title isn't here: its row reads it as you type, so typing
-   * doesn't make a new list.
-   */
+  type Row = { key: string; entry: Entry; need: Need | null }
+  /** What a row shows: a row that shows the same keeps its object, so the list below doesn't redraw it. */
   const sameRow = (a: Row, b: Row) =>
-    a.entry && b.entry
-      ? a.entry.draft === b.entry.draft &&
-        (a.entry.session === null
-          ? b.entry.session === null
-          : b.entry.session !== null &&
-            a.entry.title === b.entry.title &&
-            a.entry.job.status === b.entry.job.status &&
-            a.entry.job.summary === b.entry.job.summary &&
-            a.entry.session.pinnedAt === b.entry.session.pinnedAt &&
-            a.entry.session.forkedFromSessionId === b.entry.session.forkedFromSessionId)
-      : !a.entry && !b.entry && a.open === b.open
+    a.need === b.need &&
+    a.entry.draft === b.entry.draft &&
+    a.entry.title === b.entry.title &&
+    a.entry.job.status === b.entry.job.status &&
+    a.entry.job.summary === b.entry.job.summary &&
+    a.entry.job.ownerBotId === b.entry.job.ownerBotId &&
+    a.entry.job.parentJobId === b.entry.job.parentJobId &&
+    a.entry.session.pinnedAt === b.entry.session.pinnedAt &&
+    a.entry.session.forkedFromSessionId === b.entry.session.forkedFromSessionId
   /**
-   * The list is worked out again whenever anything it reads changes (a keystroke in a draft, the
-   * open chat, a refreshed chat list), but each new array makes the keyed list below measure every
-   * row for its flip, which with hundreds of chats forced a layout of the whole window on every
-   * key and chat switch. Unchanged rows keep their objects, and an unchanged list its array.
+   * The lists are worked out again whenever anything they read changes (a keystroke in a draft,
+   * the open chat, a refreshed chat list), but each new array makes the keyed lists below measure
+   * every row for its glide, which with hundreds of chats forced a layout of the whole window on
+   * every key and chat switch. Unchanged rows keep their objects, and an unchanged list its array.
    */
-  let lastRows: Row[] = []
-  const rows = $derived.by(() => {
-    const before = new Map(lastRows.map((r) => [r.key, r]))
-    const out: Row[] = []
-    const add = (row: Row) => {
+  let last: Record<Section, Row[]> = { pinned: [], main: [], working: [], settled: [] }
+  const keep = (id: Section, list: Entry[]): Row[] => {
+    const before = new Map(last[id].map((r) => [r.key, r]))
+    const out = list.map((entry): Row => {
+      const row = { key: `chat:${entry.key}`, entry, need: parts.needs.get(entry.key) ?? null }
       const prev = before.get(row.key)
-      out.push(prev && sameRow(prev, row) ? prev : row)
-    }
-    for (const [label, items] of groups) {
-      const open = !collapsed.has(label)
-      add({ key: `group:${label}`, label, open })
-      if (open) for (const e of items) add({ key: `chat:${e.key}`, entry: e })
-    }
-    if (out.length === lastRows.length && out.every((r, i) => r === lastRows[i])) return lastRows
-    return (lastRows = out)
-  })
+      return prev && sameRow(prev, row) ? prev : row
+    })
+    const prev = last[id]
+    return (last[id] = out.length === prev.length && out.every((r, i) => r === prev[i]) ? prev : out)
+  }
+  const pinnedRows = $derived(keep('pinned', parts.pinned))
+  const mainRows = $derived(keep('main', parts.main))
+  const workingRows = $derived(keep('working', parts.working))
+  const settledRows = $derived(keep('settled', parts.settled))
+  const allRows = () => [pinnedRows, mainRows, workingRows, settledRows]
 
   /*
-   * Rows glide to their new places when the list changes (FLIP), by hand: Svelte's animate:flip
+   * Rows glide to their new places when a list changes (FLIP), by hand: Svelte's animate:flip
    * measured every row on every pass over the list, and while a glide was still running each
    * measure forced a layout of the window, row by row. That restarted every row's glide, so
    * typing a new chat's first words took seconds a key. Here positions are read for all rows
    * first and written after, only when the rows really change, and only rows in view move.
    */
-  let nav: HTMLElement | undefined = $state()
+  let side: HTMLElement | undefined = $state()
   const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)')
   let tops = new Map<string, number>()
+  const lists = () => [...(side?.querySelectorAll<HTMLElement>('[data-list]') ?? [])]
   const rowTops = () => {
     const out = new Map<string, number>()
-    for (const el of nav?.children ?? []) {
-      const key = (el as HTMLElement).dataset.row
-      if (key) out.set(key, (el as HTMLElement).offsetTop)
-    }
+    for (const list of lists())
+      for (const el of list.children) {
+        const key = (el as HTMLElement).dataset.row
+        if (key) out.set(`${list.dataset.list}/${key}`, (el as HTMLElement).offsetTop)
+      }
     return out
   }
   $effect.pre(() => {
-    void rows
+    void allRows()
     tops = untrack(rowTops)
   })
   $effect(() => {
-    void rows
-    const el = nav
-    if (!el || reduceMotion.matches) return
+    void allRows()
+    void [unfolded.pinned, unfolded.working, unfolded.settled]
+    if (reduceMotion.matches) return
     const before = tops
     const after = rowTops()
-    const top = el.scrollTop - 40
-    const bottom = el.scrollTop + el.clientHeight + 40
-    for (const child of el.children) {
-      const row = child as HTMLElement
-      const key = row.dataset.row
-      const from = key === undefined ? undefined : before.get(key)
-      const to = key === undefined ? undefined : after.get(key)
-      if (from === undefined || to === undefined || from === to) continue
-      if (Math.max(from, to) < top || Math.min(from, to) > bottom) continue
-      row.animate([{ transform: `translateY(${from - to}px)` }, { transform: 'none' }], { duration: 200, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' })
+    for (const list of lists()) {
+      const top = list.scrollTop - 40
+      const bottom = list.scrollTop + list.clientHeight + 40
+      for (const child of list.children) {
+        const row = child as HTMLElement
+        const key = row.dataset.row === undefined ? undefined : `${list.dataset.list}/${row.dataset.row}`
+        const from = key === undefined ? undefined : before.get(key)
+        const to = key === undefined ? undefined : after.get(key)
+        if (from === undefined || to === undefined || from === to) continue
+        if (Math.max(from, to) < top || Math.min(from, to) > bottom) continue
+        row.animate([{ transform: `translateY(${from - to}px)` }, { transform: 'none' }], { duration: 200, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' })
+      }
     }
   })
 
@@ -186,6 +188,101 @@
 
 <svelte:window onresize={() => (app.sidebarWidth = clampWidth(app.sidebarWidth))} />
 
+<!-- A section's label, as the old group labels were, with its count and a chevron that turns as it folds. -->
+{#snippet head(id: Folding, label: string, count: number)}
+  <button
+    class="group/label mono-label flex shrink-0 items-center gap-1.5 self-start rounded-lg px-2.5 py-1.5 whitespace-nowrap transition-colors hover:text-fg"
+    aria-expanded={unfolded[id]}
+    data-row="section:{id}"
+    onclick={() => toggle(id)}
+  >
+    {label}<span class="text-fg-4 tabular-nums" data-count>{count}</span>
+    <Icon
+      name="chevronDown"
+      size={12}
+      class="-ml-0.5 transition-[transform,opacity] duration-200 {unfolded[id] ? 'opacity-0 group-hover/label:opacity-100 group-focus-visible/label:opacity-100' : '-rotate-90'}"
+    />
+  </button>
+{/snippet}
+
+{#snippet list(id: Section, items: Row[])}
+  <div class="relative -mx-1 min-h-0 overflow-y-auto px-1 pb-1 [scrollbar-width:none]" data-list={id}>
+    {#each items as row (row.key)}
+      <!-- A row that goes leaves at once, so the rows after it glide up in its place. -->
+      <div class="row mt-[3px]" data-row={row.key} data-need={row.need ?? undefined} in:fade={{ duration: 120 }}>
+        {@render item(row)}
+      </div>
+    {/each}
+  </div>
+{/snippet}
+
+{#snippet item({ entry: e, need }: Row)}
+  {@const s = e.session}
+  {@const active = (app.view?.session.id ?? '') === e.key}
+  {@const owner = app.team ? (app.bots.find((b) => b.id === e.job.ownerBotId) ?? app.primaryBot) : null}
+  <div class="chat-row group relative">
+    {#if renaming === s.id}
+      <div class="nav-item on">
+        <input
+          use:focusSelect
+          bind:value={draft}
+          aria-label="Chat title"
+          class="h-6 min-w-0 flex-1 bg-transparent text-fg outline-none"
+          onkeydown={(e) => {
+            if (e.key === 'Enter') commitRename()
+            if (e.key === 'Escape') {
+              e.preventDefault()
+              renaming = null
+            }
+          }}
+          onblur={commitRename}
+        />
+      </div>
+    {:else if confirming === s.id}
+      <div class="nav-item on !pr-1" in:fade={{ duration: 120 }}>
+        <span class="min-w-0 flex-1 truncate text-fg">Delete this job?</span>
+        <button class="btn quiet sm !h-6 !px-2" onclick={() => (confirming = null)}>Keep</button>
+        <button class="btn quiet sm !h-6 !px-2 !text-danger" onclick={() => app.removeJob(e.job.id)}>Delete</button>
+      </div>
+    {:else}
+      <button class="nav-item !gap-2 {active ? 'on' : ''}" use:tip={e.job.summary ?? null} onclick={() => openEntry(e)} ondblclick={() => startRename(s)}>
+        {#if owner}<span class="grid shrink-0 place-items-center" use:tip={owner.name} data-row-owner={owner.name}><BotAvatar bot={owner} size={16} /></span>{/if}
+        {#if e.draft}<span class="grid shrink-0 place-items-center text-blue" use:tip={'Unsent draft'}><Icon name="pen" size={13} /></span>{/if}
+        {#if e.job.parentJobId || s.forkedFromSessionId}
+          {@const parent = app.jobs.find((x) => x.id === e.job.parentJobId)}
+          <span class="grid shrink-0 place-items-center text-fg-3" use:tip={parent ? `Forked from “${parent.title}”` : 'Forked job'}><Icon name="branch" size={13} /></span>
+        {/if}
+        <span class="min-w-0 flex-1 truncate text-left">{e.title}</span>
+        {#if need === 'waiting'}
+          {@const label = app.computerWait?.kind === 'teach' ? 'A step waits for you' : NEED_LABELS.waiting}
+          <span class="size-2 shrink-0 rounded-full bg-danger" role="status" aria-label={label} use:tip={label} data-wait-badge></span>
+        {:else if need === 'paused' || need === 'failed'}
+          <span class="grid shrink-0 place-items-center {need === 'failed' ? 'text-danger' : 'text-fg-3'}" role="status" aria-label={NEED_LABELS[need]} use:tip={need === 'failed' ? 'The last reply failed' : 'Paused: waiting for you to continue'}>
+            <Icon name="alert" size={13} />
+          </span>
+        {:else if need === 'unread'}
+          <span class="size-2 shrink-0 rounded-full bg-blue" role="status" aria-label={NEED_LABELS.unread} use:tip={'New since you last looked'} data-unread-badge></span>
+        {/if}
+      </button>
+      <!-- Over the title rather than beside it, so the title runs to the row's edge; it fades out under the actions. -->
+      <div class="acts pointer-events-none absolute top-1 right-1 flex rounded-r-lg pl-4 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100 {active ? 'on' : ''}">
+        <button class="icon-btn size-[26px] !rounded-lg" use:tip={s.pinnedAt != null ? 'Unpin job' : 'Pin job'} onclick={() => app.pin(s.id, s.pinnedAt == null)}>
+          <Icon name="pin" size={14} class={s.pinnedAt != null ? '' : 'rotate-45'} />
+        </button>
+        <button
+          class="icon-btn size-[26px] !rounded-lg"
+          use:tip={e.job.status === 'open' ? 'Mark finished' : 'Reopen'}
+          onclick={() => app.setJobStatus(e.job.id, e.job.status === 'open' ? 'done' : 'open')}
+        >
+          <Icon name={e.job.status === 'open' ? 'check' : 'undo'} size={14} />
+        </button>
+        <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Rename'} onclick={() => startRename(s)}><Icon name="edit" size={14} /></button>
+        <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Delete'} onclick={() => (confirming = s.id)}><Icon name="trash" size={14} /></button>
+      </div>
+    {/if}
+  </div>
+{/snippet}
+
 <!-- One spot for the sidebar toggle, open or closed, so a second click lands on it: in the app bar,
      after a Mac's traffic lights. Nothing marked app-drag may come after it over the same spot, or
      the window takes the click for a drag. -->
@@ -215,6 +312,7 @@
 </div>
 
 <aside
+  bind:this={side}
   class="side relative flex h-full shrink-0 flex-col overflow-hidden bg-side {resizing ? 'cursor-col-resize select-none' : 'transition-[width,opacity] duration-[350ms] ease-out'}"
   style="width: {app.sidebarOpen ? app.sidebarWidth : 0}px; opacity: {app.sidebarOpen ? 1 : 0}"
   inert={!app.sidebarOpen}
@@ -272,90 +370,37 @@
       </div>
     {/if}
 
-    <nav bind:this={nav} class="relative -mx-1 min-h-0 flex-1 overflow-y-auto px-1 pb-2 [scrollbar-width:none]">
-      {#each rows as row (row.key)}
-        <!-- A row that goes leaves at once, so the rows after it glide up in its place. -->
-        <div class="row {row.entry ? 'mt-[3px]' : 'head'}" data-row={row.key} in:fade={{ duration: 120 }}>
-          {#if !row.entry}
-            <button
-              class="group/label mono-label mt-3.5 mb-0.5 flex items-center gap-1 rounded-lg px-2.5 py-1.5 whitespace-nowrap transition-colors hover:text-fg"
-              aria-expanded={row.open}
-              onclick={() => toggleGroup(row.label)}
-            >
-              {row.label}
-              <Icon
-                name="chevronDown"
-                size={12}
-                class="transition-[transform,opacity] duration-200 {row.open
-                  ? 'opacity-0 group-hover/label:opacity-100 group-focus-visible/label:opacity-100'
-                  : '-rotate-90'}"
-              />
-            </button>
-          {:else}
-            {@const e = row.entry}
-            {@const s = e.session}
-            {@const active = (app.view?.session.id ?? '') === e.key}
-            <div class="chat-row group relative">
-              {#if s && renaming === s.id}
-                <div class="nav-item on">
-                  <input
-                    use:focusSelect
-                    bind:value={draft}
-                    aria-label="Chat title"
-                    class="h-6 min-w-0 flex-1 bg-transparent text-fg outline-none"
-                    onkeydown={(e) => {
-                      if (e.key === 'Enter') commitRename()
-                      if (e.key === 'Escape') {
-                        e.preventDefault()
-                        renaming = null
-                      }
-                    }}
-                    onblur={commitRename}
-                  />
-                </div>
-              {:else if s && confirming === s.id}
-                <div class="nav-item on !pr-1" in:fade={{ duration: 120 }}>
-                  <span class="min-w-0 flex-1 truncate text-fg">Delete this job?</span>
-                  <button class="btn quiet sm !h-6 !px-2" onclick={() => (confirming = null)}>Keep</button>
-                  <button class="btn quiet sm !h-6 !px-2 !text-danger" onclick={() => app.removeJob(e.job.id)}>Delete</button>
-                </div>
-              {:else}
-                <button class="nav-item !gap-2 {active ? 'on' : ''}" use:tip={e.job.summary ?? null} onclick={() => openEntry(e)} ondblclick={() => s && startRename(s)}>
-                  {#if e.draft}<span class="grid shrink-0 place-items-center text-blue" use:tip={'Unsent draft'}><Icon name="pen" size={13} /></span>{/if}
-                  {#if e.job.parentJobId || s?.forkedFromSessionId}
-                    {@const parent = app.jobs.find((x) => x.id === e.job.parentJobId)}
-                    <span class="grid shrink-0 place-items-center text-fg-3" use:tip={parent ? `Forked from “${parent.title}”` : 'Forked job'}><Icon name="branch" size={13} /></span>
-                  {/if}
-                  <span class="min-w-0 flex-1 truncate text-left {s ? '' : 'italic'}">{s ? e.title : draftTitle(app.draftText(''))}</span>
-                  {#if waitJob === e.job.id}<span class="size-2 shrink-0 rounded-full bg-danger" role="status" aria-label="Needs your OK" use:tip={'Needs your OK'} data-wait-badge></span>{/if}
-                </button>
-                <!-- Over the title rather than beside it, so the title runs to the row's edge; it fades out under the actions. -->
-                <div class="acts pointer-events-none absolute top-1 right-1 flex rounded-r-lg pl-4 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100 {active ? 'on' : ''}">
-                  {#if s}
-                    <button class="icon-btn size-[26px] !rounded-lg" use:tip={s.pinnedAt != null ? 'Unpin job' : 'Pin job'} onclick={() => app.pin(s.id, s.pinnedAt == null)}>
-                      <Icon name="pin" size={14} class={s.pinnedAt != null ? '' : 'rotate-45'} />
-                    </button>
-                    <button
-                      class="icon-btn size-[26px] !rounded-lg"
-                      use:tip={e.job.status === 'open' ? 'Mark finished' : 'Reopen'}
-                      onclick={() => app.setJobStatus(e.job.id, e.job.status === 'open' ? 'done' : 'open')}
-                    >
-                      <Icon name={e.job.status === 'open' ? 'check' : 'undo'} size={14} />
-                    </button>
-                    <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Rename'} onclick={() => startRename(s)}><Icon name="edit" size={14} /></button>
-                    <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Delete'} onclick={() => (confirming = s.id)}><Icon name="trash" size={14} /></button>
-                  {:else}
-                    <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Discard draft'} onclick={() => app.discardDraft('')}><Icon name="trash" size={14} /></button>
-                  {/if}
-                </div>
-              {/if}
-            </div>
-          {/if}
-        </div>
-      {:else}
+    {#if pinnedRows.length}
+      <div class="section mt-3 max-h-[40%]" data-section="pinned">
+        {@render head('pinned', 'Pinned', pinnedRows.length)}
+        {#if unfolded.pinned}{@render list('pinned', pinnedRows)}{/if}
+      </div>
+    {/if}
+
+    <!-- The jobs that need you: no label, and all the room the others leave. -->
+    <div class="relative -mx-1 mt-2 flex min-h-0 flex-1 flex-col px-1" data-section="main">
+      {#if all.length === 0}
         <p class="px-2.5 py-6 text-[13px] text-fg-3" in:fade>Your jobs will show up here. Tell {app.primaryBot?.name ?? 'Tomo'} what you're working on.</p>
-      {/each}
-    </nav>
+      {:else if mainRows.length === 0}
+        <p class="px-2.5 py-2 text-[13px] text-fg-4" data-nothing-needs-you in:fade={{ duration: 120 }}>Nothing needs you</p>
+      {:else}
+        {@render list('main', mainRows)}
+      {/if}
+    </div>
+
+    <!-- At the foot, above the limit card; open, each grows upward and scrolls in itself. -->
+    {#if workingRows.length}
+      <div class="section mt-1 {unfolded.working ? 'max-h-[45%]' : ''}" data-section="working" in:fade={{ duration: 120 }}>
+        {@render head('working', 'Working', workingRows.length)}
+        {#if unfolded.working}{@render list('working', workingRows)}{/if}
+      </div>
+    {/if}
+    {#if settledRows.length}
+      <div class="section mt-1 mb-2 {unfolded.settled ? 'max-h-[45%]' : ''}" data-section="settled">
+        {@render head('settled', 'Settled', settledRows.length)}
+        {#if unfolded.settled}{@render list('settled', settledRows)}{/if}
+      </div>
+    {/if}
 
     <UsageMeter />
     <UpdateButton />
@@ -402,8 +447,12 @@
     contain-intrinsic-block-size: auto 34px;
     overflow-clip-margin: 6px;
   }
-  .row.head {
-    contain-intrinsic-block-size: auto 40px;
+  /* A section folds to its label; open, it takes what its max-height allows and its list scrolls. */
+  .section {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    min-height: 0;
   }
   .nav-item {
     display: flex;
