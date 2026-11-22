@@ -286,7 +286,7 @@
 <!-- One spot for the sidebar toggle, open or closed, so a second click lands on it: in the app bar,
      after a Mac's traffic lights. Nothing marked app-drag may come after it over the same spot, or
      the window takes the click for a drag. -->
-<div class="app-no-drag fixed top-0.5 z-[45] flex gap-0.5" style="left: calc(var(--bar-left) + 10px)">
+<div class="app-no-drag bar-controls fixed top-0.5 z-[45] flex gap-0.5" style="left: calc(var(--bar-left) + 10px)">
   <button
     class="icon-btn size-8"
     data-sidebar-toggle

@@ -210,6 +210,10 @@ body {
 .app-no-drag {
   -webkit-app-region: no-drag;
 }
+/* The app bar's buttons sit 2px from the window's edge, which would cut a ring drawn outside them. */
+.bar-controls :focus-visible {
+  outline-offset: -2px;
+}
 
 ::selection {
   background: var(--blue-wash);
