@@ -1,8 +1,9 @@
 <script lang="ts">
   // The job chip above the composer: which job the conversation is on, and the one click that
   // changes it. Talking to Tomo, it shows the job the last message went to (Tomo picks each time);
-  // picking another job either moves that last message there (a wrong guess put right, while the
-  // composer is empty) or sends the next message there. In a job's thread it switches jobs.
+  // picking a job (or New topic) sends the next message there. Moving the last message to another
+  // job (a wrong guess put right) sends it again there, so it is an item of its own, never what a
+  // plain pick does. In a job's thread it switches jobs.
   import { tick } from 'svelte'
   import type { Job } from '@shared/types'
   import { tip } from '@/lib/tooltip'
@@ -21,8 +22,10 @@
   const job = $derived(app.currentJob)
   const target = $derived(app.target)
   const lastTurn = $derived(primary ? app.view?.path.findLast((n) => n.message.role === 'user')?.message : undefined)
-  /** Picking moves the last message: talking to Tomo, nothing typed yet, and nothing picked for the next one. */
-  const moving = $derived(primary && target === 'auto' && !!lastTurn && !app.hasDraft(app.view?.session.id ?? ''))
+  /** The last message can be moved: talking to Tomo, and nothing picked for the next one. */
+  const canMove = $derived(primary && target === 'auto' && !!lastTurn && !!job)
+  /** The menu is choosing where the last message moves to, after its Move item was picked. */
+  let moving = $state(false)
   const show = $derived(!primary || app.jobs.length > 0 || target !== 'auto')
 
   const label = $derived(target === 'new' && primary ? 'New topic' : (job?.title ?? (primary ? 'Tomo picks the job' : '')))
@@ -60,15 +63,30 @@
     }
   })
 
-  const sections = $derived<Array<[string, Job[]]>>([
-    ['Open', choices.open],
-    ['Finished', choices.done]
-  ])
+  // Moving, the job the last message is already in isn't offered.
+  const sections = $derived<Array<[string, Job[]]>>(
+    (
+      [
+        ['Open', choices.open],
+        ['Finished', choices.done]
+      ] as Array<[string, Job[]]>
+    ).map(([h, list]) => [h, moving ? list.filter((j) => j.id !== job?.id) : list])
+  )
+
+  const focusFirst = async () => {
+    await tick()
+    menu?.querySelector<HTMLButtonElement>('button')?.focus()
+  }
 
   const toggle = async () => {
     open = !open
-    await tick()
-    menu?.querySelector<HTMLButtonElement>('button')?.focus()
+    moving = false
+    await focusFirst()
+  }
+
+  const startMove = async () => {
+    moving = true
+    await focusFirst()
   }
 
   const pick = async (choice: Job | 'new' | 'auto') => {
@@ -81,7 +99,7 @@
     if (choice === 'auto') return void (app.target = 'auto')
     const to = choice === 'new' ? ('new' as const) : { jobId: choice.id }
     if (moving) {
-      // Already there: nothing to move.
+      moving = false
       if (choice !== 'new' && choice.id === job?.id) return
       await app.moveLast(to)
     } else app.target = to
@@ -141,6 +159,9 @@
         {onkeydown}
       >
         <div class="mono-label px-2.5 pt-2.5 pb-1.5">{!primary ? 'Switch to' : moving ? 'Move your last message to' : 'Send your next message to'}</div>
+        {#if moving}
+          <p class="px-2.5 pb-1.5 text-[12px] text-fg-3">Tomo answers it again there, and drops it from “{job?.title}”.</p>
+        {/if}
         {#if primary && target !== 'auto'}
           <button type="button" role="menuitem" class="item" onclick={() => pick('auto')}>
             <Icon name="sparkle" size={15} class="text-fg-3" /><span class="min-w-0 flex-1 truncate">Let Tomo pick</span>
@@ -159,11 +180,21 @@
                   <span class="block truncate text-[13.5px] font-medium text-fg">{j.title}</span>
                   {#if j.summary}<span class="block truncate text-[12px] text-fg-3">{j.summary}</span>{/if}
                 </span>
-                <Icon name="check" size={15} class={isOn(j) ? 'text-fg' : 'opacity-0'} />
+                <Icon name="check" size={15} class={isOn(j) && !moving ? 'text-fg' : 'opacity-0'} />
               </button>
             {/each}
           {/if}
         {/each}
+        {#if canMove && !moving}
+          <div class="mx-2.5 my-1 border-t border-line"></div>
+          <button type="button" role="menuitem" class="item" data-move-last onclick={startMove}>
+            <Icon name="undo" size={15} class="text-fg-3" />
+            <span class="min-w-0 flex-1">
+              <span class="block truncate">Wrong job? Move your last message</span>
+              <span class="block truncate text-[12px] text-fg-3">Tomo answers it again in the job you pick</span>
+            </span>
+          </button>
+        {/if}
       </div>
     {/if}
   </div>

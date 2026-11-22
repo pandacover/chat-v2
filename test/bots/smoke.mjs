@@ -113,11 +113,28 @@ try {
   ok((await sidebarRows()).some((r) => r.includes('Trip to Lisbon')), 'the new job is in the sidebar')
   await capture('2-routed')
 
-  // A wrong guess, put right with the chip: the last message moves to the printer job.
-  await chip.click()
+  // Changing the topic with nothing typed sends nothing again: it only picks where the next message goes.
   const menu = page.locator('[data-job-chip] [role="menu"]')
+  const turns = async () => (await page.locator('[data-reply-scope]').count())
+  const before = await turns()
+  await chip.click()
   await menu.waitFor()
-  ok((await menu.innerText()).toLowerCase().includes('move your last message to'), 'with nothing typed, the chip moves the last message')
+  ok((await menu.innerText()).toLowerCase().includes('send your next message to'), 'with nothing typed, the chip picks where the next message goes')
+  await menu.getByRole('menuitem', { name: /^New topic/ }).click()
+  ok((await chip.innerText()).includes('New topic'), 'the chip shows New topic')
+  await chip.click()
+  await menu.getByRole('menuitem', { name: /Printer keeps jamming/ }).click()
+  ok((await chip.innerText()).includes('Printer keeps jamming'), 'and then the picked job')
+  await sleep(800)
+  ok((await turns()) === before && (await authors()).at(-1).includes('Trip to Lisbon'), 'picking a topic sent the last message nowhere')
+  ok((await sidebarRows()).some((r) => r.includes('Trip to Lisbon')), 'and its job is still there')
+  await page.getByRole('button', { name: 'Let Tomo pick' }).click()
+
+  // A wrong guess, put right with the chip's own Move item: the last message moves to the printer job.
+  await chip.click()
+  await menu.locator('[data-move-last]').click()
+  ok((await menu.innerText()).toLowerCase().includes('move your last message to'), 'the Move item asks where the last message goes')
+  ok((await menu.getByRole('menuitem', { name: /Trip to Lisbon/ }).count()) === 0, 'without the job it is already in')
   await capture('3-chip-menu')
   await menu.getByRole('menuitem', { name: /Printer keeps jamming/ }).click()
   await until(async () => (await authors()).at(-1)?.includes('Printer keeps jamming'), 'the moved turn is answered in the printer job')
