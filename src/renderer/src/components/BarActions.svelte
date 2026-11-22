@@ -1,9 +1,11 @@
 <script lang="ts">
   // The app bar's right end: what acts on the open conversation and the window, in the same row as
   // the sidebar toggle at the left. The job's own instructions (in a job's thread), keeping the
-  // window on top, the browser, and the side panel's toggle, which sits at the end, mirroring the
-  // sidebar's. On Windows the row stops short of the window's buttons (--bar-right); a Mac has its
-  // traffic lights at the left, so it runs to the edge.
+  // window on top, the side panel's toggle, and the browser. The row is anchored at its right end,
+  // so the buttons that come and go (the instructions, the panel toggle) sit left of the browser:
+  // one coming in moves only what is left of it, never the browser button just clicked. On Windows
+  // the row stops short of the window's buttons (--bar-right); a Mac has its traffic lights at the
+  // left, so it runs to the edge.
   import { tip } from '@/lib/tooltip'
   import { dimsBar } from '@/lib/theme.svelte'
   import { fade, pop } from '@/lib/motion'
@@ -50,16 +52,8 @@
       <Icon name="pin" size={16} class="transition-transform duration-200 {onTop ? '' : 'rotate-45'}" />
     </button>
   {/if}
-  <button
-    class="icon-btn relative size-8 {app.browserOpen ? '!text-fg' : ''}"
-    use:tip={app.browserOpen ? 'Hide browser' : 'Open browser'}
-    onclick={() => (app.browserOpen && app.activeTab === 'browser' ? app.closeBrowser() : app.openBrowser())}
-  >
-    <Icon name="globe" size={16} />
-    {#if app.control.active}<span class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-blue"></span>{/if}
-  </button>
   {#if app.panelToggle && app.page === 'chat'}
-    <!-- The sidebar toggle mirrored, and the panel's close control too (Esc closes an artifact). -->
+    <!-- The panel's toggle, and its close control too (Esc closes an artifact). -->
     <button
       class="icon-btn size-8 {app.panelOpen ? '!text-fg' : ''}"
       aria-pressed={app.panelOpen}
@@ -71,6 +65,15 @@
       <Icon name="sidebar" size={16} class="-scale-x-100" />
     </button>
   {/if}
+  <!-- Last, so nothing moves under the pointer when a click on it opens the panel and its toggle comes in. -->
+  <button
+    class="icon-btn relative size-8 {app.browserOpen ? '!text-fg' : ''}"
+    use:tip={app.browserOpen ? 'Hide browser' : 'Open browser'}
+    onclick={() => (app.browserOpen && app.activeTab === 'browser' ? app.closeBrowser() : app.openBrowser())}
+  >
+    <Icon name="globe" size={16} />
+    {#if app.control.active}<span class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-blue"></span>{/if}
+  </button>
 </div>
 
 {#if promptOpen}
