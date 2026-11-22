@@ -2,12 +2,15 @@
   import { tip } from '@/lib/tooltip'
   import { escapeHtml, highlighter } from '@/lib/highlight.svelte'
   import { fade } from '@/lib/motion'
-  import { app } from '@/lib/store.svelte'
+  import { app, type OpenArtifact } from '@/lib/store.svelte'
   import type { Snippet } from 'svelte'
   import Icon from './Icon.svelte'
 
-  /** The panel's tabs (App.svelte), at the start of the header. */
-  let { tabs }: { tabs: Snippet } = $props()
+  /**
+   * One artifact tab of the panel: `open` is the artifact and the version it shows, `active` whether
+   * its tab is the one on show. The panel's tabs (App.svelte) start the header.
+   */
+  let { tabs, open, active }: { tabs: Snippet; open: OpenArtifact; active: boolean } = $props()
 
   let tab = $state<'preview' | 'code'>('preview')
   let url = $state<string | null>(null)
@@ -15,9 +18,9 @@
   let loading = $state(true)
   let copied = $state(false)
 
-  const versions = $derived(app.artifactVersions)
+  const versions = $derived(app.versionsOf(open.identifier))
   // Off-branch selection (e.g. after switching branches) falls back to the newest version.
-  const found = $derived(versions.findIndex((v) => v.messageId === app.artifact?.messageId))
+  const found = $derived(versions.findIndex((v) => v.messageId === open.messageId))
   const index = $derived(found === -1 ? versions.length - 1 : found)
   const current = $derived(versions[index])
 
@@ -41,7 +44,7 @@
 
   const select = (i: number) => {
     const v = versions[i]
-    if (v && app.artifact) app.artifact = { identifier: app.artifact.identifier, messageId: v.messageId }
+    if (v) app.pickVersion(open.identifier, v.messageId)
   }
 
   const download = () => {
@@ -65,16 +68,16 @@
 <svelte:window
   onkeydown={(e) => {
     // Yield to dialogs and to any handler that already used the key.
-    if (e.key !== 'Escape' || e.defaultPrevented || app.page !== 'chat' || app.activeTab !== 'artifact' || document.querySelector('[aria-modal="true"]')) return
+    if (e.key !== 'Escape' || e.defaultPrevented || app.page !== 'chat' || !active || !app.panelOpen || document.querySelector('[aria-modal="true"]')) return
     e.preventDefault()
-    app.artifact = null
+    app.closeTab(`artifact:${open.identifier}`)
   }}
 />
 
 {#if current}
   <section class="flex h-full min-w-0 flex-col" aria-label="Artifact">
-    <!-- Room at the right for the panel toggle, which is also the close control (Esc closes it too). -->
-    <header class="flex h-[52px] shrink-0 items-center gap-1 border-b border-line pr-[46px] pl-2.5">
+    <!-- Its tab's close button closes it (Esc does too); the app bar's panel toggle hides the panel. -->
+    <header class="flex h-[52px] shrink-0 items-center gap-1 border-b border-line pr-2.5 pl-2.5">
       {@render tabs()}
       {#if versions.length > 1}
         <div class="flex shrink-0 items-center font-label text-[11.5px] text-fg-3 tabular-nums">

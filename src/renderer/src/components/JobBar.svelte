@@ -42,7 +42,7 @@
 />
 
 {#if detail && job}
-  <div class="relative mx-auto flex w-full max-w-[760px] shrink-0 items-center gap-2 px-8 pb-2" bind:this={root} data-job-bar>
+  <div class="relative mx-auto flex w-full max-w-[760px] shrink-0 items-center gap-2 px-8 pt-3 pb-2" bind:this={root} data-job-bar>
     <div class="flex min-w-0 items-center gap-1" aria-label="Bots on this job">
       {#each detail.bots as b (b.botId)}
         {@const bot = app.bots.find((x) => x.id === b.botId)}

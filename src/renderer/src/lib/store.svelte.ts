@@ -34,6 +34,18 @@ export interface OpenArtifact {
   messageId: string
 }
 
+/** A tab of the right panel: the built-in browser, or an artifact of the open chat at a version. */
+export type PanelTab = { kind: 'browser' } | ({ kind: 'artifact' } & OpenArtifact)
+export const tabKey = (t: PanelTab) => (t.kind === 'browser' ? 'browser' : `artifact:${t.identifier}`)
+
+/** An artifact of the open chat, with every complete version of it along the visible branch. */
+export interface ChatArtifact {
+  identifier: string
+  /** Its newest title. */
+  title: string
+  versions: Array<{ messageId: string; block: ArtifactBlock }>
+}
+
 /** Unsent composer text, keyed by chat id ('' is the new chat). `at` orders drafts in the sidebar. */
 export interface Draft {
   text: string
@@ -96,7 +108,6 @@ class AppState {
     return this.jobByThread.get(view.session.id) ?? this.jobs.find((j) => j.id === view.session.jobId) ?? null
   })
   settings = $state<SettingsView | null>(null)
-  artifact = $state<OpenArtifact | null>(null)
   /** Settings is a modal over the chat; the chat stays mounted so drafts and scroll survive. */
   page = $state<'chat' | 'settings'>('chat')
 
@@ -136,9 +147,13 @@ class AppState {
   /** Learned facts, loaded when Settings shows them. */
   memory = $state<MemoryView | null>(null)
 
-  // The right panel holds artifacts and the built-in browser as tabs.
-  browserOpen = $state(false)
-  panelTab = $state<'artifact' | 'browser'>('artifact')
+  // The right panel: tabs, each the built-in browser (there is one) or an artifact of the open chat,
+  // and whether it shows. Its toggle at the right of the app bar hides it with its tabs kept; the
+  // + in its tab strip opens the browser or any of the chat's artifacts.
+  panelTabs = $state<PanelTab[]>([])
+  /** The tab picked, by its key (tabKey). */
+  panelActive = $state<string | null>(null)
+  panelShown = $state(false)
   browser = $state({ url: '', title: '', loading: false, canBack: false, canForward: false })
   /** Set while the model is driving the browser. */
   control = $state({ active: false, label: '' })
@@ -178,26 +193,45 @@ class AppState {
   // re-scan (and for artifacts, re-parse) the whole conversation on every streamed line.
   streaming = $derived(this.view?.path.some((n) => n.message.status === 'streaming') ?? false)
 
-  private lastVersions: Array<{ messageId: string; block: ArtifactBlock }> = []
-  /** Every complete version of the open artifact along the visible branch. */
-  artifactVersions = $derived.by(() => {
-    const open = this.artifact
-    if (!open || !this.view) return (this.lastVersions = [])
-    const out: Array<{ messageId: string; block: ArtifactBlock }> = []
-    for (const { message } of this.view.path) {
-      if (message.role !== 'assistant') continue
+  private lastArtifacts: ChatArtifact[] = []
+  /**
+   * The artifacts along the open chat's visible branch, in the order each first appeared, each with
+   * its complete versions, oldest first: what the panel's + offers, and what an artifact tab shows.
+   */
+  chatArtifacts = $derived.by((): ChatArtifact[] => {
+    const byId = new Map<string, ChatArtifact>()
+    for (const { message } of this.view?.path ?? []) {
+      if (message.role !== 'assistant' || !/<artifact/i.test(message.content)) continue
       for (const b of parseContentCached(message.content, message.id)) {
-        if (b.type === 'artifact' && b.complete && b.identifier === open.identifier) out.push({ messageId: message.id, block: b })
+        if (b.type !== 'artifact' || !b.complete) continue
+        const a = byId.get(b.identifier) ?? { identifier: b.identifier, title: b.title, versions: [] }
+        a.title = b.title
+        a.versions.push({ messageId: message.id, block: b })
+        byId.set(b.identifier, a)
       }
     }
-    // The same versions as before (a streamed line that changed none of them): the same array, so
+    const out = [...byId.values()]
+    // The same artifacts as before (a streamed line that changed none of them): the same array, so
     // nothing that shows them updates.
-    const last = this.lastVersions
+    const last = this.lastArtifacts
     const same =
       out.length === last.length &&
-      out.every((v, i) => v.messageId === last[i]!.messageId && v.block.content === last[i]!.block.content && v.block.title === last[i]!.block.title)
-    return same ? last : (this.lastVersions = out)
+      out.every((a, i) => {
+        const b = last[i]!
+        return (
+          a.identifier === b.identifier &&
+          a.title === b.title &&
+          a.versions.length === b.versions.length &&
+          a.versions.every((v, j) => v.messageId === b.versions[j]!.messageId && v.block.content === b.versions[j]!.block.content)
+        )
+      })
+    return same ? last : (this.lastArtifacts = out)
   })
+
+  /** An artifact's complete versions along the open chat's visible branch, oldest first. */
+  versionsOf(identifier: string): ChatArtifact['versions'] {
+    return this.chatArtifacts.find((a) => a.identifier === identifier)?.versions ?? []
+  }
 
   /** The open chat's settings, or what has been picked for the new chat. */
   chat = $derived({
@@ -209,65 +243,62 @@ class AppState {
     computerEnabled: this.currentBot?.modules.includes('computer') ?? false
   })
 
-  hasArtifact = $derived(this.artifact !== null && this.artifactVersions.length > 0)
-
-  panelOpen = $derived(this.browserOpen || this.hasArtifact)
-
-  /** The visible tab, falling back to whichever one exists. */
-  activeTab = $derived<'artifact' | 'browser'>(
-    this.panelTab === 'browser' && this.browserOpen ? 'browser' : this.hasArtifact ? 'artifact' : 'browser'
+  /** The panel's tabs that have something to show: an artifact not on this branch any more waits. */
+  shownTabs = $derived(this.panelTabs.filter((t) => t.kind === 'browser' || this.versionsOf(t.identifier).length > 0))
+  /** The tab on show: the one picked, or the first there is. */
+  activeTab = $derived<PanelTab | null>(this.shownTabs.find((t) => tabKey(t) === this.panelActive) ?? this.shownTabs[0] ?? null)
+  browserOpen = $derived(this.panelTabs.some((t) => t.kind === 'browser'))
+  panelOpen = $derived(this.panelShown)
+  /** The artifact on show in the panel, and which version: its card in the chat shows it open. */
+  artifact = $derived<OpenArtifact | null>(
+    this.panelShown && this.activeTab?.kind === 'artifact' ? { identifier: this.activeTab.identifier, messageId: this.activeTab.messageId } : null
   )
 
-  /** The newest finished artifact in the open chat's visible branch, if any. */
-  latestArtifact = $derived.by<OpenArtifact | null>(() => {
-    const path = this.view?.path ?? []
-    for (let i = path.length - 1; i >= 0; i--) {
-      const m = path[i]!.message
-      if (m.role !== 'assistant' || !/<artifact/i.test(m.content)) continue
-      const found = parseContentCached(m.content, m.id).findLast((b) => b.type === 'artifact' && b.complete)
-      if (found && found.type === 'artifact') return { identifier: found.identifier, messageId: m.id }
-    }
-    return null
-  })
-
-  /** What the panel showed when its toggle closed it, so the toggle can bring it back. */
-  private closedPanel = $state<{ sessionId: string; artifact: OpenArtifact | null; browser: boolean; tab: 'artifact' | 'browser' } | null>(null)
-
-  /** The panel toggle (top right) shows while the panel is open, or there's something to open. */
-  panelToggle = $derived(
-    this.panelOpen || this.latestArtifact !== null || (this.closedPanel !== null && this.closedPanel.sessionId === (this.view?.session.id ?? ''))
-  )
-
-  /** The panel toggle: closes the panel (artifact and browser), or brings back what it showed. */
-  togglePanel() {
-    const id = this.view?.session.id ?? ''
-    if (this.panelOpen) {
-      this.closedPanel = { sessionId: id, artifact: this.hasArtifact ? this.artifact : null, browser: this.browserOpen, tab: this.activeTab }
-      this.artifact = null
-      this.browserOpen = false
-      return
-    }
-    const last = this.closedPanel?.sessionId === id ? this.closedPanel : null
-    this.closedPanel = null
-    if (last?.browser) this.browserOpen = true
-    const artifact = last?.artifact ?? (last?.browser ? null : this.latestArtifact)
-    if (artifact) this.artifact = artifact
-    this.panelTab = last?.tab ?? 'artifact'
+  /** Opens a tab (or goes to it, as given), on show in the panel. */
+  private openTab(tab: PanelTab) {
+    const key = tabKey(tab)
+    const at = this.panelTabs.findIndex((t) => tabKey(t) === key)
+    if (at === -1) this.panelTabs.push(tab)
+    else this.panelTabs[at] = tab
+    this.panelActive = key
+    this.panelShown = true
   }
 
+  /** Opens an artifact of the open chat in a tab of its own, at the given version. */
   showArtifact(artifact: OpenArtifact) {
-    this.artifact = artifact
-    this.panelTab = 'artifact'
+    this.openTab({ kind: 'artifact', identifier: artifact.identifier, messageId: artifact.messageId })
+  }
+
+  /** Which version of an open artifact its tab shows. */
+  pickVersion(identifier: string, messageId: string) {
+    const tab = this.panelTabs.find((t) => t.kind === 'artifact' && t.identifier === identifier)
+    if (tab?.kind === 'artifact') tab.messageId = messageId
   }
 
   openBrowser() {
-    this.browserOpen = true
-    this.panelTab = 'browser'
+    this.openTab({ kind: 'browser' })
   }
 
   closeBrowser() {
-    this.browserOpen = false
-    this.panelTab = 'artifact'
+    this.closeTab('browser')
+  }
+
+  selectTab(key: string) {
+    this.panelActive = key
+  }
+
+  /** Closes a tab; the one next to it shows, and with none left the panel goes. */
+  closeTab(key: string) {
+    const shown = this.shownTabs.map(tabKey)
+    const at = shown.indexOf(key)
+    this.panelTabs = this.panelTabs.filter((t) => tabKey(t) !== key)
+    if (this.panelActive === key || this.panelActive === null) this.panelActive = shown[at + 1] ?? shown[at - 1] ?? null
+    if (this.panelTabs.length === 0) this.panelShown = false
+  }
+
+  /** The bar's panel toggle: shows or hides the panel, its tabs kept. Empty, it offers what to open. */
+  togglePanel() {
+    this.panelShown = !this.panelShown
   }
 
   addDraftAttachment(attachment: Attachment) {
@@ -544,7 +575,11 @@ class AppState {
   /** Installs a fresh view and catches up any replies that are still streaming. */
   setView(view: SessionView) {
     if (view.session.kind === 'primary') this.primaryId = view.session.id
-    if (this.view?.session.id !== view.session.id) this.artifact = null
+    // Another chat: its artifacts aren't this one's. The browser stays; with nothing left the panel goes.
+    if (this.view?.session.id !== view.session.id) {
+      this.panelTabs = this.panelTabs.filter((t) => t.kind === 'browser')
+      if (this.panelTabs.length === 0) this.panelShown = false
+    }
     this.view = view
     // A job's thread, or a bot's own thread on it: the job bar shows its bots and notes.
     const jobId = view.session.kind === 'primary' ? null : view.session.jobId
