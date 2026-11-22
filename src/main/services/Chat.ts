@@ -12,8 +12,9 @@ import { MEMORY_INSTRUCTIONS, askedQuestion, memoryPrompt, memorySource, parseMe
 import { playbookBlock } from '../reconciler'
 import { browserModule } from '../agent/browser'
 import { Agent, type Auth, type PromptBlock, type ReplyHooks } from '../agent/driver'
-import { smallModelJudge } from '../agent/judge'
-import { type WatchDeps, makeWatch, pauseNote } from '../agent/watch'
+import { type PrimaryContext, judgeModel, primaryJudge, smallModelJudge } from '../agent/judge'
+import { type ProgressNote, type WatchDeps, makeWatch, pauseNote } from '../agent/watch'
+import { CHECKPOINT_PREFIX } from './stuckStore'
 import { SMALL_MODEL } from '@shared/models'
 import { recallModule } from '../agent/recall'
 import { jobNotesBlock, noteModule } from '../agent/notes'
@@ -333,18 +334,56 @@ export class Chat extends Context.Service<
        * it seeds the buffer so the continuation completes that line instead of
        * starting a new one.
        */
+      /** Checkpoint notes of replies that aren't on a job (the primary's own conversation): for this run only. */
+      const looseNotes = new Map<string, ProgressNote[]>()
+      /** Who judges a reply's checkpoints, and its job, as they are when the checkpoint comes. */
+      const judgeContext = (session: Session, settings: Settings): PrimaryContext | null =>
+        Effect.runSync(
+          db
+            .use((d): PrimaryContext => {
+              const primary = d.primaryBot()
+              const worker = d.botOf(session.id)
+              const job = session.jobId ? d.getJob(session.jobId) : undefined
+              return {
+                name: primary.name,
+                instructions: primary.instructions ?? settings.systemPrompt,
+                worker: worker.id === primary.id ? null : worker.name,
+                job: job ? { title: job.title, summary: job.summary } : null,
+                // The reply's own checkpoints come as its earlier notes.
+                notes: job ? d.jobNotes(job.id).filter((n) => !(n.type === 'progress' && n.title.startsWith(CHECKPOINT_PREFIX))) : []
+              }
+            })
+            .pipe(Effect.orElseSucceed(() => null))
+        )
       /**
-       * What watches a reply for being stuck (agent/watch.ts): a small model judges its checkpoints
-       * (a later phase swaps in the primary bot), and notes and pauses are kept in chat.db.
+       * What watches a reply for being stuck (agent/watch.ts): the primary bot judges its
+       * checkpoints, on its model (judge.ts's judgeModel), with the small model to fall back on;
+       * the notes go into the job's notes, and pauses are kept in chat.db.
        */
-      const watchDeps = (model: string): WatchDeps => ({
-        judge: smallModelJudge((system, prompt, signal) => Effect.runPromise(ask(model, system, prompt, '60 seconds'), { signal })),
-        notes: {
-          add: (note) => Effect.runSync(db.use((d) => d.addProgressNote(note)).pipe(Effect.ignore)),
-          recent: (sessionId, limit) => Effect.runSync(db.use((d) => d.progressNotes(sessionId, limit)).pipe(Effect.orElseSucceed(() => [])))
-        },
-        pauses: { record: (p) => Effect.runSync(db.use((d) => d.recordPause(p, Date.now())).pipe(Effect.ignore)) }
-      })
+      const watchDeps = (session: Session, settings: Settings): WatchDeps => {
+        const asked = (model: string, system: string, prompt: string, signal: AbortSignal) => Effect.runPromise(ask(model, system, prompt, '60 seconds'), { signal })
+        const small = settings.titleModel || settings.memoryModel || SMALL_MODEL
+        const primaryModel = Effect.runSync(db.use((d) => d.primaryBot().model).pipe(Effect.orElseSucceed(() => null)))
+        const jobId = session.jobId
+        return {
+          judge: primaryJudge({
+            model: judgeModel(primaryModel ?? settings.defaultModel),
+            context: () => judgeContext(session, settings),
+            ask: asked,
+            fallback: smallModelJudge((system, prompt, signal) => asked(small, system, prompt, signal))
+          }),
+          notes: jobId
+            ? {
+                add: (note) => Effect.runSync(db.use((d) => d.addProgressNote(jobId, note)).pipe(Effect.ignore)),
+                recent: (sessionId, limit) => Effect.runSync(db.use((d) => d.progressNotes(jobId, sessionId, limit)).pipe(Effect.orElseSucceed(() => [])))
+              }
+            : {
+                add: (note) => void looseNotes.set(note.sessionId, [...(looseNotes.get(note.sessionId) ?? []), note].slice(-5)),
+                recent: (sessionId, limit) => (looseNotes.get(sessionId) ?? []).slice(-limit)
+              },
+          pauses: { record: (p) => Effect.runSync(db.use((d) => d.recordPause(p, Date.now())).pipe(Effect.ignore)) }
+        }
+      }
 
       const generate = (assistant: Message, partial: string | null, carry: string | null, pausedFor: string | null = null) => {
         const buffer = makeLineBuffer()
@@ -464,7 +503,7 @@ export class Chat extends Context.Service<
                   auth,
                   watch: (control) =>
                     makeWatch(
-                      watchDeps(settings.titleModel || settings.memoryModel || SMALL_MODEL),
+                      watchDeps(session, settings),
                       { sessionId: session.id, messageId: assistant.id, task: lineage.findLast((m) => m.role === 'user')?.content ?? '' },
                       control
                     )

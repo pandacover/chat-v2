@@ -116,6 +116,9 @@ try {
 // Every pause is recorded, with whether it was resumed.
 const db = new DatabaseSync(join(data, 'chat.db'), { readOnly: true })
 const pauses = db.prepare('select signal, step, reason, resumed_at from stuck_pauses order by id').all()
+// Progress notes are job notes now: the old table was moved into them and dropped.
+const oldNotes = db.prepare(`select count(*) as n from sqlite_master where name = 'progress_notes'`).get().n
 db.close()
+ok(oldNotes === 0, 'progress notes live in job notes (the progress_notes table is gone)')
 ok(pauses.length === 2 && pauses.every((p) => p.resumed_at !== null), `both pauses are recorded and marked resumed (${pauses.map((p) => `${p.signal}@${p.step}`).join(', ')})`)
 console.log(`Stuck e2e passed. Captures in ${outDir}`)

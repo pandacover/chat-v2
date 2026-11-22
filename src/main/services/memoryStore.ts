@@ -554,6 +554,38 @@ export const makeMemoryStore = ({ all, one, run, transaction, exec }: SqlHelpers
       return { id: saved.ids[0]!, rev: saved.rev, replaced: !!existing }
     })
 
+  /**
+   * Saves a progress note a checkpoint wrote (agent/watch.ts), titled `title` (which starts with
+   * `prefix`), and hides all but the latest `keep` of the job's notes titled so, in one revision:
+   * checkpoints come every 10 or so steps, and only the latest few are worth a place in every
+   * prompt. The hidden ones stay in the history.
+   */
+  const writeCheckpointNote = (
+    jobId: string,
+    note: { title: string; text: string },
+    origin: { sessionId: string | null; note: string | null },
+    opts: { prefix: string; keep: number }
+  ): { id: number; rev: number } =>
+    transaction(() => {
+      const older = all<{ id: number }>(
+        `select id from memory_current where scope = 'job' and scope_id = ? and type = 'progress' and substr(title, 1, ?) = ? order by id desc`,
+        jobId,
+        opts.prefix.length,
+        opts.prefix
+      ).map((r) => r.id)
+      const closes = older.slice(Math.max(0, opts.keep - 1))
+      const count = one<{ n: number }>(`select count(*) as n from memory_current where scope = 'job' and scope_id = ?`, jobId)?.n ?? 0
+      if (count - closes.length >= JOB_NOTE_LIMIT) throw new Error(`This job already has ${JOB_NOTE_LIMIT} notes.`)
+      const saved = apply([{ body: note.text, type: 'progress', title: note.title, scope: 'job', scopeId: jobId }], closes, {
+        kind: 'noted',
+        writer: 'bot',
+        sessionId: origin.sessionId,
+        jobId,
+        note: origin.note
+      })
+      return { id: saved.ids[0]!, rev: saved.rev }
+    })
+
   /** A job's notes, oldest first. */
   const jobNotes = (jobId: string) => records('job', jobId)
 
@@ -708,6 +740,7 @@ export const makeMemoryStore = ({ all, one, run, transaction, exec }: SqlHelpers
     recordVersions,
     memoryHistory,
     writeNote,
+    writeCheckpointNote,
     jobNotes,
     archiveJob,
     archiveConversation,

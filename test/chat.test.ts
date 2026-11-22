@@ -264,11 +264,15 @@ describe('replies', () => {
     await t.runtime.dispose()
   })
 
-  test('a reply has no step limit: 55 different calls run to the end, judged at checkpoints', async () => {
+  test('a reply has no step limit: 55 different calls run to the end, judged at checkpoints by the primary, noted in the job', async () => {
     const t = setup(async function* (t) {
-      // The checkpoint judge (a hidden small-model call): clearly progressing.
+      // The checkpoint judge (a hidden call to the primary): clearly progressing.
       if (isAsk(t.call)) {
         yield* t.text('{"done": "Read 30 pages", "left": "30 more", "closer": "closer", "verdict": "progressing", "confidence": 0.95}')
+        return void (yield t.result())
+      }
+      if (promptText(t.call).includes('What did you read?')) {
+        yield* t.text('Pages.')
         return void (yield t.result())
       }
       for (let i = 0; i < 55; i++) {
@@ -279,23 +283,77 @@ describe('replies', () => {
       yield* t.text('Done after 55 calls.')
       yield t.result({ turns: 56 })
     })
-    const s = await t.run(newSession)
+    // A job's thread, as every chat is; the primary on Opus, with instructions of its own.
+    const { job, thread: s } = await t.run(
+      Db.use((db) =>
+        db.use((d) => {
+          d.updateBot(d.primaryBot().id, { model: 'claude-opus-5-5', instructions: 'Call me Sam.' })
+          return d.createJob({ title: 'Read the report', botId: d.primaryBot().id })
+        })
+      )
+    )
+    await t.run(Db.use((db) => db.use((d) => d.writeNote(job.id, { kind: 'decision', text: 'Skip the appendix.', title: 'Scope' }, { sessionId: s.id }))))
     await t.run(sendTo(s, s.rootId, 'Do a lot'))
     await t.waitForDone(1)
     expect(t.replies()[0]!.options.maxTurns).toBeUndefined()
     const view = await t.run(Chat.use((c) => c.view(s.id)))
+    const replyId = view.path[1]!.message.id
     expect(view.path[1]!.message).toMatchObject({ status: 'complete', content: 'Done after 55 calls.' })
     // Checkpoints at 30, then 15 later while clearly progressing: 45 (the next, 60, is past the end).
-    const notes = await t.run(Db.use((db) => db.use((d) => d.progressNotes(s.id, 10))))
-    expect(notes.map((n) => [n.step, n.verdict, n.done])).toEqual([
-      [30, 'progressing', 'Read 30 pages'],
-      [45, 'progressing', 'Read 30 pages']
+    const notes = await t.run(Db.use((db) => db.use((d) => d.progressNotes(job.id, s.id, 10))))
+    expect(notes.map((n) => [n.step, n.verdict, n.done, n.messageId])).toEqual([
+      [30, 'progressing', 'Read 30 pages', replyId],
+      [45, 'progressing', 'Read 30 pages', replyId]
+    ])
+    // In the job's notes, for the bots on it and the primary.
+    const jobNotes = await t.run(Db.use((db) => db.use((d) => d.jobNotes(job.id))))
+    expect(jobNotes.map((n) => [n.type, n.title])).toEqual([
+      ['decision', 'Scope'],
+      ['progress', 'Checkpoint at step 30'],
+      ['progress', 'Checkpoint at step 45']
     ])
     const judged = t.calls.filter(isAsk)
     expect(judged).toHaveLength(2)
-    expect(systemOf(judged[0]!)).toContain('You check on an AI assistant')
+    // The primary judges, as itself, on Sonnet rather than its Opus.
+    expect(judged[0]!.options.model).toBe('claude-sonnet-5-5')
+    expect(systemOf(judged[0]!)).toContain("You are Tomo, the user's primary assistant")
+    expect(systemOf(judged[0]!)).toContain('<instructions>\nCall me Sam.\n</instructions>')
+    expect(promptText(judged[0]!)).toContain('<job>\nTitle: Read the report')
+    expect(promptText(judged[0]!)).toContain('Scope: Skip the appendix.')
     expect(promptText(judged[0]!)).toContain('<task>\nDo a lot\n</task>')
+    // The reply's own checkpoints come as its earlier notes, not again in the job's.
     expect(promptText(judged[1]!)).toContain('- At step 30: done: Read 30 pages')
+    expect(promptText(judged[1]!)).not.toContain('Checkpoint at step 30')
+    // The next reply on the job has them in its notes.
+    await t.run(sendTo(s, replyId, 'What did you read?'))
+    await t.waitForDone(2)
+    expect(systemOf(t.replies()[1]!)).toContain('Checkpoint at step 45: Done: Read 30 pages | Left: 30 more | getting closer; judged progressing (95% sure)')
+    await t.runtime.dispose()
+  })
+
+  test('the small model judges when the primary has no Claude model, and a reply off a job keeps its notes to itself', async () => {
+    const t = setup(async function* (t) {
+      if (isAsk(t.call)) {
+        yield* t.text('{"done": "Read pages", "left": "More", "closer": "closer", "verdict": "progressing", "confidence": 0.5}')
+        return void (yield t.result())
+      }
+      for (let i = 0; i < 41; i++) {
+        yield* t.tool('mcp__nothing__look', { page: i })
+        await new Promise((r) => setTimeout(r, 1))
+      }
+      yield* t.text('Done.')
+      yield t.result({ turns: 42 })
+    }, { titleModel: '', memoryModel: '', defaultModel: 'deepseek/deepseek-v4.1-flash' })
+    await t.run(Db.use((db) => db.use((d) => d.updateBot(d.primaryBot().id, { model: 'deepseek/deepseek-v4.1-flash' }))))
+    const s = await t.run(newSession)
+    await t.run(sendTo(s, s.rootId, 'Look around'))
+    await t.waitForDone(1)
+    const judged = t.calls.filter(isAsk)
+    // At 30, then 10 later (progressing, but not clearly).
+    expect(judged).toHaveLength(2)
+    expect(judged[0]!.options.model).toBe('claude-haiku-5-5')
+    expect(systemOf(judged[0]!)).toContain('You check on an AI assistant')
+    expect(promptText(judged[1]!)).toContain('- At step 30: done: Read pages')
     await t.runtime.dispose()
   })
 
@@ -1147,23 +1205,23 @@ describe('stuck replies', () => {
     await t.runtime.dispose()
   })
 
-  test('progress notes and pauses survive a restart in chat.db', async () => {
+  test('progress notes (in the job) and pauses survive a restart in chat.db', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'chat-v2-'))
     const first = setup(reply, undefined, dir)
-    const s = await first.run(newSession)
+    const { job, thread: s } = await first.run(Db.use((db) => db.use((d) => d.createJob({ title: 'Job', botId: d.primaryBot().id }))))
     await first.run(
       Db.use((db) =>
         db.use((d) => {
-          d.addProgressNote({ sessionId: s.id, messageId: 'm', step: 30, done: 'a', left: 'b', closer: 'closer', verdict: 'progressing', confidence: 0.9, createdAt: 1 })
-          d.addProgressNote({ sessionId: s.id, messageId: 'm', step: 45, done: 'c', left: 'd', closer: 'same', verdict: 'unclear', confidence: 0.5, createdAt: 2 })
+          d.addProgressNote(job.id, { sessionId: s.id, messageId: 'm', step: 30, done: 'a', left: 'b', closer: 'closer', verdict: 'progressing', confidence: 0.9, createdAt: 1 })
+          d.addProgressNote(job.id, { sessionId: s.id, messageId: 'm', step: 45, done: 'c', left: 'd', closer: 'same', verdict: 'unclear', confidence: 0.5, createdAt: 2 })
           d.recordPause({ sessionId: s.id, messageId: 'm', signal: 'alternating', reason: 'r', step: 9 }, 3)
         })
       )
     )
     await first.runtime.dispose()
     const second = setup(reply, undefined, dir)
-    const [notes, pauses] = await second.run(Db.use((db) => db.use((d) => [d.progressNotes(s.id, 1), d.stuckPauses()] as const)))
-    expect(notes.map((n) => n.step)).toEqual([45])
+    const [notes, pauses] = await second.run(Db.use((db) => db.use((d) => [d.progressNotes(job.id, s.id, 1), d.stuckPauses()] as const)))
+    expect(notes.map((n) => [n.step, n.done, n.left, n.closer, n.verdict, n.confidence])).toEqual([[45, 'c', 'd', 'same', 'unclear', 0.5]])
     expect(pauses).toMatchObject([{ signal: 'alternating', step: 9, createdAt: 3, resumedAt: null }])
     await second.runtime.dispose()
   })
