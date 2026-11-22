@@ -3,7 +3,7 @@ import { Effect } from 'effect'
 import type { Step } from '@shared/steps'
 import type { Control } from './control'
 import type { Interaction, Owner } from './interaction'
-import { ACT_TOOLS, SAFE_TOOLS, SERVER, STOPPED_TEXT } from './tools'
+import { ACT_TOOLS, SERVER, STOPPED_TEXT } from './tools'
 import type { Mode } from './tools'
 
 /**
@@ -14,10 +14,20 @@ import type { Mode } from './tools'
  */
 export const BUILTIN_TOOLS = ['Read', 'Glob', 'Grep', 'WebSearch', 'Bash'] as const
 
-/** Allowed without asking. */
-const AUTO_ALLOW = new Set<string>([...SAFE_TOOLS, 'Read', 'Glob', 'Grep', 'WebSearch'])
-/** Built-ins this policy answers for: the ones it brings, and file writes, which always need approval. */
+/** Built-ins that only read files or search, which don't need the computer (the screen or the approval card). */
+const NO_CLAIM = new Set<string>(['Read', 'Glob', 'Grep', 'WebSearch'])
+/** Built-ins this policy answers for: the ones it brings, and file writes. */
 const OWNED_BUILTINS = new Set<string>([...BUILTIN_TOOLS, 'Write', 'Edit'])
+/** The model's own ask before an irreversible step: the tool shows the card itself. */
+const ASK_APPROVAL = `mcp__${SERVER}__ask_approval`
+
+/** A call's verdict under the bot's rules (agent/rules.ts `decide`, bound to the reply's bot). */
+export interface PolicyDecision {
+  readonly verdict: 'allow' | 'ask' | 'block'
+  readonly title: string
+  readonly detail: string
+  readonly reason?: string
+}
 
 /** git accepts any unambiguous prefix of a long option, so `--outp=x` is `--output=x`. */
 const gitOutput = (t: string) => {
@@ -87,49 +97,39 @@ export interface PolicyDeps {
   readonly count: () => boolean
   /** Takes the computer for this reply; the refusal to give the model if another chat has it. */
   readonly claim: () => string | null
+  /** The bot's rules for a call: allow, ask, or block. */
+  readonly decide: (name: string, input: Record<string, unknown>) => PolicyDecision
 }
 
 const allow = (input: Record<string, unknown>): PermissionResult => ({ behavior: 'allow', updatedInput: input })
 
 /**
- * One permission policy for every computer-use call: look and search tools run freely, mouse and
- * keyboard tools are refused in Show-me mode, shell commands run only if they are read-only, and
- * file writes need approval. Null for calls that belong to another tool set.
+ * One permission policy for every computer-use call. The bot's rules decide each call (by default:
+ * look and search tools run freely, shell commands only if they are read-only, file writes ask, and
+ * irreversible steps always ask); mouse and keyboard tools are refused in Show-me mode whatever the
+ * rules say. Null for calls that belong to another tool set.
  */
 export const makePolicy =
   (d: PolicyDeps) =>
   async (name: string, input: Record<string, unknown>, signal: AbortSignal): Promise<PermissionResult | null> => {
     if (!name.startsWith(`mcp__${SERVER}__`) && !OWNED_BUILTINS.has(name)) return null
     if (d.ended()) return { behavior: 'deny', message: STOPPED_TEXT, interrupt: true }
-    // Reading and searching files don't touch the screen or the approval card; the rest needs the computer.
-    const busy = AUTO_ALLOW.has(name) && !name.startsWith('mcp__') ? null : d.claim()
+    const rule = d.decide(name, input)
+    if (rule.verdict === 'block') return { behavior: 'deny', message: rule.reason ?? "That tool isn't available." }
+    // Reading and searching files don't touch the screen or the approval card unless they ask; the rest needs the computer.
+    const busy = NO_CLAIM.has(name) && rule.verdict === 'allow' ? null : d.claim()
     if (busy) return { behavior: 'deny', message: busy }
     if (d.control.stopped()) return { behavior: 'deny', message: STOPPED_TEXT, interrupt: true }
     // MCP tool calls are counted when they run; built-ins only pass through here.
     if (!name.startsWith('mcp__') && !d.count()) return { behavior: 'deny', message: STOPPED_TEXT, interrupt: true }
-    const ask = (title: string, detail: string) =>
-      Effect.runPromise(d.interaction.requestApproval(d.owner, title, detail), { signal })
-        .then(
-          (ok): PermissionResult => (ok ? allow(input) : { behavior: 'deny', message: 'The user denied this.' }),
-          (): PermissionResult => ({ behavior: 'deny', message: 'The user denied this.' })
-        )
-        // The user moved the mouse to answer; that isn't taking over.
-        .finally(() => d.control.resetTakeover())
-    if (AUTO_ALLOW.has(name)) return allow(input)
-    if (ACT_TOOLS.has(name)) {
-      if (d.mode() === 'teach') return { behavior: 'deny', message: "The user wants to learn this (teach mode): don't act for them. Guide them with teach_step instead." }
-      return allow(input)
-    }
-    switch (name) {
-      case 'Bash': {
-        const cmd = String(input.command ?? '')
-        return isReadOnlyCommand(cmd) ? allow(input) : ask('Run a command on your computer', cmd)
-      }
-      case 'Write':
-        return ask('Create or overwrite a file', String(input.file_path ?? ''))
-      case 'Edit':
-        return ask('Change a file', String(input.file_path ?? ''))
-      default:
-        return { behavior: 'deny', message: "That tool isn't available." }
-    }
+    if (ACT_TOOLS.has(name) && d.mode() === 'teach')
+      return { behavior: 'deny', message: "The user wants to learn this (teach mode): don't act for them. Guide them with teach_step instead." }
+    if (rule.verdict === 'allow' || name === ASK_APPROVAL) return allow(input)
+    return Effect.runPromise(d.interaction.requestApproval(d.owner, rule.title, rule.detail), { signal })
+      .then(
+        (ok): PermissionResult => (ok ? allow(input) : { behavior: 'deny', message: 'The user denied this.' }),
+        (): PermissionResult => ({ behavior: 'deny', message: 'The user denied this.' })
+      )
+      // The user moved the mouse to answer; that isn't taking over.
+      .finally(() => d.control.resetTakeover())
   }

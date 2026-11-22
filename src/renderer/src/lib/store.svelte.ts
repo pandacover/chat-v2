@@ -4,10 +4,16 @@ import type { ComputerDoing, ComputerMode, ComputerWait } from '@shared/computer
 import type { UpdateState } from '@shared/types'
 import type {
   Attachment,
+  Bot,
+  BotPatch,
   BrowserEvent,
+  Job,
+  JobDetail,
+  JobStatus,
+  ListedSession,
   MemoryView,
   Message,
-  Session,
+  Presence,
   SessionPatch,
   SessionView,
   SettingsView,
@@ -26,6 +32,18 @@ export interface OpenArtifact {
   identifier: string
   /** Which message's version is shown. */
   messageId: string
+}
+
+/** A tab of the right panel: the built-in browser, or an artifact of the open chat at a version. */
+export type PanelTab = { kind: 'browser' } | ({ kind: 'artifact' } & OpenArtifact)
+export const tabKey = (t: PanelTab) => (t.kind === 'browser' ? 'browser' : `artifact:${t.identifier}`)
+
+/** An artifact of the open chat, with every complete version of it along the visible branch. */
+export interface ChatArtifact {
+  identifier: string
+  /** Its newest title. */
+  title: string
+  versions: Array<{ messageId: string; block: ArtifactBlock }>
 }
 
 /** Unsent composer text, keyed by chat id ('' is the new chat). `at` orders drafts in the sidebar. */
@@ -57,10 +75,39 @@ export const draftTitle = (text: string) => {
 const describe = (e: unknown) => (e instanceof Error ? e.message : String(e)).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
 
 class AppState {
-  sessions = $state<Session[]>([])
+  /** Every thread but the primary's conversation, each with where it stands (running, unread…). */
+  sessions = $state<ListedSession[]>([])
+  /** The open conversation: the primary bot's (kind 'primary'), or a job's thread. */
   view = $state<SessionView | null>(null)
+
+  // Bots and jobs. The user talks to the primary bot, in its own conversation; a job (and its thread)
+  // opens when work is handed off, to a worker or to the primary itself.
+  bots = $state<Bot[]>([])
+  jobs = $state<Job[]>([])
+  primaryBot = $derived(this.bots.find((b) => b.isPrimary) ?? null)
+  /** The bot of the open conversation (a new chat is the primary's): what it can use comes from it. */
+  currentBot = $derived((this.view?.session.botId ? this.bots.find((b) => b.id === this.view!.session.botId) : undefined) ?? this.primaryBot)
+  /** The id of the primary bot's conversation, once loaded. */
+  primaryId = $state<string | null>(null)
+  /** What each bot is doing (its avatar shows it), by bot id. */
+  presence = $state<Record<string, Presence>>({})
+  /** More than one bot: the roster, owners and the bots on each job show. */
+  team = $derived(this.bots.length > 1)
+  /** The open job's bots, threads and notes, when a job's thread (or a bot's own thread on it) is open. */
+  jobDetail = $state<JobDetail | null>(null)
+  /** The primary bot's conversation is open (rather than a job's thread). */
+  isPrimary = $derived(this.view?.session.kind === 'primary')
+  /** Each job by its thread, for labelling turns and finding a thread's job. */
+  jobByThread = $derived(new Map(this.jobs.flatMap((j) => (j.threadId ? [[j.threadId, j] as const] : []))))
+  /** A message sent to the primary that is still on its way, shown until its turn lands. */
+  pending = $state<{ text: string; attachments: Attachment[] } | null>(null)
+  /** The job the open thread is on (a job's thread, or a bot's own thread on it); none in the primary's conversation. */
+  currentJob = $derived.by<Job | null>(() => {
+    const view = this.view
+    if (!view || this.isPrimary) return null
+    return this.jobByThread.get(view.session.id) ?? this.jobs.find((j) => j.id === view.session.jobId) ?? null
+  })
   settings = $state<SettingsView | null>(null)
-  artifact = $state<OpenArtifact | null>(null)
   /** Settings is a modal over the chat; the chat stays mounted so drafts and scroll survive. */
   page = $state<'chat' | 'settings'>('chat')
 
@@ -100,9 +147,13 @@ class AppState {
   /** Learned facts, loaded when Settings shows them. */
   memory = $state<MemoryView | null>(null)
 
-  // The right panel holds artifacts and the built-in browser as tabs.
-  browserOpen = $state(false)
-  panelTab = $state<'artifact' | 'browser'>('artifact')
+  // The right panel: tabs, each the built-in browser (there is one) or an artifact of the open chat,
+  // and whether it shows. Its toggle at the right of the app bar hides it with its tabs kept; the
+  // + in its tab strip opens the browser or any of the chat's artifacts.
+  panelTabs = $state<PanelTab[]>([])
+  /** The tab picked, by its key (tabKey). */
+  panelActive = $state<string | null>(null)
+  panelShown = $state(false)
   browser = $state({ url: '', title: '', loading: false, canBack: false, canForward: false })
   /** Set while the model is driving the browser. */
   control = $state({ active: false, label: '' })
@@ -118,7 +169,12 @@ class AppState {
   /** The mode each running computer reply works in, by message id: doing it, or showing how. */
   computerModes = new SvelteMap<string, ComputerMode>()
   /** A Show-me step of the open chat waits: a message sent now answers it. */
-  teaching = $derived(this.computerWait?.kind === 'teach' && this.computerWait.sessionId === this.view?.session.id)
+  teaching = $derived(
+    this.computerWait?.kind === 'teach' &&
+      (this.computerWait.sessionId === this.view?.session.id ||
+        // Talking to Tomo, a message answers a Show-me step waiting in any thread (Jobs.send).
+        this.isPrimary)
+  )
   /** Point is under way: the user is marking part of the screen for their next message. */
   pointing = $state(false)
   /** Bumped each time a finished Point adds its attachments, so the composer can take focus. */
@@ -137,94 +193,112 @@ class AppState {
   // re-scan (and for artifacts, re-parse) the whole conversation on every streamed line.
   streaming = $derived(this.view?.path.some((n) => n.message.status === 'streaming') ?? false)
 
-  private lastVersions: Array<{ messageId: string; block: ArtifactBlock }> = []
-  /** Every complete version of the open artifact along the visible branch. */
-  artifactVersions = $derived.by(() => {
-    const open = this.artifact
-    if (!open || !this.view) return (this.lastVersions = [])
-    const out: Array<{ messageId: string; block: ArtifactBlock }> = []
-    for (const { message } of this.view.path) {
-      if (message.role !== 'assistant') continue
+  private lastArtifacts: ChatArtifact[] = []
+  /**
+   * The artifacts along the open chat's visible branch, in the order each first appeared, each with
+   * its complete versions, oldest first: what the panel's + offers, and what an artifact tab shows.
+   */
+  chatArtifacts = $derived.by((): ChatArtifact[] => {
+    const byId = new Map<string, ChatArtifact>()
+    for (const { message } of this.view?.path ?? []) {
+      if (message.role !== 'assistant' || !/<artifact/i.test(message.content)) continue
       for (const b of parseContentCached(message.content, message.id)) {
-        if (b.type === 'artifact' && b.complete && b.identifier === open.identifier) out.push({ messageId: message.id, block: b })
+        if (b.type !== 'artifact' || !b.complete) continue
+        const a = byId.get(b.identifier) ?? { identifier: b.identifier, title: b.title, versions: [] }
+        a.title = b.title
+        a.versions.push({ messageId: message.id, block: b })
+        byId.set(b.identifier, a)
       }
     }
-    // The same versions as before (a streamed line that changed none of them): the same array, so
+    const out = [...byId.values()]
+    // The same artifacts as before (a streamed line that changed none of them): the same array, so
     // nothing that shows them updates.
-    const last = this.lastVersions
+    const last = this.lastArtifacts
     const same =
       out.length === last.length &&
-      out.every((v, i) => v.messageId === last[i]!.messageId && v.block.content === last[i]!.block.content && v.block.title === last[i]!.block.title)
-    return same ? last : (this.lastVersions = out)
+      out.every((a, i) => {
+        const b = last[i]!
+        return (
+          a.identifier === b.identifier &&
+          a.title === b.title &&
+          a.versions.length === b.versions.length &&
+          a.versions.every((v, j) => v.messageId === b.versions[j]!.messageId && v.block.content === b.versions[j]!.block.content)
+        )
+      })
+    return same ? last : (this.lastArtifacts = out)
   })
+
+  /** An artifact's complete versions along the open chat's visible branch, oldest first. */
+  versionsOf(identifier: string): ChatArtifact['versions'] {
+    return this.chatArtifacts.find((a) => a.identifier === identifier)?.versions ?? []
+  }
 
   /** The open chat's settings, or what has been picked for the new chat. */
   chat = $derived({
-    model: this.view ? this.view.session.model : (this.fresh.model ?? null),
+    // The primary's conversation runs on its bot's model.
+    model: this.view ? (this.isPrimary ? (this.primaryBot?.model ?? null) : this.view.session.model) : (this.fresh.model ?? null),
     systemPrompt: this.view ? this.view.session.systemPrompt : (this.fresh.systemPrompt ?? null),
-    browserEnabled: this.view ? this.view.session.browserEnabled : (this.fresh.browserEnabled ?? false),
-    computerEnabled: this.view ? this.view.session.computerEnabled : (this.fresh.computerEnabled ?? false)
+    // What the chat's bot can use (Settings › Bots), not a switch of the chat's own.
+    browserEnabled: this.currentBot?.modules.includes('browser') ?? false,
+    computerEnabled: this.currentBot?.modules.includes('computer') ?? false
   })
 
-  hasArtifact = $derived(this.artifact !== null && this.artifactVersions.length > 0)
-
-  panelOpen = $derived(this.browserOpen || this.hasArtifact)
-
-  /** The visible tab, falling back to whichever one exists. */
-  activeTab = $derived<'artifact' | 'browser'>(
-    this.panelTab === 'browser' && this.browserOpen ? 'browser' : this.hasArtifact ? 'artifact' : 'browser'
+  /** The panel's tabs that have something to show: an artifact not on this branch any more waits. */
+  shownTabs = $derived(this.panelTabs.filter((t) => t.kind === 'browser' || this.versionsOf(t.identifier).length > 0))
+  /** The tab on show: the one picked, or the first there is. */
+  activeTab = $derived<PanelTab | null>(this.shownTabs.find((t) => tabKey(t) === this.panelActive) ?? this.shownTabs[0] ?? null)
+  browserOpen = $derived(this.panelTabs.some((t) => t.kind === 'browser'))
+  panelOpen = $derived(this.panelShown)
+  /** The artifact on show in the panel, and which version: its card in the chat shows it open. */
+  artifact = $derived<OpenArtifact | null>(
+    this.panelShown && this.activeTab?.kind === 'artifact' ? { identifier: this.activeTab.identifier, messageId: this.activeTab.messageId } : null
   )
 
-  /** The newest finished artifact in the open chat's visible branch, if any. */
-  latestArtifact = $derived.by<OpenArtifact | null>(() => {
-    const path = this.view?.path ?? []
-    for (let i = path.length - 1; i >= 0; i--) {
-      const m = path[i]!.message
-      if (m.role !== 'assistant' || !/<artifact/i.test(m.content)) continue
-      const found = parseContentCached(m.content, m.id).findLast((b) => b.type === 'artifact' && b.complete)
-      if (found && found.type === 'artifact') return { identifier: found.identifier, messageId: m.id }
-    }
-    return null
-  })
-
-  /** What the panel showed when its toggle closed it, so the toggle can bring it back. */
-  private closedPanel = $state<{ sessionId: string; artifact: OpenArtifact | null; browser: boolean; tab: 'artifact' | 'browser' } | null>(null)
-
-  /** The panel toggle (top right) shows while the panel is open, or there's something to open. */
-  panelToggle = $derived(
-    this.panelOpen || this.latestArtifact !== null || (this.closedPanel !== null && this.closedPanel.sessionId === (this.view?.session.id ?? ''))
-  )
-
-  /** The panel toggle: closes the panel (artifact and browser), or brings back what it showed. */
-  togglePanel() {
-    const id = this.view?.session.id ?? ''
-    if (this.panelOpen) {
-      this.closedPanel = { sessionId: id, artifact: this.hasArtifact ? this.artifact : null, browser: this.browserOpen, tab: this.activeTab }
-      this.artifact = null
-      this.browserOpen = false
-      return
-    }
-    const last = this.closedPanel?.sessionId === id ? this.closedPanel : null
-    this.closedPanel = null
-    if (last?.browser) this.browserOpen = true
-    const artifact = last?.artifact ?? (last?.browser ? null : this.latestArtifact)
-    if (artifact) this.artifact = artifact
-    this.panelTab = last?.tab ?? 'artifact'
+  /** Opens a tab (or goes to it, as given), on show in the panel. */
+  private openTab(tab: PanelTab) {
+    const key = tabKey(tab)
+    const at = this.panelTabs.findIndex((t) => tabKey(t) === key)
+    if (at === -1) this.panelTabs.push(tab)
+    else this.panelTabs[at] = tab
+    this.panelActive = key
+    this.panelShown = true
   }
 
+  /** Opens an artifact of the open chat in a tab of its own, at the given version. */
   showArtifact(artifact: OpenArtifact) {
-    this.artifact = artifact
-    this.panelTab = 'artifact'
+    this.openTab({ kind: 'artifact', identifier: artifact.identifier, messageId: artifact.messageId })
+  }
+
+  /** Which version of an open artifact its tab shows. */
+  pickVersion(identifier: string, messageId: string) {
+    const tab = this.panelTabs.find((t) => t.kind === 'artifact' && t.identifier === identifier)
+    if (tab?.kind === 'artifact') tab.messageId = messageId
   }
 
   openBrowser() {
-    this.browserOpen = true
-    this.panelTab = 'browser'
+    this.openTab({ kind: 'browser' })
   }
 
   closeBrowser() {
-    this.browserOpen = false
-    this.panelTab = 'artifact'
+    this.closeTab('browser')
+  }
+
+  selectTab(key: string) {
+    this.panelActive = key
+  }
+
+  /** Closes a tab; the one next to it shows, and with none left the panel goes. */
+  closeTab(key: string) {
+    const shown = this.shownTabs.map(tabKey)
+    const at = shown.indexOf(key)
+    this.panelTabs = this.panelTabs.filter((t) => tabKey(t) !== key)
+    if (this.panelActive === key || this.panelActive === null) this.panelActive = shown[at + 1] ?? shown[at - 1] ?? null
+    if (this.panelTabs.length === 0) this.panelShown = false
+  }
+
+  /** The bar's panel toggle: shows or hides the panel, its tabs kept. Empty, it offers what to open. */
+  togglePanel() {
+    this.panelShown = !this.panelShown
   }
 
   addDraftAttachment(attachment: Attachment) {
@@ -340,13 +414,111 @@ class AppState {
     void api.computer.supported().then((on) => (this.computerSupported = on))
     void api.computer.waiting().then((w) => (this.computerWait = w))
     void api.updates.get().then((s) => (this.update = s))
+    void api.bots.presence().then((p) => (this.presence = p)).catch(() => {})
     addEventListener('beforeunload', () => this.saveDrafts())
-    await Promise.all([this.refreshSessions(), this.loadSettings()])
+    const [, , , primary] = await Promise.all([this.refreshSessions(), this.loadSettings(), this.loadBots(), this.attempt(() => api.jobs.primary())])
+    // The new chat's unsent draft (from before bots) is now said to the primary.
+    const loose = this.drafts.get('')
+    if (loose && primary && !this.drafts.has(primary.session.id)) this.drafts.set(primary.session.id, loose)
     // Drafts of chats that are gone (deleted elsewhere, or empty ones cleared at startup).
-    for (const key of [...this.drafts.keys()]) if (key && !this.sessions.some((s) => s.id === key)) this.setDraft(key, '')
-    // An unsent new chat is where the user left off; otherwise reopen the latest chat.
-    const first = this.sessions[0]
-    if (first && !this.drafts.has('')) await this.open(first.id)
+    for (const key of [...this.drafts.keys()])
+      if (key !== primary?.session.id && !this.sessions.some((s) => s.id === key)) this.setDraft(key, '')
+    // Tomo opens on the primary bot's conversation, where everything is said to it.
+    if (primary) this.setView(primary)
+  }
+
+  async loadBots() {
+    const bots = await this.attempt(() => api.bots.list())
+    if (bots) this.bots = bots
+  }
+
+  async updateBot(id: string, patch: BotPatch) {
+    const bots = await this.attempt(() => api.bots.update(id, patch))
+    if (bots) this.bots = bots
+    return bots !== undefined
+  }
+
+  /** A new worker bot; resolves to it. */
+  async createBot(patch: BotPatch = {}) {
+    const bots = await this.attempt(() => api.bots.create(patch))
+    if (!bots) return null
+    this.bots = bots
+    return bots.at(-1) ?? null
+  }
+
+  async removeBot(id: string) {
+    const bots = await this.attempt(() => api.bots.remove(id))
+    if (bots) this.bots = bots
+    await this.refreshSessions()
+  }
+
+  async setPrimary(id: string) {
+    const bots = await this.attempt(() => api.bots.setPrimary(id))
+    if (bots) this.bots = bots
+    await this.refreshSessions()
+    if (this.isPrimary) await this.reloadPrimary()
+  }
+
+  /** A bot's latest thread of its own (on its newest job), or null when it has none yet. */
+  latestThreadOf(botId: string): ListedSession | null {
+    return this.sessions.filter((s) => s.kind === 'worker' && s.botId === botId).sort((a, b) => b.updatedAt - a.updatedAt)[0] ?? null
+  }
+
+  private jobsTimer: ReturnType<typeof setTimeout> | undefined
+  async refreshJobs() {
+    clearTimeout(this.jobsTimer)
+    const jobs = await this.attempt(() => api.jobs.list())
+    if (jobs) this.jobs = jobs
+  }
+
+  /** Opens the primary bot's conversation. */
+  async openPrimary() {
+    if (this.isPrimary) return void (await this.reloadPrimary())
+    const view = await this.attempt(() => api.jobs.primary())
+    if (view) this.setView(view)
+  }
+
+  private async reloadPrimary() {
+    const view = await this.attempt(() => api.jobs.primary())
+    if (view && this.isPrimary) this.setView(view)
+  }
+
+  /**
+   * The primary's own thread on a job it handed itself, where the work is: a job opens there. (A
+   * job's shared thread then only holds the task and the report.)
+   */
+  ownThreadOf(job: Job): ListedSession | null {
+    const primary = this.primaryBot
+    if (!primary || job.ownerBotId !== primary.id) return null
+    return this.sessions.find((s) => s.kind === 'worker' && s.jobId === job.id && s.botId === primary.id) ?? null
+  }
+
+  /** Opens a job: its thread, or the primary's own thread on it when it handed the job itself. */
+  async openJob(job: Job) {
+    const id = this.ownThreadOf(job)?.id ?? job.threadId
+    if (id) await this.open(id)
+  }
+
+  async setJobStatus(id: string, status: JobStatus) {
+    await this.attempt(() => api.jobs.setStatus(id, status))
+    await this.refreshJobs()
+  }
+
+  async renameJob(id: string, title: string) {
+    await this.attempt(() => api.jobs.rename(id, title))
+    const job = this.jobs.find((j) => j.id === id)
+    if (job?.threadId && this.view?.session.id === job.threadId) this.view.session.title = title
+    await this.refreshSessions()
+  }
+
+  async removeJob(id: string) {
+    const job = this.jobs.find((j) => j.id === id)
+    if (job?.threadId) this.discardDraft(job.threadId)
+    const open = !!job?.threadId && this.view?.session.id === job.threadId
+    await this.attempt(() => api.jobs.remove(id))
+    await this.refreshSessions()
+    if (open) await this.openPrimary()
+    else if (this.isPrimary) await this.reloadPrimary()
   }
 
   toast(text: string, kind: Toast['kind'] = 'error') {
@@ -370,8 +542,23 @@ class AppState {
   }
 
   async refreshSessions() {
-    const list = await this.attempt(() => api.sessions.list())
+    clearTimeout(this.sessionsTimer)
+    const [list] = await Promise.all([this.attempt(() => api.sessions.list()), this.refreshJobs()])
     if (list) this.sessions = list
+  }
+
+  /** Replies start and end in bursts (a job's bots, a reply and its report): one reload for them all. */
+  private sessionsTimer: ReturnType<typeof setTimeout> | undefined
+  private refreshSessionsSoon() {
+    clearTimeout(this.sessionsTimer)
+    this.sessionsTimer = setTimeout(() => void this.refreshSessions(), 150)
+  }
+
+  /** The user has seen what is in a thread: it isn't unread any more. */
+  markRead(id: string) {
+    const s = this.sessions.find((x) => x.id === id)
+    if (s) s.state.readAt = Date.now()
+    void api.sessions.markRead(id).catch(() => {})
   }
 
   async loadSettings() {
@@ -387,8 +574,22 @@ class AppState {
 
   /** Installs a fresh view and catches up any replies that are still streaming. */
   setView(view: SessionView) {
-    if (this.view?.session.id !== view.session.id) this.artifact = null
+    if (view.session.kind === 'primary') this.primaryId = view.session.id
+    // Another chat: its artifacts aren't this one's. The browser stays; with nothing left the panel goes.
+    if (this.view?.session.id !== view.session.id) {
+      this.panelTabs = this.panelTabs.filter((t) => t.kind === 'browser')
+      if (this.panelTabs.length === 0) this.panelShown = false
+    }
     this.view = view
+    // A job's thread, or a bot's own thread on it: the job bar shows its bots and notes.
+    const jobId = view.session.kind === 'primary' ? null : view.session.jobId
+    if (jobId !== this.jobDetail?.job.id) this.jobDetail = null
+    if (jobId && this.team) void this.loadJobDetail(jobId)
+    // An open thread is read: whatever ended in it is in front of the user. The primary's own
+    // thread on a job it handed itself stands for the job, so its shared thread is read with it.
+    if (view.session.kind !== 'primary') this.markRead(view.session.id)
+    const job = view.session.kind === 'worker' && view.session.botId === this.primaryBot?.id ? this.jobs.find((j) => j.id === view.session.jobId) : undefined
+    if (job?.threadId && job.threadId !== view.session.id) this.markRead(job.threadId)
     for (const node of view.path) {
       if (node.message.status === 'streaming') void this.backfill(node.message.id)
     }
@@ -400,13 +601,12 @@ class AppState {
   }
 
   /**
-   * Opens the new chat. It is saved when its first message is sent; until then the sidebar
-   * lists it only while its composer holds a draft.
+   * New topic: the primary's conversation, with a divider after which Tomo starts afresh (nothing
+   * before it is resumed). Nothing happens to a conversation that is empty or just divided.
    */
-  newSession() {
-    if (!this.view) return
-    this.view = null
-    this.artifact = null
+  async newSession() {
+    const view = await this.attempt(() => api.jobs.newTopic())
+    if (view) this.setView(view)
   }
 
   async rename(id: string, title: string) {
@@ -420,15 +620,14 @@ class AppState {
     await this.refreshSessions()
   }
 
+  /** Deletes a thread's job (and so the thread). */
   async remove(id: string) {
+    const job = this.jobByThread.get(id)
+    if (job) return this.removeJob(job.id)
     this.discardDraft(id)
     await this.attempt(() => api.sessions.remove(id))
     await this.refreshSessions()
-    if (this.view?.session.id === id) {
-      this.view = null
-      const next = this.sessions[0]
-      if (next) await this.open(next.id)
-    }
+    if (this.view?.session.id === id) await this.openPrimary()
   }
 
   async updateSession(patch: SessionPatch) {
@@ -438,19 +637,53 @@ class AppState {
       this.fresh = { ...this.fresh, ...patch }
       return
     }
+    // In the primary's conversation the model is its bot's; its toggles are its own, and go with each message to its job.
+    const { model, ...rest } = patch
+    if (this.isPrimary && model !== undefined && this.primaryBot) {
+      await this.updateBot(this.primaryBot.id, { model })
+      if (Object.keys(rest).length === 0) return
+      patch = rest
+    }
     await this.attempt(() => api.sessions.update(view.session.id, patch))
-    await this.open(view.session.id)
+    if (this.isPrimary) await this.reloadPrimary()
+    else await this.open(view.session.id)
+  }
+
+  /** The thread a message is in: in the primary's conversation, each turn is in its job's. */
+  private sessionOf(messageId: string) {
+    return this.find(messageId)?.sessionId ?? this.view?.session.id ?? ''
   }
 
   private async afterTurn(view: SessionView | undefined) {
     if (!view) return
     const last = view.path.at(-1)?.message
     if (last?.status === 'streaming') this.liveIds.add(last.id)
-    this.setView(view)
+    // An action on a turn of the primary's conversation answers with its thread; the conversation stays open.
+    if (this.isPrimary && view.session.kind !== 'primary') {
+      for (const n of view.path) if (n.message.status === 'streaming') this.liveIds.add(n.message.id)
+      await this.reloadPrimary()
+    } else this.setView(view)
     await this.refreshSessions()
   }
 
+  /** A message to the primary bot, in its own conversation. */
+  private async sendToPrimary(text: string, attachments: Attachment[]) {
+    this.pending = { text, attachments }
+    try {
+      const view = await this.attempt(() => api.jobs.send({ text, attachmentIds: attachments.map((a) => a.id) }))
+      if (!view) return false
+      const reply = view.path.at(-1)?.message
+      if (reply?.status === 'streaming') this.liveIds.add(reply.id)
+      if (this.isPrimary) this.setView(view)
+      await this.refreshSessions()
+      return true
+    } finally {
+      this.pending = null
+    }
+  }
+
   async send(text: string, attachments: Attachment[]) {
+    if (this.isPrimary) return this.sendToPrimary(text, attachments)
     let view = this.view
     // The new chat gets its row now, with whatever was picked for it.
     const created = !view
@@ -478,23 +711,23 @@ class AppState {
   async edit(messageId: string, text: string, attachmentIds: string[]) {
     const view = this.view
     if (!view) return
-    await this.afterTurn(await this.attempt(() => api.chat.edit({ sessionId: view.session.id, messageId, text, attachmentIds })))
+    await this.afterTurn(await this.attempt(() => api.chat.edit({ sessionId: this.sessionOf(messageId), messageId, text, attachmentIds })))
   }
 
   async regenerate(assistantId: string) {
     const view = this.view
     if (!view) return
-    await this.afterTurn(await this.attempt(() => api.chat.regenerate({ sessionId: view.session.id, assistantId })))
+    await this.afterTurn(await this.attempt(() => api.chat.regenerate({ sessionId: this.sessionOf(assistantId), assistantId })))
   }
 
   async continueReply(assistantId: string) {
     const view = this.view
     if (!view) return
-    await this.afterTurn(await this.attempt(() => api.chat.continue({ sessionId: view.session.id, assistantId })))
+    await this.afterTurn(await this.attempt(() => api.chat.continue({ sessionId: this.sessionOf(assistantId), assistantId })))
   }
 
   async stop() {
-    const id = this.view?.path.find((n) => n.message.status === 'streaming')?.message.id
+    const id = this.view?.path.findLast((n) => n.message.status === 'streaming')?.message.id
     if (id) await this.attempt(() => api.chat.stop(id))
   }
 
@@ -510,24 +743,24 @@ class AppState {
   async setComputerMode(messageId: string, mode: ComputerMode) {
     const view = this.view
     if (!view) return
-    await this.attempt(() => api.computer.setMode(view.session.id, messageId, mode))
+    await this.attempt(() => api.computer.setMode(this.sessionOf(messageId), messageId, mode))
   }
 
   async switchBranch(messageId: string) {
     const view = this.view
     if (!view) return
-    const next = await this.attempt(() => api.chat.switchBranch({ sessionId: view.session.id, messageId }))
+    const next = await this.attempt(() => api.chat.switchBranch({ sessionId: this.sessionOf(messageId), messageId }))
     if (next) this.setView(next)
   }
 
   async fork(messageId: string) {
     const view = this.view
     if (!view) return
-    const next = await this.attempt(() => api.sessions.fork(view.session.id, messageId))
+    const next = await this.attempt(() => api.sessions.fork(this.sessionOf(messageId), messageId))
     if (!next) return
     this.setView(next)
     await this.refreshSessions()
-    this.toast('Forked into a new session', 'info')
+    this.toast('Forked into a new job', 'info')
   }
 
   private find(messageId: string): Message | undefined {
@@ -590,7 +823,58 @@ class AppState {
     return m !== undefined
   }
 
+  /** Threads a bot changed, reloaded together a moment later. */
+  private touched = new Set<string>()
+  private touchTimer: ReturnType<typeof setTimeout> | undefined
+  private threadChanged(sessionId: string) {
+    this.touched.add(sessionId)
+    clearTimeout(this.touchTimer)
+    this.touchTimer = setTimeout(() => {
+      const ids = [...this.touched]
+      this.touched.clear()
+      const open = this.view?.session
+      if (open?.kind === 'primary') void this.reloadPrimary()
+      else if (open && ids.includes(open.id)) void this.reloadThread(open.id)
+      if (this.jobDetail) void this.loadJobDetail(this.jobDetail.job.id)
+      void this.refreshSessions()
+    }, 80)
+  }
+
+  /** Reloads the open thread if it is still open, keeping replies that stream in it live. */
+  private async reloadThread(id: string) {
+    const view = await this.attempt(() => api.sessions.get(id))
+    if (!view || this.view?.session.id !== id) return
+    for (const n of view.path) if (n.message.status === 'streaming') this.liveIds.add(n.message.id)
+    this.setView(view)
+  }
+
+  async loadJobDetail(jobId: string | null) {
+    if (!jobId) return void (this.jobDetail = null)
+    const detail = await this.attempt(() => api.jobs.detail(jobId))
+    const open = this.view?.session
+    if (detail && open && open.kind !== 'primary' && open.jobId === jobId) this.jobDetail = detail
+  }
+
+  /** The job a bot's own thread is on, when one is open. */
+  workerJobId = $derived(this.view?.session.kind === 'worker' ? this.view.session.jobId : null)
+
   private onEvent(e: StreamEvent) {
+    if (e.type === 'presence') {
+      this.presence = e.presence
+      // A reply started or ended somewhere: what runs (Working) and what is new change with it.
+      this.refreshSessionsSoon()
+      return
+    }
+    if (e.type === 'thread') {
+      this.threadChanged(e.sessionId)
+      return
+    }
+    if (e.type === 'jobs') {
+      // Summaries and usage land in bursts after each reply: one reload for them all.
+      clearTimeout(this.jobsTimer)
+      this.jobsTimer = setTimeout(() => void this.refreshJobs(), 120)
+      return
+    }
     if (e.type === 'memory') {
       if (this.memory) void this.loadMemory()
       const quote = (fact: string) => `“${fact.replace(/\.$/, '')}”`
@@ -630,10 +914,18 @@ class AppState {
     if (e.type === 'title') {
       const session = this.sessions.find((s) => s.id === e.sessionId)
       if (session) session.title = e.title
+      const job = this.jobByThread.get(e.sessionId)
+      if (job) job.title = e.title
       if (this.view?.session.id === e.sessionId) this.view.session.title = e.title
       return
     }
     const message = this.find(e.messageId)
+    if (e.type === 'done') {
+      // A reply that ended where the user is looking (its thread, or Tomo's conversation it shows
+      // in) is seen; one that ended elsewhere makes its thread unread.
+      if (message) this.markRead(message.sessionId)
+      this.refreshSessionsSoon()
+    }
     if (!message) return
     if (e.type === 'line') {
       if (e.index < message.lineCount) return // already have it

@@ -3,8 +3,8 @@ import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { query } from '@anthropic-ai/claude-agent-sdk'
-import { BrowserWindow, type WebContents, WebContentsView, app, autoUpdater as nativeUpdater, nativeTheme, safeStorage, session, shell, webContents } from 'electron'
-import { Effect, Layer, ManagedRuntime } from 'effect'
+import { BrowserWindow, type WebContents, WebContentsView, app, ipcMain, autoUpdater as nativeUpdater, nativeTheme, safeStorage, session, shell, webContents } from 'electron'
+import { Cause, Effect, Layer, ManagedRuntime } from 'effect'
 import { adUrlPatterns } from '@shared/blocklist'
 import type { BrowserEvent, StreamEvent } from '@shared/types'
 import { type MainServices, pinWindow, registerIpc } from './ipc'
@@ -24,6 +24,10 @@ import { makeElectronOverlay } from './computer/overlay'
 import { type Bitmap, type Pointer, makePointer } from './computer/point'
 import { isSensitive } from './memory'
 import { Db } from './services/Db'
+import { Usage } from './usage/Usage'
+import { Jobs } from './services/Jobs'
+import { Reconciler } from './services/Reconciler'
+import { Team } from './services/Team'
 import { ElevenLabs } from './services/ElevenLabs'
 import { type SecretCipher, SettingsStore } from './services/SettingsStore'
 
@@ -194,7 +198,7 @@ const computerLayer = Layer.unwrap(
     const remember = async (fact: string, ctx: RunContext) => {
       if (!(await Effect.runPromise(settings.get)).memoryModel) throw new Error('Memory is off in Settings, so nothing was saved.')
       if (isSensitive(fact)) throw new Error("That looks like a password, key or account number, which memory doesn't keep.")
-      const saved = await Effect.runPromise(db.use((d) => d.changeMemory({ add: [fact], update: [], remove: [] }, { kind: 'learned', sessionId: ctx.sessionId })))
+      const saved = await Effect.runPromise(db.use((d) => d.changeMemory({ add: [fact], update: [], remove: [] }, { kind: 'learned', writer: 'bot', sessionId: ctx.sessionId, jobId: ctx.jobId ?? null })))
       if (saved) broadcaster.send({ type: 'memory', sessionId: ctx.sessionId, added: saved.added, removed: saved.removed })
     }
     // CHAT_V2_FAKE_COMPUTER (tests only): a module whose `platform` stands in for the real one,
@@ -245,17 +249,56 @@ const makeRuntime = () => {
     Layer.provideMerge(base)
   )
   const computer = computerLayer.pipe(Layer.provide(base))
+  // The usage meter and limit pauses (src/main/usage), which Chat reports replies to.
+  // CHAT_V2_MIN_PAUSE_MS (tests only): how soon a paused reply may continue, instead of a minute.
+  const minPause = Number(process.env.CHAT_V2_MIN_PAUSE_MS)
+  const timing = Number.isFinite(minPause) && minPause >= 0 ? { minPauseMs: minPause, marginMs: Math.min(minPause, 15_000) } : {}
+  const usage = Usage.layer((e) => sendAll('usage:event', e), timing).pipe(Layer.provide(providers))
   const chat = Chat.layer.pipe(
+    Layer.provide(Layer.mergeAll(providers, computer, usage)),
+    Layer.provide(Layer.succeed(Broadcaster, broadcaster))
+  )
+  // The primary bot's conversation and its jobs, over Chat.
+  const jobs = Jobs.layer.pipe(
+    Layer.provideMerge(chat),
     Layer.provide(Layer.merge(providers, computer)),
     Layer.provide(Layer.succeed(Broadcaster, broadcaster))
   )
-  return ManagedRuntime.make(Layer.mergeAll(chat, providers, computer))
+  // Workers: the team tools, reports and presence (services/Team.ts), over the same Chat.
+  const team = Team.layer.pipe(Layer.provide(Layer.mergeAll(chat, providers, computer)), Layer.provide(Layer.succeed(Broadcaster, broadcaster)))
+  // The daily memory review (reconciler.ts), when the app is idle.
+  const reconciler = Reconciler.layer.pipe(Layer.provide(providers), Layer.provide(Layer.succeed(Broadcaster, broadcaster)))
+  return ManagedRuntime.make(Layer.mergeAll(jobs, team, providers, computer, usage, reconciler))
 }
 
 let runtime: ManagedRuntime.ManagedRuntime<MainServices | AppPaths, unknown> | null = null
 
 // For automated testing: the window is never shown but keeps rendering, so screenshots still work.
 const headless = process.env.CHAT_V2_HEADLESS === '1'
+
+/**
+ * The window has no title bar of its own: the top strip of the page, in the sidebar's colour
+ * (app.css --side, --bar-h), is Tomo's app bar. Windows and Linux draw their window buttons over
+ * its right end in the same colour, with the theme's text colour (--fg-2), and the page tells the
+ * window when the theme changes; a Mac keeps its traffic lights, at the bar's left end.
+ */
+const BAR_HEIGHT = 36
+/** A colour under black at `alpha`, as a modal's scrim (app.css --scrim) shows it. */
+const dim = (hex: string, alpha: number) =>
+  `#${[1, 3, 5].map((i) => Math.round(parseInt(hex.slice(i, i + 2), 16) * (1 - alpha)).toString(16).padStart(2, '0')).join('')}`
+const barOverlay = (dark: boolean, dimmed = false) => {
+  const color = dark ? '#09090a' : '#f5f3f1'
+  const symbolColor = dark ? '#d6d3d1' : '#292524'
+  const scrim = dimmed ? (dark ? 0.55 : 0.3) : 0
+  return { color: dim(color, scrim), symbolColor: dim(symbolColor, scrim), height: BAR_HEIGHT }
+}
+const isMac = process.platform === 'darwin'
+ipcMain.on('window:theme', (event, theme: unknown, dimmed: unknown) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (!win || (theme !== 'dark' && theme !== 'light')) return
+  win.setBackgroundColor(barOverlay(theme === 'dark').color)
+  if (!isMac) win.setTitleBarOverlay(barOverlay(theme === 'dark', dimmed === true))
+})
 
 const createWindow = async () => {
   const pinned = runtime
@@ -271,6 +314,9 @@ const createWindow = async () => {
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#09090a' : '#f5f3f1',
     title: 'Tomo',
     autoHideMenuBar: true,
+    ...(isMac
+      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 16, y: 11 } }
+      : { titleBarStyle: 'hidden' as const, titleBarOverlay: barOverlay(nativeTheme.shouldUseDarkColors) }),
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),
       contextIsolation: true,
@@ -340,6 +386,13 @@ app.whenReady().then(async () => {
       const stale = yield* db.use((d) => d.pruneOrphanAttachments(Date.now() - 24 * 60 * 60 * 1000))
       yield* attachments.removeFiles(stale)
     })
+  )
+  // What the last run left waiting (messages held behind a reply, posts a bot never got) is answered now.
+  void rt.runPromise(
+    Team.use((t) => t.resume).pipe(
+      Effect.tap((n) => (n > 0 ? Effect.logInfo(`Answered held messages in ${n} threads`) : Effect.void)),
+      Effect.catchCause((cause) => Effect.logWarning(`Answering held messages failed: ${Cause.pretty(cause)}`))
+    )
   )
 
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {

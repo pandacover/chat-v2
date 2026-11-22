@@ -79,9 +79,24 @@ export const makeInteraction = (hooks: {
 
   const mine = (o: Owner, w: Owner) => o.sessionId === w.sessionId && o.messageId === w.messageId
 
+  /** Completes at the next change of what waits. */
+  const nextChange = Effect.callback<void>((resume) => {
+    listeners.add(on)
+    function on() {
+      listeners.delete(on)
+      resume(Effect.void)
+    }
+    return Effect.sync(() => void listeners.delete(on))
+  })
+
   return {
+    /**
+     * Shows Approve / Deny and waits for the answer. A new approval of the same reply releases its
+     * old one (denied); another reply's waits its turn, so two chats never deny each other's.
+     */
     requestApproval: (owner: Owner, title: string, detail: string) =>
       Effect.gen(function* () {
+        while (approval && !mine(owner, approval.wait)) yield* nextChange
         if (approval) yield* resolveApproval(approval.wait.id, false)
         const done = yield* Deferred.make<boolean>()
         const entry = { wait: { kind: 'approval' as const, id: `ap_${++seq}`, title, detail, ...owner }, done }

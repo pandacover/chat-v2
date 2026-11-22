@@ -1,10 +1,17 @@
 // Types shared by the main process, preload bridge and renderer.
 import type { ComputerDoing, ComputerMode, ComputerWait } from './computer'
+import type { UsageEvent, UsageShare, UsageView } from './usage'
+import type { ModuleId, Rules } from './rules'
 
 export type Role = 'root' | 'system' | 'user' | 'assistant'
 
-/** Lifecycle of an assistant message. `interrupted` means the app stopped mid-stream. */
-export type MessageStatus = 'complete' | 'streaming' | 'interrupted' | 'stopped' | 'error'
+/**
+ * Lifecycle of an assistant message. `interrupted` means the app stopped mid-stream; `paused`,
+ * that the reply seemed stuck (its `error` says why, in plain words) and waits for Continue.
+ * A reply that hit a usage limit is `stopped` instead, with a UsagePause (shared/usage.ts) that
+ * continues it by itself once the limit resets; Continue and that resume take the same path.
+ */
+export type MessageStatus = 'complete' | 'streaming' | 'interrupted' | 'stopped' | 'paused' | 'error'
 
 export type AttachmentKind = 'image' | 'pdf' | 'text' | 'audio'
 
@@ -56,6 +63,13 @@ export interface Usage {
   cost: number | null
   /** Model calls behind the reply (more than one when it used tools). */
   requests: number
+  /**
+   * How big the reply's Claude Code session is once it ends: what its last model call read
+   * (input, cached or not) plus what it wrote. Missing on replies from before it was kept.
+   */
+  contextTokens?: number
+  /** When the reply ended, in ms since the epoch: the prompt cache was last written then. */
+  endedAt?: number
 }
 
 export interface Message {
@@ -74,6 +88,41 @@ export interface Message {
   createdAt: number
   attachments: Attachment[]
   usage: Usage | null
+  /**
+   * The bot that wrote an assistant reply or a post. On a user turn: null when the user wrote it,
+   * else the bot that sent it (a message to a worker, in the worker's own thread).
+   */
+  authorBotId: string | null
+  /** Set on a bot's post in a job's shared thread (a task, a message or a report); null otherwise. */
+  post: Post | null
+}
+
+/**
+ * A post in a job's shared thread, where bots talk in the open: a task handed to a bot, a message
+ * between bots, or a bot's report. `to` is the bot it is addressed to; null is everyone on the job.
+ * held: waiting for the user's OK (a request beyond the asking bot's access); declined: the user
+ * said no; stopped: not passed on, because the same request kept bouncing between two bots.
+ *
+ * 'topic' isn't a bot's post: it is the New topic divider in the primary's conversation (an
+ * assistant row that answers nothing), where the next reply starts afresh (agent/history.ts).
+ * 'rollover' is the same boundary made by Tomo itself, after a pause in a chat grown too big to
+ * resume cheaply: it is never shown, and hands the fresh session a summary and the last turns.
+ */
+export interface Post {
+  kind: 'task' | 'message' | 'report' | 'topic' | 'rollover'
+  to: string | null
+  state: 'held' | 'declined' | 'stopped' | null
+}
+
+/** What a bot is doing, shown on its avatar. */
+export type Presence = 'idle' | 'thinking' | 'working' | 'waiting' | 'stuck' | 'done'
+
+/** A job as its view shows it: the bots on it (with their own threads) and its notes. */
+export interface JobDetail {
+  job: Job
+  /** The owner first, then the others in the order they joined. `threadId` is the bot's own thread on the job (none for the primary). */
+  bots: Array<{ botId: string; threadId: string | null }>
+  notes: MemoryRecord[]
 }
 
 export interface Session {
@@ -84,10 +133,6 @@ export interface Session {
   systemPrompt: string | null
   rootId: string
   forkedFromSessionId: string | null
-  /** When on, the model gets browser tools for this chat. */
-  browserEnabled: boolean
-  /** When on, the model can see the screen and use the user's apps (Windows and macOS). */
-  computerEnabled: boolean
   /**
    * What the chat's last message was read as: operate the computer (do), or show each step for the
    * user to do (teach). Decided from each message; a follow-up like "next" keeps it.
@@ -97,19 +142,161 @@ export interface Session {
   pinnedAt: number | null
   createdAt: number
   updatedAt: number
+  /** The bot whose conversation this is. */
+  botId: string | null
+  /** The job a thread belongs to; null for a bot's own conversation. */
+  jobId: string | null
+  /**
+   * primary: the primary bot's conversation, which never branches, forks or ends (its turns live
+   * in job threads). shared: a job's thread, which the user, the primary and every bot on the job
+   * write in (bots' posts). worker: one bot's own thread on a job, its own Claude Code session,
+   * which the user can open and write in too.
+   */
+  kind: SessionKind
 }
 
-/** Something the app learned about the user, from their messages or added by hand. */
-export interface MemoryFact {
+export type SessionKind = 'primary' | 'shared' | 'worker'
+
+/** Where a thread stands, as the sidebar sorts it: what runs in it, how its last reply ended, what the user hasn't seen. */
+export interface ThreadState {
+  /** When the user last opened it; null for one never opened. */
+  readAt: number | null
+  /** When a reply last ended in it or a bot reported back in it; null for neither (the user's own messages never count). */
+  activityAt: number | null
+  /** A reply is streaming in it now. */
+  streaming: boolean
+  /** How its latest reply (not a post) ended, or that it still runs; null with none. */
+  lastReply: MessageStatus | null
+  /** A reply in it waits for a usage limit to reset. */
+  limitPaused: boolean
+}
+
+/** A thread in the list: the session and where it stands. */
+export interface ListedSession extends Session {
+  state: ThreadState
+}
+
+/** A persistent agent. The primary bot (Tomo) hears all untargeted input; primary is a setting, not a kind of bot. */
+export interface Bot {
+  id: string
+  name: string
+  /**
+   * 'mascot' is Tomo's fox; null shows the name's initial; 'tint:<name>' the initial on one of
+   * AVATAR_TINTS; 'image:<data URL>' a picture (a small PNG, JPEG or WebP).
+   */
+  avatar: string | null
+  instructions: string | null
+  model: string | null
+  effort: Effort | null
+  /** Tool modules it may use (see @shared/rules). */
+  modules: ModuleId[]
+  /** Allow, ask or block for each kind of tool call; a rule it hasn't set has its default. */
+  rules: Rules
+  playbook: string | null
+  isPrimary: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export interface BotPatch {
+  name?: string
+  avatar?: string | null
+  instructions?: string | null
+  model?: string | null
+  effort?: Effort | null
+  modules?: ModuleId[]
+  rules?: Rules
+}
+
+export type JobStatus = 'open' | 'done'
+
+/** What a job's replies used, summed. */
+export interface JobUsage {
+  cost: number
+  tokens: number
+  replies: number
+}
+
+/** One piece of work: what the user switches between (jobs replace chats). */
+export interface Job {
+  id: string
+  title: string
+  status: JobStatus
+  ownerBotId: string | null
+  parentJobId: string | null
+  /** One line on where the job stands, kept fresh after replies. */
+  summary: string | null
+  usage: JobUsage | null
+  createdAt: number
+  updatedAt: number
+  /** The job's thread (its first), which opens when the job does. */
+  threadId: string | null
+}
+
+
+/** What a profile or playbook record is about. */
+export type MemoryRecordType = 'preference' | 'person' | 'project' | 'procedure'
+/** What a bot on a job notes down: decisions, the state of things, what's left, files touched, progress. */
+export type JobNoteKind = 'decision' | 'state' | 'left' | 'files' | 'progress'
+/**
+ * Whose a record is: the user's profile (every bot sees it), one bot's playbook, one job's notes,
+ * or the archive of finished jobs and old conversations (searched with `recall`, never in a prompt).
+ */
+export type MemoryScope = 'profile' | 'bot' | 'job' | 'archive'
+/**
+ * Who wrote a version: the per-message extractor, the daily reconciler, the user in Settings, a bot
+ * (job notes; computer use's `remember`), or the archiver when a job ends.
+ */
+export type MemoryWriter = 'extractor' | 'reconciler' | 'user' | 'bot' | 'archiver'
+
+/**
+ * One thing memory knows, with a stable id: an update is a new version of the same record, and a
+ * restore brings an old version back under the same id. `body` is the current version.
+ */
+export interface MemoryRecord {
   id: number
-  fact: string
+  /** A MemoryRecordType for the profile and playbooks; a JobNoteKind for job notes; 'job' or 'conversation' in the archive. */
+  type: string
+  /** A short name (a person, a project); '' when the body says it all. */
+  title: string
+  /** Other names it goes by, which `recall` matches too. */
+  aliases: string[]
+  scope: MemoryScope
+  /** The bot or job it belongs to, or the archived job or chat; null for the profile. */
+  scopeId: string | null
+  body: string
+  /** Records the body links to with [[title]]. */
+  links: Array<{ id: number; title: string }>
+  /** How many versions it has had, this one included. */
+  versions: number
+  /** Who wrote the current version. */
+  writer: MemoryWriter
+  createdAt: number
+  /** When the current version was written. */
+  updatedAt: number
+}
+
+/** One version of a record, with where it came from ("Why does Tomo think this?"). */
+export interface MemoryVersion {
+  id: number
+  recordId: number
+  body: string
+  addedRev: number
+  /** The revision that replaced or hid it; null for the current version. */
+  removedRev: number | null
+  writer: MemoryWriter
+  sourceJobId: string | null
+  sourceSessionId: string | null
+  /** The source chat's title; null without one, or once the chat is deleted. */
+  sourceTitle: string | null
   createdAt: number
 }
 
 /** One change to memory. Every change is kept, so earlier versions can be restored. */
 export interface MemoryRevision {
   rev: number
-  kind: 'learned' | 'edited' | 'restored' | 'cleared'
+  kind: 'learned' | 'edited' | 'restored' | 'cleared' | 'purged' | 'noted' | 'archived' | 'reconciled'
+  writer: MemoryWriter
   /** The chat a learned fact came from. */
   sessionId: string | null
   note: string | null
@@ -134,18 +321,50 @@ export interface MemoryRun {
   detail: string | null
 }
 
+/** One run of the daily reconciler (reconciler.ts), kept so Settings can say when it last ran and what it did. */
+export interface ReconcilerRun {
+  id: number
+  startedAt: number
+  finishedAt: number | null
+  /** idle: the daily run; manual: Run now in Settings. */
+  trigger: 'idle' | 'manual'
+  outcome: 'running' | 'changed' | 'nothing' | 'unreadable' | 'error'
+  /** The revision it wrote; null when it changed nothing. */
+  rev: number | null
+  model: string | null
+  /** How many finished jobs it read. */
+  jobs: number
+  /** What each change it made does, in a few words (never the text itself). */
+  changes: string[]
+  /** Changes the model proposed that were left out: not tied to a job it read, or not grounded in one. */
+  dropped: number
+  /** The error, or why the reply couldn't be read. */
+  detail: string | null
+}
+
+/** One bot's playbook: its lessons and the user's corrections, written only by the reconciler. */
+export interface Playbook {
+  botId: string
+  botName: string
+  avatar: string | null
+  records: MemoryRecord[]
+}
+
 export interface MemoryView {
-  facts: MemoryFact[]
+  /** The profile now. */
+  records: MemoryRecord[]
   revisions: MemoryRevision[]
   lastRun: MemoryRun | null
+  /** The daily reconciler: its last run, whether one is under way, and the finished jobs it hasn't read. */
+  reconciler: { lastRun: ReconcilerRun | null; running: boolean; pending: number }
+  /** Every bot's playbook, the primary's first. */
+  playbooks: Playbook[]
 }
 
 /** Per-chat settings a chat can change from its composer. */
 export interface SessionPatch {
   model?: string | null
   systemPrompt?: string | null
-  browserEnabled?: boolean
-  computerEnabled?: boolean
   pinned?: boolean
 }
 
@@ -154,6 +373,8 @@ export interface PathNode {
   message: Message
   siblingIds: string[]
   siblingIndex: number
+  /** In the primary's conversation: the job a bot's report or message there (and the answer to it) is about. */
+  jobId?: string | null
 }
 
 export interface SessionView {
@@ -210,6 +431,12 @@ export type StreamEvent =
   | { type: 'computerDoing'; messageId: string; doing: ComputerDoing | null }
   /** The mode a running computer reply works in: decided from the message, or switched by the user. */
   | { type: 'computerMode'; messageId: string; mode: ComputerMode }
+  /** Jobs changed (a new one, a title, a summary, a status): reload the list. */
+  | { type: 'jobs' }
+  /** A thread changed outside a reply the window started: a bot posted, or a bot's reply began. */
+  | { type: 'thread'; sessionId: string }
+  /** What every bot is doing now. */
+  | { type: 'presence'; presence: Record<string, Presence> }
   /** Point: the user is marking part of the screen (active), or finished; a finished mark brings its image and note for the next message. */
   | { type: 'point'; active: boolean; attachments: Attachment[]; error?: string }
 
@@ -248,7 +475,9 @@ export interface UpdateState {
 /** Everything the renderer can call on `window.api`. */
 export interface Api {
   sessions: {
-    list(): Promise<Session[]>
+    list(): Promise<ListedSession[]>
+    /** The user opened a thread (or saw a reply end in it): it isn't unread any more. */
+    markRead(id: string): Promise<void>
     create(): Promise<SessionView>
     get(id: string): Promise<SessionView>
     rename(id: string, title: string): Promise<void>
@@ -256,14 +485,44 @@ export interface Api {
     update(id: string, patch: SessionPatch): Promise<void>
     fork(sessionId: string, messageId: string): Promise<SessionView>
   }
+  bots: {
+    list(): Promise<Bot[]>
+    update(id: string, patch: BotPatch): Promise<Bot[]>
+    /** A new worker bot; returns every bot, the new one last. */
+    create(patch: BotPatch): Promise<Bot[]>
+    /** Deletes a worker (never the primary); its threads stay, readable. */
+    remove(id: string): Promise<Bot[]>
+    /** Makes a bot the primary, the one that hears everything said without picking a job. */
+    setPrimary(id: string): Promise<Bot[]>
+    presence(): Promise<Record<string, Presence>>
+  }
+  jobs: {
+    list(): Promise<Job[]>
+    /** The primary bot's conversation: its turns from every job thread, oldest first. */
+    primary(): Promise<SessionView>
+    /** A message to the primary bot, in its own conversation; returns the primary view. */
+    send(input: { text: string; attachmentIds: string[] }): Promise<SessionView>
+    /** New topic: a divider in the primary's conversation, after which its next reply starts afresh. */
+    newTopic(): Promise<SessionView>
+    setStatus(id: string, status: JobStatus): Promise<void>
+    /** The bots on a job, their threads, and its notes. */
+    detail(id: string): Promise<JobDetail>
+    rename(id: string, title: string): Promise<void>
+    remove(id: string): Promise<void>
+  }
   memory: {
     get(): Promise<MemoryView>
     add(fact: string): Promise<MemoryView>
     edit(id: number, fact: string): Promise<MemoryView>
-    remove(id: number): Promise<MemoryView>
+    /** Deletes a record and every version of it, for good (unlike clear, which hides). */
+    purge(id: number): Promise<MemoryView>
+    /** A record's versions, newest first, each with its source: "Why does Tomo think this?" */
+    versions(id: number): Promise<MemoryVersion[]>
     clear(): Promise<MemoryView>
     /** Brings back the facts as they were after revision `rev` (as a new revision). */
     restore(rev: number): Promise<MemoryView>
+    /** Runs the daily reconciler now, whenever it last ran; resolves once it has finished. */
+    reconcile(): Promise<MemoryView>
   }
   chat: {
     send(input: { sessionId: string; parentId: string; text: string; attachmentIds: string[] }): Promise<SessionView>
@@ -311,6 +570,22 @@ export interface Api {
     setMode(sessionId: string, messageId: string, mode: ComputerMode): Promise<void>
     /** Starts Point (the user marks a spot or box on screen for the next message), or cancels the one under way. True once it is on. */
     point(): Promise<boolean>
+  }
+  /** Account usage: the plan's windows or an API key's dollars, and replies paused at a limit (shared/usage.ts). */
+  usage: {
+    get(): Promise<UsageView>
+    refresh(): Promise<UsageView>
+    /** Keeps a reply paused at a limit from continuing by itself. */
+    cancelPause(messageId: string): Promise<UsageView>
+    /** The estimated share of a window (default weekly) used by these chats. */
+    share(keys: string[], window?: string): Promise<UsageShare>
+    /** A job's estimated share of the 5-hour window and the week (its threads' replies); none with an API key. */
+    jobShare(jobId: string): Promise<UsageShare[]>
+    onEvent(listener: (event: UsageEvent) => void): () => void
+  }
+  /** The window around the page: its buttons in the app bar follow the page's theme, dimmed under a modal's scrim. */
+  appWindow: {
+    setTheme(theme: 'light' | 'dark', dimmed: boolean): void
   }
   updates: {
     get(): Promise<UpdateState>

@@ -7,31 +7,54 @@
   import { stopShortcutLabel } from '@shared/computer'
   import { isMac } from '@/lib/keys'
   import ComputerWaitCard from './ComputerWaitCard.svelte'
+  import LimitPause from './LimitPause.svelte'
+  import { meter } from '@/lib/meter.svelte'
+  import PauseCard from './PauseCard.svelte'
   import StepList from './StepList.svelte'
-  import type { Attachment, PathNode } from '@shared/types'
+  import type { Attachment, Job, PathNode } from '@shared/types'
+  import BotAvatar from './BotAvatar.svelte'
   import { collapse, fade, fly } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
   import AttachmentChip from './AttachmentChip.svelte'
   import BranchSwitcher from './BranchSwitcher.svelte'
   import Icon from './Icon.svelte'
   import Markdown from './Markdown.svelte'
+  import Mascot from './Mascot.svelte'
+  import PostCard from './PostCard.svelte'
   import { usageDetail, usageShort } from '@/lib/usage'
-  import { orb } from '@/lib/orb'
   import { listEditing } from '@/lib/textarea'
 
   let {
     node,
     last = false,
-    far = false
+    far = false,
+    primary = false,
+    job = null,
+    showAuthor = false,
+    queued = false
   }: {
     node: PathNode
     last?: boolean
     /** Well before the end of the chat: skips layout and paint while off-screen (app.css .far). */
     far?: boolean
+    /**
+     * In the primary bot's conversation, which never branches or forks: no edits, regenerations,
+     * forks or branch switcher (a job's own thread has them). Replies carry their author and job.
+     */
+    primary?: boolean
+    /** The job a turn of the primary's conversation went to. */
+    job?: Job | null
+    /** Several bots write in this thread (a job's with posts, or a bot's own): replies say whose they are. */
+    showAuthor?: boolean
+    /** A message sent while a reply ran, waiting to be answered once that ends. */
+    queued?: boolean
   } = $props()
+  const author = $derived(primary || showAuthor ? (app.bots.find((b) => b.id === node.message.authorBotId) ?? (primary ? app.primaryBot : null)) : null)
 
   const message = $derived(node.message)
   const streaming = $derived(message.status === 'streaming')
+  /** Paused at a usage limit: stopped, and goes on by itself once it resets (lib/meter.svelte.ts). A stuck pause is status 'paused'. */
+  const limitPause = $derived(message.status === 'stopped' ? meter.pauseFor(message.id) : null)
   // Lines animate only when they arrive while you watch, never on history or a backfill.
   const live = $derived(streaming && app.liveIds.has(message.id))
   // Browser steps are their own blocks; artifacts are parsed out of the prose between them.
@@ -48,7 +71,8 @@
   /** What computer use waits on in this reply. */
   const wait = $derived(app.computerWait?.messageId === message.id ? app.computerWait : null)
   // The Stop shortcut works while another app covers the chat; say so while a computer reply runs.
-  const computerRun = $derived(streaming && app.chat.computerEnabled && app.computerSupported)
+  // Tomo's own conversation never uses the computer: that work runs in a job's thread.
+  const computerRun = $derived(streaming && !primary && app.chat.computerEnabled && app.computerSupported)
   /** The computer tool this reply runs now; while a card asks something, the card says it. */
   const doing = $derived(streaming && !wait ? (app.computerDoing.get(message.id) ?? null) : null)
   /**
@@ -173,7 +197,29 @@
   }
 </script>
 
-{#if message.role === 'user'}
+{#snippet queuedNote(pad: string)}
+  <!-- Quiet: it goes as soon as the reply it waits for ends and its own starts. -->
+  <div class="mono-label flex h-4 items-center gap-1.5 {pad}" data-queued use:tip={'Sent while a reply was running: answered as soon as it ends'} in:fade={{ duration: 160 }} out:fade={{ duration: 120 }}>
+    <Icon name="clock" size={11} />Queued
+  </div>
+{/snippet}
+
+{#if message.post?.kind === 'rollover'}
+  <!-- Tomo started afresh by itself here: never shown, the chat reads as one. -->
+{:else if message.post?.kind === 'topic'}
+  <!-- New topic: Tomo starts afresh from here; nothing above is carried into its next reply. -->
+  <div class="msg flex items-center gap-3 {far ? 'far' : ''}" role="separator" aria-label="New topic" data-topic in:fade={{ duration: fresh ? 200 : 0 }}>
+    <span class="flex-1 border-t border-line"></span>
+    <span class="mono-label shrink-0" use:tip={`${app.primaryBot?.name ?? 'Tomo'} starts afresh from here`}>New topic</span>
+    <span class="flex-1 border-t border-line"></span>
+  </div>
+{:else if message.post || (message.role === 'user' && message.authorBotId)}
+  <!-- A bot's post (a task, message or report), or what a bot sent this bot's own thread. -->
+  <div class="msg {far ? 'far' : ''}">
+    <PostCard {message} job={primary ? job : null} {fresh} />
+    {#if queued}{@render queuedNote('mt-2 pl-1')}{/if}
+  </div>
+{:else if message.role === 'user'}
   <div class="msg user group flex flex-col items-end gap-1.5 {far ? 'far' : ''}" in:fly={{ y: 8, duration: fresh ? 240 : 0 }}>
     {#if message.attachments.length > 0}
       <div class="flex flex-wrap justify-end gap-1.5">
@@ -190,11 +236,7 @@
     {#if message.content || editing}
       <!-- The same box switches between text and textarea, so editing does not move anything. -->
       <div
-        class="min-w-0 rounded-[18px_18px_6px_18px] bg-bubble transition-shadow duration-150 {editing
-          ? 'w-full shadow-[0_0_0_1px_var(--ring-2)]'
-          : busy
-            ? 'max-w-[80%]'
-            : 'max-w-[80%] cursor-text hover:shadow-[0_0_0_1px_var(--ring)]'}"
+        class="min-w-0 rounded-[18px_18px_6px_18px] bg-bubble transition-shadow duration-150 {editing ? 'w-full shadow-[0_0_0_1px_var(--ring-2)]' : 'max-w-[80%]'}"
       >
         {#if editing}
           <textarea
@@ -222,37 +264,24 @@
             }}
           ></textarea>
         {:else}
-          <div
-            role="button"
-            tabindex={busy ? -1 : 0}
-            aria-label="Edit message"
-            class="px-4 py-2.5 text-[15px] leading-normal break-words whitespace-pre-wrap text-fg outline-none"
-            onclick={() => {
-              // Selecting text to copy should not flip the message into edit mode.
-              if (!getSelection()?.isCollapsed) return
-              if (!busy) startEdit()
-            }}
-            onkeydown={(e) => {
-              if ((e.key === 'Enter' || e.key === ' ') && !busy) {
-                e.preventDefault()
-                startEdit()
-              }
-            }}
-          >
-            {message.content}
-          </div>
+          <!-- Plain text: editing is the Edit button beside it, never a click on the bubble. -->
+          <div class="px-4 py-2.5 text-[15px] leading-normal break-words whitespace-pre-wrap text-fg" data-user-text>{message.content}</div>
         {/if}
       </div>
     {/if}
 
     {#if !editing}
       <div class="flex h-[26px] shrink-0 items-center opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
-        <BranchSwitcher {node} disabled={busy} />
-        <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Edit · makes a branch'} disabled={busy} onclick={startEdit}><Icon name="edit" size={14} /></button>
+        {#if !primary}
+          <BranchSwitcher {node} disabled={busy} />
+          <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Edit · makes a branch'} disabled={busy} onclick={startEdit}><Icon name="edit" size={14} /></button>
+        {/if}
         <button class="icon-btn size-[26px] !rounded-lg" use:tip={copied ? 'Copied' : 'Copy'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={14} /></button>
       </div>
     {/if}
     </div>
+
+    {#if queued && !editing}{@render queuedNote('pr-1')}{/if}
 
     {#if editing}
       <div class="flex items-center gap-1.5" data-edit-actions in:fade={{ duration: 120 }}>
@@ -265,6 +294,17 @@
 {:else if message.role === 'assistant'}
   <!-- data-reply-scope: text selected in here can be quoted in a reply (SelectionReply). -->
   <div class="msg group flex flex-col gap-3 {far ? 'far' : ''}" data-reply-scope in:fade={{ duration: fresh ? 200 : 0 }}>
+    {#if author}
+      <!-- Who answered, and in which job: the primary's conversation runs across jobs. -->
+      <div class="-mb-1 flex h-6 min-w-0 items-center gap-2 text-[13px]" data-reply-author>
+        <BotAvatar bot={author} size={22} state={streaming ? 'thinking' : ''} presence={showAuthor && streaming ? (app.presence[author.id] ?? null) : null} />
+        <span class="shrink-0 font-medium text-fg">{author.name}</span>
+        {#if job}
+          <span class="text-fg-4">·</span>
+          <button class="min-w-0 truncate text-fg-3 transition-colors hover:text-fg" use:tip={job.summary ?? 'Open this job'} onclick={() => app.openJob(job)}>{job.title}</button>
+        {/if}
+      </div>
+    {/if}
     {#each blocks as block, i (i)}
       {#if block.type === 'text'}
         <Markdown source={block.content} streaming={streaming && i === blocks.length - 1} live={live && i === blocks.length - 1} />
@@ -322,7 +362,7 @@
       <StepList steps={[]} live running {doing} />
     {:else if streaming && blocks.length === 0}
       <div class="flex h-[26px] items-center gap-2.5 text-[14px]" aria-live="polite">
-        <span class="orb" style="--s: 18px" use:orb={{ state: 'thinking' }}></span><span class="thinking">Thinking</span>
+        <Mascot size={20} state="thinking" /><span class="thinking">Thinking</span>
       </div>
     {/if}
     {#if computerRun}
@@ -345,7 +385,13 @@
       </div>
     {/if}
 
-    {#if message.status === 'interrupted' || message.status === 'stopped' || message.status === 'error'}
+    <!-- A reply is paused one way or the other: stuck (status 'paused', PauseCard) or at a usage
+         limit (stopped, with a pause that continues by itself at the reset, LimitPause). -->
+    {#if limitPause}
+      <LimitPause pause={limitPause} />
+    {:else if message.status === 'paused'}
+      <PauseCard messageId={message.id} reason={message.error} {busy} />
+    {:else if message.status === 'interrupted' || message.status === 'stopped' || message.status === 'error'}
       <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] {message.status === 'error' ? 'text-danger' : 'text-fg-3'}" in:fade>
         <span class="flex items-center gap-1.5">
           {#if message.status === 'error'}<Icon name="alert" size={14} />{/if}
@@ -367,14 +413,16 @@
           ? 'opacity-100'
           : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}"
       >
-        <BranchSwitcher {node} disabled={busy} />
+        {#if !primary}<BranchSwitcher {node} disabled={busy} />{/if}
         <button class="icon-btn size-[26px] !rounded-lg" use:tip={copied ? 'Copied' : 'Copy'} onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={14} /></button>
-        <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Regenerate · makes a branch'} disabled={busy} onclick={() => app.regenerate(message.id)}>
-          <Icon name="refresh" size={14} />
-        </button>
-        <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Fork into a new chat from here'} onclick={() => app.fork(message.id)}>
-          <Icon name="fork" size={14} />
-        </button>
+        {#if !primary}
+          <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Regenerate · makes a branch'} disabled={busy} onclick={() => app.regenerate(message.id)}>
+            <Icon name="refresh" size={14} />
+          </button>
+          <button class="icon-btn size-[26px] !rounded-lg" use:tip={'Fork into a new job from here'} onclick={() => app.fork(message.id)}>
+            <Icon name="fork" size={14} />
+          </button>
+        {/if}
         {#if message.model || message.usage}
           <span class="mono-stat ml-2 min-w-0 truncate" use:tip={message.usage ? usageDetail(message.usage) : null} in:fade={{ duration: 200 }}
             >{[message.model ? modelName(message.model) : '', message.usage ? usageShort(message.usage) : ''].filter(Boolean).join(' · ')}</span

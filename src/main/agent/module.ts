@@ -11,6 +11,8 @@ export interface RunContext {
   readonly sessionId: string
   /** The assistant message being written. */
   readonly messageId: string
+  /** The job the reply works on (its thread's job), for tool sets that keep job notes (agent/notes.ts). */
+  readonly jobId?: string | null
   /** Adds a step line to the reply; it is saved with the message and shown at once. */
   readonly step: (step: Step) => Promise<void>
   /** Adds a file the user asked for (a screenshot) to the reply. */

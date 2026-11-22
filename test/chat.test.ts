@@ -13,6 +13,7 @@ import { Browser, type BrowserApi, type PageSnapshot } from '../src/main/service
 import { SettingsStore } from '../src/main/services/SettingsStore'
 import { Agent } from '../src/main/agent/driver'
 import { BROWSER_INSTRUCTIONS } from '../src/main/agent/browser'
+import { RECALL_INSTRUCTIONS } from '../src/main/agent/recall'
 import { HISTORY_NOTE } from '../src/main/agent/history'
 import { WRITING_GUIDELINES } from '../src/main/guidelines'
 import { ComputerUse, noOverlay, type OverlayPort, type Platform } from '../src/main/computer'
@@ -263,18 +264,96 @@ describe('replies', () => {
     await t.runtime.dispose()
   })
 
-  test('a reply that reaches the step limit says so and stays complete', async () => {
+  test('a reply has no step limit: 55 different calls run to the end, judged at checkpoints by the primary, noted in the job', async () => {
     const t = setup(async function* (t) {
-      yield* t.text('Working on it.')
-      yield t.result({ subtype: 'error_max_turns', isError: true, turns: 40 })
+      // The checkpoint judge (a hidden call to the primary): clearly progressing.
+      if (isAsk(t.call)) {
+        yield* t.text('{"done": "Read 30 pages", "left": "30 more", "closer": "closer", "verdict": "progressing", "confidence": 0.95}')
+        return void (yield t.result())
+      }
+      if (promptText(t.call).includes('What did you read?')) {
+        yield* t.text('Pages.')
+        return void (yield t.result())
+      }
+      for (let i = 0; i < 55; i++) {
+        yield* t.tool('mcp__nothing__look', { page: i })
+        // Let the judge's call run in between, as a real model call would.
+        await new Promise((r) => setTimeout(r, 1))
+      }
+      yield* t.text('Done after 55 calls.')
+      yield t.result({ turns: 56 })
     })
-    const s = await t.run(newSession)
+    // A job's thread, as every chat is; the primary on Opus, with instructions of its own.
+    const { job, thread: s } = await t.run(
+      Db.use((db) =>
+        db.use((d) => {
+          d.updateBot(d.primaryBot().id, { model: 'claude-opus-5-5', instructions: 'Call me Sam.' })
+          return d.createJob({ title: 'Read the report', botId: d.primaryBot().id })
+        })
+      )
+    )
+    await t.run(Db.use((db) => db.use((d) => d.writeNote(job.id, { kind: 'decision', text: 'Skip the appendix.', title: 'Scope' }, { sessionId: s.id }))))
     await t.run(sendTo(s, s.rootId, 'Do a lot'))
     await t.waitForDone(1)
-    expect((await t.run(Chat.use((c) => c.view(s.id)))).path[1]!.message).toMatchObject({
-      status: 'complete',
-      content: 'Working on it.\nStopped after 40 steps. Ask me to keep going if you want me to continue.'
-    })
+    expect(t.replies()[0]!.options.maxTurns).toBeUndefined()
+    const view = await t.run(Chat.use((c) => c.view(s.id)))
+    const replyId = view.path[1]!.message.id
+    expect(view.path[1]!.message).toMatchObject({ status: 'complete', content: 'Done after 55 calls.' })
+    // Checkpoints at 30, then 15 later while clearly progressing: 45 (the next, 60, is past the end).
+    const notes = await t.run(Db.use((db) => db.use((d) => d.progressNotes(job.id, s.id, 10))))
+    expect(notes.map((n) => [n.step, n.verdict, n.done, n.messageId])).toEqual([
+      [30, 'progressing', 'Read 30 pages', replyId],
+      [45, 'progressing', 'Read 30 pages', replyId]
+    ])
+    // In the job's notes, for the bots on it and the primary.
+    const jobNotes = await t.run(Db.use((db) => db.use((d) => d.jobNotes(job.id))))
+    expect(jobNotes.map((n) => [n.type, n.title])).toEqual([
+      ['decision', 'Scope'],
+      ['progress', 'Checkpoint at step 30'],
+      ['progress', 'Checkpoint at step 45']
+    ])
+    const judged = t.calls.filter(isAsk)
+    expect(judged).toHaveLength(2)
+    // The primary judges, as itself, on Sonnet rather than its Opus.
+    expect(judged[0]!.options.model).toBe('claude-sonnet-5-5')
+    expect(systemOf(judged[0]!)).toContain("You are Tomo, the user's primary assistant")
+    expect(systemOf(judged[0]!)).toContain('<instructions>\nCall me Sam.\n</instructions>')
+    expect(promptText(judged[0]!)).toContain('<job>\nTitle: Read the report')
+    expect(promptText(judged[0]!)).toContain('Scope: Skip the appendix.')
+    expect(promptText(judged[0]!)).toContain('<task>\nDo a lot\n</task>')
+    // The reply's own checkpoints come as its earlier notes, not again in the job's.
+    expect(promptText(judged[1]!)).toContain('- At step 30: done: Read 30 pages')
+    expect(promptText(judged[1]!)).not.toContain('Checkpoint at step 30')
+    // The next reply on the job has them in its notes.
+    await t.run(sendTo(s, replyId, 'What did you read?'))
+    await t.waitForDone(2)
+    expect(systemOf(t.replies()[1]!)).toContain('Checkpoint at step 45: Done: Read 30 pages | Left: 30 more | getting closer; judged progressing (95% sure)')
+    await t.runtime.dispose()
+  })
+
+  test('the small model judges when the primary has no Claude model, and a reply off a job keeps its notes to itself', async () => {
+    const t = setup(async function* (t) {
+      if (isAsk(t.call)) {
+        yield* t.text('{"done": "Read pages", "left": "More", "closer": "closer", "verdict": "progressing", "confidence": 0.5}')
+        return void (yield t.result())
+      }
+      for (let i = 0; i < 41; i++) {
+        yield* t.tool('mcp__nothing__look', { page: i })
+        await new Promise((r) => setTimeout(r, 1))
+      }
+      yield* t.text('Done.')
+      yield t.result({ turns: 42 })
+    }, { titleModel: '', memoryModel: '', defaultModel: 'deepseek/deepseek-v4.1-flash' })
+    await t.run(Db.use((db) => db.use((d) => d.updateBot(d.primaryBot().id, { model: 'deepseek/deepseek-v4.1-flash' }))))
+    const s = await t.run(newSession)
+    await t.run(sendTo(s, s.rootId, 'Look around'))
+    await t.waitForDone(1)
+    const judged = t.calls.filter(isAsk)
+    // At 30, then 10 later (progressing, but not clearly).
+    expect(judged).toHaveLength(2)
+    expect(judged[0]!.options.model).toBe('claude-haiku-5-5')
+    expect(systemOf(judged[0]!)).toContain('You check on an AI assistant')
+    expect(promptText(judged[1]!)).toContain('- At step 30: done: Read pages')
     await t.runtime.dispose()
   })
 
@@ -611,6 +690,11 @@ describe('memory', () => {
     await t.run(sendTo(later, later.rootId, 'What should I see this weekend?'))
     await t.waitForDone(2)
     expect(systemOf(t.replies().at(-1)!)).toContain('- Lives in Lisbon.')
+    // Replies can search long-term memory, read-only, with recall.
+    const reply = t.replies().at(-1)!
+    expect(Object.keys(reply.options.mcpServers!)).toEqual(['memory'])
+    expect(reply.options.tools).toEqual(['ToolSearch'])
+    expect(systemOf(reply)).toContain(RECALL_INSTRUCTIONS)
     await t.runtime.dispose()
   })
 
@@ -641,6 +725,39 @@ describe('memory', () => {
     await t.runtime.dispose()
   })
 
+  test("the bot's playbook reaches its prompt when a thread starts, and stays as it was for the rest of it", async () => {
+    const t = setup(
+      async function* (t) {
+        yield* t.text(isAsk(t.call) ? '{}' : 'ok')
+        yield t.result()
+      },
+      { titleModel: '', memoryModel: 'claude-haiku-5-5' }
+    )
+    const lesson = (body: string) =>
+      t.run(
+        Db.use((db) =>
+          db.use((d) => d.reconcile({ changes: [{ what: 'Added', closes: [], puts: [{ body, scope: 'bot', scopeId: 'tomo', type: 'procedure', jobId: 'j', sessionId: null }] }] }, 'Daily review'))
+        )
+      )
+    await lesson('Never add comments to code.')
+    const s = await t.run(newSession)
+    const first = await t.run(sendTo(s, s.rootId, 'Write a sort function.'))
+    await t.waitForDone(1)
+    expect(systemOf(t.replies().at(-1)!)).toContain('Your playbook: lessons from your earlier jobs')
+    expect(systemOf(t.replies().at(-1)!)).toContain('- Never add comments to code.')
+    const before = systemOf(t.replies().at(-1)!)
+    // A lesson learned meanwhile waits for the next thread: the system prompt (and its cache) stays the same.
+    await lesson('Use tabs for indentation.')
+    await t.run(sendTo(s, first.path.at(-1)!.message.id, 'And a search one.'))
+    await t.waitForDone(2)
+    expect(systemOf(t.replies().at(-1)!)).toBe(before)
+    const next = await t.run(newSession)
+    await t.run(sendTo(next, next.rootId, 'Another function.'))
+    await t.waitForDone(3)
+    expect(systemOf(t.replies().at(-1)!)).toContain('- Use tabs for indentation.')
+    await t.runtime.dispose()
+  })
+
   test('with memory off, nothing is read or sent', async () => {
     const t = setup(reply)
     const s = await t.run(newSession)
@@ -649,6 +766,7 @@ describe('memory', () => {
     await new Promise((r) => setTimeout(r, 20))
     expect(t.calls).toHaveLength(1)
     expect(t.events.some((e) => e.type === 'memory')).toBe(false)
+    expect(t.calls[0]!.options.mcpServers).toEqual({})
     await t.runtime.dispose()
   })
 })
@@ -656,7 +774,7 @@ describe('memory', () => {
 describe('browser', () => {
   const browserChat = async (t: ReturnType<typeof setup>) => {
     const s = await t.run(newSession)
-    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { browserEnabled: true }))))
+    await t.run(Db.use((db) => db.use((d) => d.updateBot(d.botOf(s.id).id, { modules: ['browser'] }))))
     return s
   }
 
@@ -761,7 +879,7 @@ describe('browser', () => {
 describe('computer use', () => {
   const computerChat = Effect.gen(function* () {
     const s = yield* newSession
-    yield* (yield* Db).use((d) => d.updateSession(s.id, { computerEnabled: true }))
+    yield* (yield* Db).use((d) => d.updateBot(d.botOf(s.id).id, { modules: ['computer'] }))
     return s
   })
   const withComputer = (script: Script, over: Partial<Platform> = {}) => {
@@ -814,7 +932,7 @@ describe('computer use', () => {
   test('with the browser on too, the prompt says which to use for what', async () => {
     const t = withComputer(reply)
     const s = await t.run(computerChat)
-    await t.run(Db.use((db) => db.use((d) => d.updateSession(s.id, { browserEnabled: true }))))
+    await t.run(Db.use((db) => db.use((d) => d.updateBot(d.botOf(s.id).id, { modules: ['browser', 'computer'] }))))
     await t.run(sendTo(s, s.rootId, 'Hi'))
     await t.waitForDone(1)
     expect(Object.keys(t.calls[0]!.options.mcpServers ?? {}).sort()).toEqual(['browser', 'computer'])
@@ -1043,3 +1161,198 @@ describe('computer use', () => {
   })
 })
 
+
+describe('stuck replies', () => {
+  test('a reply looping on the same browser call is paused with why, kept, recorded, and Continue resumes it with the reason', async () => {
+    let looped = 0
+    const t = setup(async function* (t) {
+      const last = t.call.prompt.at(-1)?.text ?? ''
+      if (last.includes('cut off')) {
+        yield* t.text('Tried another way: done.')
+        return void (yield t.result())
+      }
+      yield* t.text('Looking at the page.')
+      for (;;) {
+        looped++
+        yield* t.tool('mcp__browser__snapshot')
+      }
+    })
+    const s = await t.run(newSession)
+    await t.run(Db.use((db) => db.use((d) => d.updateBot(d.botOf(s.id).id, { modules: ['browser'] }))))
+    const view = await t.run(sendTo(s, s.rootId, 'Find the camera settings'))
+    const id = view.path[1]!.message.id
+    await t.waitForDone(1)
+    expect(looped).toBe(4)
+    const paused = (await t.run(Chat.use((c) => c.view(s.id)))).path[1]!.message
+    expect(paused).toMatchObject({ status: 'paused', error: 'It made the same snapshot call 4 times in a row and got the same result each time.' })
+    expect(paused.content.startsWith('Looking at the page.')).toBe(true)
+    expect(t.events.find((e) => e.type === 'done')).toMatchObject({ status: 'paused' })
+    const recorded = await t.run(Db.use((db) => db.use((d) => d.stuckPauses())))
+    expect(recorded).toMatchObject([{ sessionId: s.id, messageId: id, signal: 'same_result', step: 5, resumedAt: null }])
+
+    const point = (await t.run(Db.use((db) => db.use((d) => d.agentPoint(id)))))!
+    await t.run(Chat.use((c) => c.continue({ sessionId: s.id, assistantId: id })))
+    await t.waitForDone(2)
+    const call = t.replies()[1]!
+    expect(call.options).toMatchObject({ resume: point.session, resumeSessionAt: point.uuid })
+    expect(promptText(call)).toContain('You were paused because you seemed stuck: It made the same snapshot call 4 times in a row')
+    expect(promptText(call).endsWith("don't say that you are continuing.")).toBe(true)
+    const done = (await t.run(Chat.use((c) => c.view(s.id)))).path[1]!.message
+    expect(done).toMatchObject({ status: 'complete', error: null })
+    expect(done.content.endsWith('Tried another way: done.')).toBe(true)
+    const [resumed] = await t.run(Db.use((db) => db.use((d) => d.stuckPauses())))
+    expect(resumed!.resumedAt).not.toBeNull()
+    await t.runtime.dispose()
+  })
+
+  test('progress notes (in the job) and pauses survive a restart in chat.db', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chat-v2-'))
+    const first = setup(reply, undefined, dir)
+    const { job, thread: s } = await first.run(Db.use((db) => db.use((d) => d.createJob({ title: 'Job', botId: d.primaryBot().id }))))
+    await first.run(
+      Db.use((db) =>
+        db.use((d) => {
+          d.addProgressNote(job.id, { sessionId: s.id, messageId: 'm', step: 30, done: 'a', left: 'b', closer: 'closer', verdict: 'progressing', confidence: 0.9, createdAt: 1 })
+          d.addProgressNote(job.id, { sessionId: s.id, messageId: 'm', step: 45, done: 'c', left: 'd', closer: 'same', verdict: 'unclear', confidence: 0.5, createdAt: 2 })
+          d.recordPause({ sessionId: s.id, messageId: 'm', signal: 'alternating', reason: 'r', step: 9 }, 3)
+        })
+      )
+    )
+    await first.runtime.dispose()
+    const second = setup(reply, undefined, dir)
+    const [notes, pauses] = await second.run(Db.use((db) => db.use((d) => [d.progressNotes(job.id, s.id, 1), d.stuckPauses()] as const)))
+    expect(notes.map((n) => [n.step, n.done, n.left, n.closer, n.verdict, n.confidence])).toEqual([[45, 'c', 'd', 'same', 'unclear', 0.5]])
+    expect(pauses).toMatchObject([{ signal: 'alternating', step: 9, createdAt: 3, resumedAt: null }])
+    await second.runtime.dispose()
+  })
+})
+
+describe('rules', () => {
+  /** A chat whose bot has these modules and rules. */
+  const chatWith = (modules: Array<'browser' | 'computer'>, rules: Record<string, string>) =>
+    Effect.gen(function* () {
+      const s = yield* newSession
+      yield* (yield* Db).use((d) => d.updateBot(d.botOf(s.id).id, { modules, rules: rules as never }))
+      return s
+    })
+  const textOf = (r: { permission: { behavior: string; message?: string }; result: { content: Array<{ text?: string }> } | null }) =>
+    r.permission.behavior === 'deny' ? `denied: ${r.permission.message}` : (r.result?.content ?? []).map((c) => c.text ?? '').join('').slice(0, 30)
+  const waitsOf = (t: ReturnType<typeof setup>) => t.events.flatMap((e) => (e.type === 'computer' ? [e.waiting] : []))
+
+  test('a blocked tool is refused in the reply with why, and never runs; the rest of the module still works', async () => {
+    const out: string[] = []
+    const log: string[] = []
+    const t = setup(
+      async function* (t) {
+        out.push(textOf(yield* t.tool('mcp__browser__click', { ref: 'e1' })))
+        out.push(textOf(yield* t.tool('mcp__browser__navigate', { url: 'http://shop.test/' })))
+        yield* t.text('Could not click.')
+        yield t.result()
+      },
+      undefined,
+      undefined,
+      log
+    )
+    const s = await t.run(chatWith(['browser'], { 'browser.act': 'block' }))
+    await t.run(sendTo(s, s.rootId, 'Buy it'))
+    await t.waitForDone(1)
+    expect(out[0]).toContain('denied: ')
+    expect(out[0]).toContain('block')
+    expect(out[0]).toContain('Settings › Bots')
+    expect(out[1]).not.toContain('denied')
+    expect(log.some((l) => l.startsWith('click'))).toBe(false)
+    expect(log).toContain('navigate http://shop.test/')
+    expect(waitsOf(t).filter(Boolean)).toEqual([])
+    const message = (await t.run(Chat.use((c) => c.view(s.id)))).path[1]!.message
+    expect(message.status).toBe('complete')
+    await t.runtime.dispose()
+  })
+
+  test('an ask tool waits on the approval card in its chat: approved it runs, denied it does not', async () => {
+    const out: string[] = []
+    const log: string[] = []
+    const t = setup(
+      async function* (t) {
+        out.push(textOf(yield* t.tool('mcp__browser__click', { ref: 'e1' })))
+        out.push(textOf(yield* t.tool('mcp__browser__type', { ref: 'e2', text: 'hello' })))
+        yield* t.text('Done.')
+        yield t.result()
+      },
+      undefined,
+      undefined,
+      log
+    )
+    const s = await t.run(chatWith(['browser'], { 'browser.act': 'ask' }))
+    const view = await t.run(sendTo(s, s.rootId, 'Buy it'))
+    const id = view.path[1]!.message.id
+    await settle(() => waitsOf(t).at(-1)?.kind === 'approval')
+    const first = waitsOf(t).at(-1)!
+    expect(first).toMatchObject({ kind: 'approval', title: 'Act on a web page', detail: 'e1', sessionId: s.id, messageId: id })
+    expect(log.some((l) => l.startsWith('click'))).toBe(false)
+    await t.run(ComputerUse.use((c) => c.approve(first.id, true)))
+    await settle(() => waitsOf(t).at(-1)?.kind === 'approval' && waitsOf(t).at(-1)!.id !== first.id)
+    const second = waitsOf(t).at(-1)!
+    expect(second).toMatchObject({ title: 'Act on a web page', detail: 'hello · e2' })
+    await t.run(ComputerUse.use((c) => c.approve(second.id, false)))
+    await t.waitForDone(1)
+    expect(log).toContain('click e1')
+    expect(log.some((l) => l.startsWith('type'))).toBe(false)
+    expect(out[1]).toBe('denied: The user denied this.')
+    await t.runtime.dispose()
+  })
+
+  test("computer use follows the bot's rules, and irreversible commands ask even when other commands are allowed", async () => {
+    const out: string[] = []
+    const fake = fakePlatform()
+    const t = setup(
+      async function* (t) {
+        const signal = new AbortController().signal
+        const ask = (name: string, input: Record<string, unknown>) => t.call.options.canUseTool!(name, input, { signal, toolUseID: `toolu_${name}` } as never)
+        out.push(((await ask('Bash', { command: 'npm install' })) as { behavior: string }).behavior)
+        out.push(((await ask('Write', { file_path: 'C:\notes.txt', content: 'x' })) as { behavior: string }).behavior)
+        out.push(((await ask('Bash', { command: 'rm -rf build' })) as { behavior: string }).behavior)
+        yield* t.text('Done.')
+        yield t.result()
+      },
+      undefined,
+      undefined,
+      [],
+      { platform: fake.p, overlay: fakeOverlay().port }
+    )
+    const s = await t.run(chatWith(['computer'], { 'shell.run': 'allow', 'files.write': 'block', 'shell.irreversible': 'allow' }))
+    await t.run(sendTo(s, s.rootId, 'Set it up'))
+    await settle(() => waitsOf(t).at(-1)?.kind === 'approval')
+    expect(out).toEqual(['allow', 'deny'])
+    expect(waitsOf(t).at(-1)).toMatchObject({ kind: 'approval', title: 'Run a command on your computer', detail: 'rm -rf build' })
+    await t.run(ComputerUse.use((c) => c.approve(waitsOf(t).at(-1)!.id, true)))
+    await t.waitForDone(1)
+    expect(out).toEqual(['allow', 'deny', 'allow'])
+    // The bot's stored rules never say allow for a locked rule.
+    const bot = await t.run(Db.use((db) => db.use((d) => d.botOf(s.id))))
+    expect(bot.rules).toEqual({ 'shell.run': 'allow', 'files.write': 'block', 'shell.irreversible': 'ask' })
+    await t.runtime.dispose()
+  })
+
+  test('two chats asking at once each get their turn on the card, rather than denying each other', async () => {
+    const out: string[] = []
+    const t = setup(async function* (t) {
+      out.push(textOf(yield* t.tool('mcp__browser__click', { ref: 'e1' })))
+      yield* t.text('Done.')
+      yield t.result()
+    })
+    const a = await t.run(chatWith(['browser'], { 'browser.act': 'ask' }))
+    const b = await t.run(newSession)
+    await t.run(sendTo(a, a.rootId, 'One'))
+    await settle(() => waitsOf(t).at(-1)?.kind === 'approval')
+    await t.run(sendTo(b, b.rootId, 'Two'))
+    await new Promise((r) => setTimeout(r, 50))
+    const first = waitsOf(t).at(-1)!
+    expect(first.sessionId).toBe(a.id)
+    await t.run(ComputerUse.use((c) => c.approve(first.id, true)))
+    await settle(() => waitsOf(t).at(-1)?.kind === 'approval' && waitsOf(t).at(-1)!.sessionId === b.id)
+    await t.run(ComputerUse.use((c) => c.approve(waitsOf(t).at(-1)!.id, true)))
+    await t.waitForDone(2)
+    expect(out.filter((o) => o.startsWith('denied'))).toEqual([])
+    await t.runtime.dispose()
+  })
+})

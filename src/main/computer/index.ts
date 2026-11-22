@@ -9,7 +9,8 @@ import type { RunContext, ToolModule } from '../agent/module'
 import { makeControl } from './control'
 import { makeInteraction, type Owner, type TeachOutcome, type TeachTarget, type Waiting } from './interaction'
 import type { Platform } from './platform/types'
-import { makePolicy, builtinStep, BUILTIN_TOOLS } from './policy'
+import { DEFAULT_ACCESS, decide as decideAccess } from '../agent/rules'
+import { makePolicy, builtinStep, BUILTIN_TOOLS, type PolicyDecision } from './policy'
 import type { Activity, OverlayPort } from './port'
 import { instructions } from './prompt'
 import { MAX_TASK_READS, MAX_TASK_TOOLS, SERVER, makeServer, type Mode } from './tools'
@@ -26,6 +27,17 @@ export type { Platform } from './platform/types'
 /** Fast models think little on each click-and-look step; the thorough one a bit more. */
 export const effortFor = (model: string): 'low' | 'medium' => (/haiku|sonnet/i.test(model) ? 'low' : 'medium')
 
+/** How one reply's computer use runs: its mode (read at every call), and the rules of its bot. */
+export interface ModuleOptions {
+  readonly mode: () => Mode
+  readonly setMode?: (mode: Mode) => void
+  readonly stop?: () => void
+  /** The reply's bot's rules for a call (agent/rules.ts); Tomo's defaults if not given. */
+  readonly decide?: (name: string, input: Record<string, unknown>) => PolicyDecision
+}
+
+const defaultDecide = (name: string, input: Record<string, unknown>) => decideAccess(DEFAULT_ACCESS, name, input)
+
 export interface ComputerUseApi {
   /** False where computer use can't run (e.g. Linux on Wayland), or when the layer was built without a platform. */
   readonly supported: boolean
@@ -33,7 +45,12 @@ export interface ComputerUseApi {
    * The tool set for one reply. The mode is read at every tool call; `setMode` switches it (the
    * overlay's "Do it for me"). `stop` is the chat's Stop for this reply, which the Stop shortcut runs.
    */
-  readonly module: (ctx: RunContext, opts: { mode: () => Mode; setMode?: (mode: Mode) => void; stop?: () => void }) => ToolModule
+  readonly module: (ctx: RunContext, opts: ModuleOptions) => ToolModule
+  /**
+   * Asks the user to approve a call of another tool set, on the same card as computer use's own
+   * approvals (which brings the window forward). Waits its turn behind another reply's approval.
+   */
+  readonly ask: (owner: Owner, title: string, detail: string) => Effect.Effect<boolean>
   /** Called with the computer tool each reply runs now, live (null once it ends); returns a function that stops listening. */
   readonly onDoing: (listener: (e: { sessionId: string; messageId: string; doing: ComputerDoing | null }) => void) => () => void
   /** Cuts off input in progress and releases every wait. Input stays off until `userTurn`. The Stop shortcut runs it. */
@@ -221,7 +238,7 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
     for (const f of [...stops]) f()
   })
 
-  const module = (ctx: RunContext, opts: { mode: () => Mode; setMode?: (mode: Mode) => void; stop?: () => void }): ToolModule => {
+  const module = (ctx: RunContext, opts: ModuleOptions): ToolModule => {
     if (!control || !p) throw new Error('Computer use needs Windows, macOS, or Linux with an X11 display.')
     const owner: Owner = { sessionId: ctx.sessionId, messageId: ctx.messageId }
     let ended = false
@@ -340,7 +357,7 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
       }),
       builtins: BUILTIN_TOOLS,
       stepFor: builtinStep,
-      canUseTool: makePolicy({ control, interaction, owner, mode: opts.mode, ended: () => ended || ctx.signal.aborted, count, claim }),
+      canUseTool: makePolicy({ control, interaction, owner, mode: opts.mode, ended: () => ended || ctx.signal.aborted, count, claim, decide: opts.decide ?? defaultDecide }),
       end
     }
   }
@@ -348,6 +365,7 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
   return {
     supported: p !== null,
     module,
+    ask: (owner, title, detail) => interaction.requestApproval(owner, title, detail),
     stop,
     stopReply: stopOne,
     userTurn,

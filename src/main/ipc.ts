@@ -2,7 +2,10 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { BrowserWindow, app, dialog, ipcMain, shell, systemPreferences } from 'electron'
 import { Cause, Effect, type ManagedRuntime } from 'effect'
-import type { AudioAnalysis, IpcResult, MemoryView, NewAttachmentInput, RecordReply, SessionPatch, SettingsPatch } from '@shared/types'
+import type { AudioAnalysis, BotPatch, IpcResult, MemoryView, NewAttachmentInput, RecordReply, SessionPatch, SettingsPatch } from '@shared/types'
+import { isClaudeModel } from '@shared/models'
+import { cleanModules, cleanRules } from '@shared/rules'
+import { cleanAvatar } from '@shared/bots'
 import { errorMessage } from './errors'
 import { checkForUpdates, downloadUpdate, installUpdate, updateState } from './updater'
 import { publishArtifact } from './protocols'
@@ -14,9 +17,30 @@ import { ComputerUse } from './computer'
 import { Db, type DbApi } from './services/Db'
 import { isSensitive } from './memory'
 import { ElevenLabs } from './services/ElevenLabs'
+import { Jobs } from './services/Jobs'
 import { SettingsStore } from './services/SettingsStore'
+import { Usage } from './usage/Usage'
+import { Reconciler } from './services/Reconciler'
+import { Team } from './services/Team'
 
-export type MainServices = Db | Chat | Attachments | SettingsStore | Agent | ElevenLabs | Browser | ComputerUse
+export type MainServices = Db | Chat | Jobs | Team | Attachments | SettingsStore | Agent | ElevenLabs | Browser | ComputerUse | Usage | Reconciler
+
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/** A change to a bot from Settings: blank instructions or an unknown model or effort are refused rather than saved. */
+const botPatch = (v: unknown): BotPatch => {
+  const p = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>
+  return {
+    ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name.trim().slice(0, 40) } : {}),
+    ...(typeof p.instructions === 'string' ? { instructions: p.instructions } : {}),
+    ...(typeof p.model === 'string' && isClaudeModel(p.model) ? { model: p.model } : {}),
+    ...(EFFORTS.find((e) => e === p.effort) ? { effort: p.effort as BotPatch['effort'] } : {}),
+    // The fox, the name's initial (on a tint), or a small picture.
+    ...(cleanAvatar(p.avatar) !== undefined ? { avatar: cleanAvatar(p.avatar)! } : {}),
+    ...(Array.isArray(p.modules) ? { modules: cleanModules(p.modules) } : {}),
+    ...(p.rules && typeof p.rules === 'object' ? { rules: cleanRules(p.rules) } : {})
+  }
+}
 
 type Handler = (...args: any[]) => Effect.Effect<unknown, { readonly _tag: string; readonly message: string }, MainServices>
 
@@ -57,7 +81,17 @@ const typedFact = (v: unknown): string => {
 
 const memoryView = Effect.gen(function* () {
   const lastRun = yield* (yield* Chat).lastMemoryRun
-  return yield* (yield* Db).use((d): MemoryView => ({ facts: d.liveFacts(), revisions: d.memoryHistory(), lastRun }))
+  const running = yield* (yield* Reconciler).running
+  return yield* (yield* Db).use((d): MemoryView => {
+    const playbooks = d.playbooks()
+    return {
+      records: d.profile(),
+      revisions: d.memoryHistory(),
+      lastRun,
+      reconciler: { lastRun: d.lastReconcilerRun(), running, pending: d.pendingReconcileCount() },
+      playbooks: d.playbookBots().map((b) => ({ botId: b.id, botName: b.name, avatar: b.avatar, records: playbooks.get(b.id) ?? [] }))
+    }
+  })
 })
 
 /** Runs a change to memory made in Settings, then returns the new state. */
@@ -84,13 +118,13 @@ export const pinWindow = (win: BrowserWindow, on: boolean) => {
 
 const handlers: Record<string, Handler> = {
   'sessions:list': () => Db.use((db) => db.use((d) => d.listSessions())),
+  'sessions:markRead': (id) => Db.use((db) => db.use((d) => d.markRead(str(id, 'id')))),
+  // A new job's thread, owned by the primary bot.
   'sessions:create': () =>
     Effect.gen(function* () {
       const db = yield* Db
-      const session = yield* db.use((d) =>
-        d.createSession({ title: NEW_SESSION_TITLE, model: null, systemPrompt: null, forkedFromSessionId: null })
-      )
-      return yield* (yield* Chat).view(session.id)
+      const { thread } = yield* db.use((d) => d.createJob({ title: NEW_SESSION_TITLE, botId: d.primaryBot().id }))
+      return yield* (yield* Chat).view(thread.id)
     }),
   'sessions:get': (id) => Chat.use((chat) => chat.view(str(id, 'id'))),
   'sessions:rename': (id, title) =>
@@ -103,8 +137,6 @@ const handlers: Record<string, Handler> = {
         d.updateSession(str(id, 'id'), {
           ...(patch.model !== undefined ? { model: patch.model || null } : {}),
           ...(patch.systemPrompt !== undefined ? { systemPrompt: patch.systemPrompt?.trim() ? patch.systemPrompt : null } : {}),
-          ...(typeof patch.browserEnabled === 'boolean' ? { browserEnabled: patch.browserEnabled } : {}),
-          ...(typeof patch.computerEnabled === 'boolean' ? { computerEnabled: patch.computerEnabled } : {}),
           ...(typeof patch.pinned === 'boolean' ? { pinned: patch.pinned } : {})
         })
       )
@@ -121,18 +153,37 @@ const handlers: Record<string, Handler> = {
   'sessions:fork': (sessionId, messageId) =>
     Effect.gen(function* () {
       const db = yield* Db
-      const fork = yield* db.use((d) => d.forkSession(str(sessionId, 'sessionId'), str(messageId, 'messageId')))
+      // A fork is a job of its own, a child of the one it came from.
+      const fork = yield* db.use((d) => d.forkThread(str(sessionId, 'sessionId'), str(messageId, 'messageId')))
       return yield* (yield* Chat).view(fork.id)
     }),
+
+  'bots:list': () => Db.use((db) => db.use((d) => d.listBots())),
+  'bots:update': (id, patch) => Db.use((db) => db.use((d) => (d.updateBot(str(id, 'id'), botPatch(patch)), d.listBots()))),
+  'bots:create': (patch) => Team.use((t) => t.createBot(botPatch(patch))),
+  'bots:remove': (id) => Team.use((t) => t.removeBot(str(id, 'id'))),
+  'bots:setPrimary': (id) => Team.use((t) => t.setPrimary(str(id, 'id'))),
+  'bots:presence': () => Team.use((t) => t.presence),
+
+  'jobs:list': () => Db.use((db) => db.use((d) => d.listJobs())),
+  'jobs:primary': () => Jobs.use((j) => j.primary),
+  'jobs:send': (input) =>
+    Jobs.use((j) => j.send({ text: str(input.text, 'text'), attachmentIds: ids(input.attachmentIds) })),
+  'jobs:newTopic': () => Jobs.use((j) => j.newTopic),
+  'jobs:setStatus': (id, status) => Jobs.use((j) => j.setStatus(str(id, 'id'), status === 'done' ? 'done' : 'open')),
+  'jobs:detail': (id) => Team.use((t) => t.detail(str(id, 'id'))),
+  'jobs:rename': (id, title) => Db.use((db) => db.use((d) => d.renameJob(str(id, 'id'), str(title, 'title').trim() || NEW_SESSION_TITLE))),
+  'jobs:remove': (id) => Jobs.use((j) => j.remove(str(id, 'id'))),
 
   'memory:get': () => memoryView,
   'memory:add': (fact) => editMemory((d) => d.changeMemory({ add: [typedFact(fact)], update: [], remove: [] }, { kind: 'edited' })),
   'memory:edit': (id, fact) =>
     editMemory((d) => d.changeMemory({ add: [], update: [{ id: int(id, 'id'), fact: typedFact(fact) }], remove: [] }, { kind: 'edited' })),
-  'memory:remove': (id) => editMemory((d) => d.changeMemory({ add: [], update: [], remove: [int(id, 'id')] }, { kind: 'edited' })),
-  'memory:clear': () =>
-    editMemory((d) => d.changeMemory({ add: [], update: [], remove: d.liveFacts().map((f) => f.id) }, { kind: 'cleared' })),
+  'memory:purge': (id) => editMemory((d) => d.purgeRecord(int(id, 'id'))),
+  'memory:versions': (id) => Db.use((db) => db.use((d) => d.recordVersions(int(id, 'id')))),
+  'memory:clear': () => editMemory((d) => d.clearMemory()),
   'memory:restore': (rev) => editMemory((d) => d.restoreMemory(int(rev, 'rev'))),
+  'memory:reconcile': () => Reconciler.use((r) => r.runNow).pipe(Effect.andThen(memoryView)),
 
   'chat:send': (input) =>
     Chat.use((chat) =>
@@ -160,7 +211,15 @@ const handlers: Record<string, Handler> = {
     Chat.use((chat) =>
       chat.continue({ sessionId: str(input.sessionId, 'sessionId'), assistantId: str(input.assistantId, 'assistantId') })
     ),
-  'chat:stop': (messageId) => Chat.use((chat) => chat.stop(str(messageId, 'messageId'))),
+  // The user's Stop ends the reply; messages held behind it are answered next.
+  'chat:stop': (messageId) =>
+    Effect.gen(function* () {
+      const chat = yield* Chat
+      const id = str(messageId, 'messageId')
+      const sessionId = yield* (yield* Db).use((d) => d.getMessage(id)?.sessionId ?? null)
+      yield* chat.stop(id)
+      if (sessionId) yield* chat.drain(sessionId).pipe(Effect.ignore)
+    }),
   'chat:switchBranch': (input) =>
     Chat.use((chat) =>
       chat.switchBranch({ sessionId: str(input.sessionId, 'sessionId'), messageId: str(input.messageId, 'messageId') })
@@ -248,6 +307,14 @@ const handlers: Record<string, Handler> = {
       return path
     }),
   'browser:reveal': (path) => Effect.sync(() => shell.showItemInFolder(str(path, 'path'))),
+
+  // The usage meter: `get` answers at once from what is known and reads the meter if a read is due;
+  // `refresh` (a view of it opened) waits for that read.
+  'usage:get': () => Usage.use((u) => u.view.pipe(Effect.tap(() => Effect.forkDetach(u.refresh(false))))),
+  'usage:refresh': () => Usage.use((u) => u.refresh(true)),
+  'usage:cancelPause': (messageId) => Usage.use((u) => u.cancelPause(str(messageId, 'messageId'))),
+  'usage:jobShare': (jobId) => Usage.use((u) => u.jobShare(str(jobId, 'jobId'))),
+  'usage:share': (keys, window) => Usage.use((u) => u.share({ keys: ids(keys), ...(typeof window === 'string' ? { window } : {}) })),
 
   'computer:supported': () => ComputerUse.use((c) => Effect.succeed(c.supported)),
   'computer:waiting': () => ComputerUse.use((c) => Effect.sync(c.waiting)),

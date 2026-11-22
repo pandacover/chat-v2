@@ -40,11 +40,40 @@ export interface TurnPlan {
   baseCost: number
   /** The messages the prompt carries, oldest first. The last is the user message being answered, unless continuing from the reply's own checkpoint. */
   turns: Message[]
+  /**
+   * What the topic boundary the turns start after hands on to a fresh session (its text, framed as
+   * the prompt's first block), or null. Only when nothing after the boundary is resumed: a resumed
+   * session had it in its first prompt.
+   */
+  carried: string | null
 }
+
+/**
+ * Topic boundaries. In the primary's conversation, New topic puts a divider in the message tree
+ * (an assistant row with post kind 'topic', which answers nothing): the next reply starts a fresh
+ * Claude Code session, and nothing before the divider is resumed or carried as transcript. Tomo
+ * makes the same boundary itself (post kind 'rollover', never shown) when its chat has grown past
+ * its budget and a pause has let the prompt cache go cold (rollover.ts): that one's text, a running
+ * summary and the last few turns, is handed to the fresh session instead. This is the one place
+ * that knows where a conversation's history starts.
+ */
+export const isTopicStart = (m: Pick<Message, 'role' | 'post'>): boolean =>
+  m.role === 'assistant' && (m.post?.kind === 'topic' || m.post?.kind === 'rollover')
+
+/** A boundary Tomo made itself, which the user never sees (the New topic divider is the user's). */
+export const isRollover = (m: Pick<Message, 'role' | 'post'>): boolean => m.role === 'assistant' && m.post?.kind === 'rollover'
+
+/** Where the history a reply may see starts in `lineage` (root first): the index of its last topic divider, or -1. */
+export const topicStart = (lineage: readonly Pick<Message, 'role' | 'post'>[]): number => lineage.findLastIndex(isTopicStart)
+
+/** A boundary's text, as the first block of the fresh session after it. */
+export const carriedText = (mark: Pick<Message, 'role' | 'post' | 'content'>) =>
+  isRollover(mark) ? `<earlier_conversation>\n${mark.content.trim()}\n</earlier_conversation>` : `<earlier_topics>\n${mark.content.trim()}\n</earlier_topics>`
 
 /**
  * Plans the reply to the user message that ends `lineage` (root first). `reply` is the
  * assistant message being written; `continuing` when it already has text to carry on from.
+ * Nothing before the last topic divider in `lineage` is resumed or carried.
  */
 export const planTurn = (lineage: readonly Message[], reply: Message, continuing: boolean, look: SessionLookup): TurnPlan => {
   const resumable = (m: Message) => {
@@ -58,23 +87,42 @@ export const planTurn = (lineage: readonly Message[], reply: Message, continuing
   })
   // A reply cut off after its first checkpoint: its own session has everything up to there.
   const own = continuing ? resumable(reply) : null
-  if (own) return { ...from(reply, own), turns: [] }
-  for (let i = lineage.length - 1; i >= 0; i--) {
+  if (own) return { ...from(reply, own), turns: [], carried: null }
+  const start = topicStart(lineage)
+  for (let i = lineage.length - 1; i > start; i--) {
     const p = resumable(lineage[i]!)
-    if (p) return { ...from(lineage[i]!, p), turns: lineage.slice(i + 1) }
+    if (p) return { ...from(lineage[i]!, p), turns: lineage.slice(i + 1), carried: null }
   }
-  return { resume: null, baseCost: 0, turns: [...lineage] }
+  const mark = start >= 0 ? lineage[start]! : null
+  return { resume: null, baseCost: 0, turns: lineage.slice(start + 1), carried: mark?.content.trim() ? carriedText(mark) : null }
 }
 
 /** In every system prompt, so it never changes between turns (which would miss the cache). */
 export const HISTORY_NOTE =
-  "If a message starts with earlier turns of this chat inside <user> and <assistant> tags, those are turns you don't have in your history. Answer only what comes after them."
+  "If a message starts with earlier turns of this chat inside <user> and <assistant> tags, those are turns you don't have in your history. Answer only what comes after them. Turns inside <post> tags are what the user's bots said in this job's shared thread (who wrote each, and to whom); <from_bot> is a message or report another bot sent you (with the job it is about when it comes outside that job). An <earlier_conversation> block is your chat with the user before this point, which you don't otherwise have: a summary of it, then its last few turns word for word. Carry on from it as one continuous conversation, without mentioning the block; for older detail, search memory with recall when you have it."
+
+/** A bot's name for a prompt, by id; an unknown (deleted) bot is "a bot". */
+export type NameOf = (botId: string | null) => string
+
+/** The job a bot's turn is about, when it arrives outside the job (in the primary's conversation). */
+export interface TurnJob {
+  id: string
+  title: string
+}
+
+const attr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
+
+/** What a bot sent another bot's thread, as that bot's prompt shows it. */
+export const fromBotText = (m: Pick<Message, 'content' | 'authorBotId' | 'post'>, nameOf: NameOf, job: TurnJob | null = null) =>
+  `<from_bot name="${nameOf(m.authorBotId)}"${m.post ? ` kind="${m.post.kind}"` : ''}${job ? ` job="${attr(job.title)}" job_id="${job.id}"` : ''}>\n${m.content}\n</from_bot>`
 
 /** An earlier turn written into a prompt, or null when it has nothing to show. */
-export const transcriptText = (m: Message): string | null => {
-  if (m.role === 'user') return `<user>\n${m.content}\n</user>`
+export const transcriptText = (m: Message, nameOf?: NameOf, job: TurnJob | null = null): string | null => {
+  if (m.role === 'user') return m.authorBotId && nameOf ? fromBotText(m, nameOf, job) : `<user>\n${m.content}\n</user>`
   const text = summarizeSteps(m.content).trim()
-  return text ? `<assistant>\n${text}\n</assistant>` : null
+  if (!text) return null
+  if (m.post && nameOf) return `<post from="${nameOf(m.authorBotId)}" to="${m.post.to ? nameOf(m.post.to) : 'everyone'}"${m.post.state ? ` ${m.post.state}` : ''}>\n${text}\n</post>`
+  return `<assistant>\n${text}\n</assistant>`
 }
 
 /** How much of a cut-off reply's end is quoted back when continuing it from its own session. */

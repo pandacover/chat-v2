@@ -2,12 +2,15 @@
   import { tip } from '@/lib/tooltip'
   import { tick, untrack } from 'svelte'
   import { isClaudeModel } from '@shared/models'
-  import { fade, fly, pop } from '@/lib/motion'
-  import { orb } from '@/lib/orb'
+  import { fade, fly } from '@/lib/motion'
   import { shortcut } from '@/lib/keys'
   import { app } from '@/lib/store.svelte'
   import { clock, voice } from '@/lib/voice.svelte'
+  import type { PathNode } from '@shared/types'
   import Composer from './Composer.svelte'
+  import ComputerWaitCard from './ComputerWaitCard.svelte'
+  import JobBar from './JobBar.svelte'
+  import Mascot from './Mascot.svelte'
   import Icon from './Icon.svelte'
   import MessageItem from './MessageItem.svelte'
   import SelectionReply from './SelectionReply.svelte'
@@ -19,19 +22,66 @@
   let dockH = $state(0)
   let heroSlot: HTMLDivElement | undefined = $state()
   let stageSlot: HTMLDivElement | undefined = $state()
-  let orbButton: HTMLButtonElement | undefined = $state()
+  let mascotHost: HTMLDivElement | undefined = $state()
   let composer: ReturnType<typeof Composer> | undefined = $state()
   let pinned = $state(true)
-  let promptOpen = $state(false)
-  let promptDraft = $state('')
 
   const view = $derived(app.view)
-  const empty = $derived(!view || view.path.length === 0)
-  /** Voice on a new chat: the composer docks, the rest fades, and the orb takes the centre. */
+  // A message to Tomo shows at once, so the conversation isn't empty while it is on its way.
+  const empty = $derived((!view || view.path.length === 0) && !app.pending)
+  /** The message on its way, and Tomo thinking, until the turn lands. */
+  const pendingNodes = $derived.by<PathNode[]>(() => {
+    const p = app.pending
+    if (!p || !app.isPrimary) return []
+    const base = { sessionId: '', parentId: null, activeChildId: null, lineCount: 0, model: null, error: null, createdAt: 0, usage: null, attachments: [], post: null }
+    return [
+      { message: { ...base, id: 'pending-user', role: 'user', content: p.text, status: 'complete', authorBotId: null, attachments: p.attachments }, siblingIds: [], siblingIndex: 0 },
+      { message: { ...base, id: 'pending-reply', role: 'assistant', content: '', status: 'streaming', authorBotId: app.primaryBot?.id ?? null }, siblingIds: [], siblingIndex: 0 }
+    ]
+  })
+  /** Voice on a new chat: the composer docks, the rest fades, and the mascot takes the centre. */
   const stage = $derived(empty && voice.home !== 'off')
   // A chat from before Claude keeps its old model id; it now runs on the default.
   const model = $derived(isClaudeModel(app.chat.model) ? app.chat.model : (app.settings?.settings.defaultModel ?? ''))
-  const hasOverride = $derived(app.chat.systemPrompt != null)
+  /**
+   * Messages sent while a reply ran, still waiting: turns after their thread's last reply (the
+   * primary's conversation runs across threads, so each thread is looked at on its own). Bots'
+   * posts in a job's shared thread answer nothing.
+   */
+  const queued = $derived.by(() => {
+    const out = new Set<string>()
+    const answered = new Set<string>()
+    const path = view?.path ?? []
+    for (let i = path.length - 1; i >= 0; i--) {
+      const m = path[i]!.message
+      if (m.role === 'assistant' && !m.post) answered.add(m.sessionId)
+      else if (m.role === 'user' && !answered.has(m.sessionId)) out.add(m.id)
+    }
+    return out
+  })
+  /** The job a turn of the primary's conversation is in, or (a bot's report there) is about. */
+  const jobOf = (node: PathNode) => app.jobByThread.get(node.message.sessionId) ?? (node.jobId ? (app.jobs.find((j) => j.id === node.jobId) ?? null) : null)
+  /** A bot's own thread on a job. */
+  const worker = $derived(view?.session.kind === 'worker')
+  /** Several bots write here: replies say whose they are. */
+  const showAuthor = $derived(!app.isPrimary && !!view && (worker || view.path.some((n) => n.message.post)))
+  /**
+   * Approvals always come to you: one asked in a thread that isn't open (a bot's own, asking to
+   * pass a request on) shows above the composer, saying where it is from. So does a Show-me step
+   * waiting in a thread while you talk to Tomo: what you say to Tomo then answers it (Jobs.send).
+   */
+  const elsewhere = $derived.by(() => {
+    const w = app.computerWait
+    if (!w || view?.path.some((n) => n.message.id === w.messageId)) return null
+    if (w.kind === 'approval' || (w.kind === 'teach' && app.isPrimary)) return w
+    return null
+  })
+  const elsewhereFrom = $derived.by(() => {
+    const s = elsewhere ? app.sessions.find((x) => x.id === elsewhere.sessionId) : undefined
+    if (!s) return null
+    const bot = app.bots.find((b) => b.id === s.botId)
+    return { id: s.id, label: s.kind === 'worker' && bot ? `${bot.name}'s thread on “${s.title}”` : `“${s.title}”` }
+  })
 
   /**
    * Scroll to end glides to the end and keeps chasing it until it gets there: messages far up the
@@ -192,18 +242,18 @@
   })
 
   /**
-   * The Home orb floats over the canvas, over whichever slot holds it: the hero's, or the voice
+   * The Home mascot floats over the canvas, over whichever slot holds it: the hero's, or the voice
    * stage's centre. It glides between them, growing as it goes.
    */
-  let orbAt = $state<{ x: number; y: number; s: number } | null>(null)
-  let orbGlides = $state(false)
+  let mascotAt = $state<{ x: number; y: number; s: number } | null>(null)
+  let mascotGlides = $state(false)
   const place = () => {
     const slot = stage ? stageSlot : heroSlot
     if (!canvas || !slot) return
     const c = canvas.getBoundingClientRect()
     const r = slot.getBoundingClientRect()
     const s = stage ? 168 : 88
-    orbAt = { x: r.left - c.left + r.width / 2 - s / 2, y: r.top - c.top + r.height / 2 - s / 2, s }
+    mascotAt = { x: r.left - c.left + r.width / 2 - s / 2, y: r.top - c.top + r.height / 2 - s / 2, s }
   }
   $effect(() => {
     void stage
@@ -215,18 +265,18 @@
   $effect(() => {
     if (!canvas) return
     const observer = new ResizeObserver(() => {
-      orbGlides = false
+      mascotGlides = false
       place()
-      requestAnimationFrame(() => (orbGlides = true))
+      requestAnimationFrame(() => (mascotGlides = true))
     })
     observer.observe(canvas)
     return () => observer.disconnect()
   })
 
-  // A ring leaves the orb on each spike in the voice.
+  // A ring leaves the mascot on each spike in the voice.
   $effect(() => {
     void voice.spikes
-    const host = untrack(() => orbButton)
+    const host = untrack(() => mascotHost)
     if (!host || !untrack(() => stage) || untrack(() => voice.spikes) === 0) return
     const ring = document.createElement('span')
     ring.className = 'ripple'
@@ -236,29 +286,8 @@
     ring.addEventListener('animationend', () => ring.remove())
   })
 
-  const orbState = $derived(voice.phase === 'recording' || voice.phase === 'starting' ? 'listening' : voice.phase === 'transcribing' ? 'thinking' : '')
+  const mascotState = $derived(voice.phase === 'recording' || voice.phase === 'starting' ? 'listening' : voice.phase === 'transcribing' ? 'thinking' : '')
   const homeVoice = $derived(empty)
-  const orbClick = () => {
-    if (voice.phase === 'transcribing' || voice.phase === 'starting') return
-    voice.toggle()
-  }
-
-  const toggleBrowser = async () => {
-    const next = !app.chat.browserEnabled
-    await app.updateSession({ browserEnabled: next })
-    if (!next) return
-    app.openBrowser()
-  }
-
-  const openPrompt = () => {
-    promptDraft = app.chat.systemPrompt ?? app.settings?.settings.systemPrompt ?? ''
-    promptOpen = true
-  }
-
-  const savePrompt = async (value: string | null) => {
-    promptOpen = false
-    await app.updateSession({ systemPrompt: value })
-  }
 </script>
 
 <section
@@ -267,38 +296,7 @@
   style="background: var(--canvas-glow), var(--canvas)"
   class:voice={stage}
 >
-  <!-- The top bar keeps room for the fixed toggles: the sidebar's at the left while the sidebar is
-       shut, and the panel's at the right while the panel is shut. -->
-  <header
-    class="topbar flex h-[52px] shrink-0 items-center gap-1 transition-[opacity,padding] duration-300 ease-out"
-    style="padding-left: {app.sidebarOpen ? 16 : 86}px; padding-right: {app.panelToggle && !app.panelOpen ? 46 : 12}px"
-  >
-    <span class="min-w-0 truncate pl-1 font-medium" data-chat-title>{view?.session.title ?? ''}</span>
-    <span class="flex-1"></span>
-    <button class="icon-btn relative size-8 {hasOverride ? '!text-fg' : ''}" use:tip={'Instructions for this chat'} onclick={openPrompt}>
-      <Icon name="settings" size={16} />
-      {#if hasOverride}<span class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-fg"></span>{/if}
-    </button>
-    {#if app.settings}
-      {@const onTop = app.settings.settings.alwaysOnTop}
-      <button
-        class="icon-btn size-8 {onTop ? '!text-fg' : ''}"
-        aria-pressed={onTop}
-        use:tip={onTop ? 'Unpin window' : 'Keep on top of other apps'}
-        onclick={() => app.setPinned(!onTop)}
-      >
-        <Icon name="pin" size={16} class="transition-transform duration-200 {onTop ? '' : 'rotate-45'}" />
-      </button>
-    {/if}
-    <button
-      class="icon-btn relative size-8 {app.browserOpen ? '!text-fg' : ''}"
-      use:tip={app.browserOpen ? 'Hide browser' : 'Open browser'}
-      onclick={() => (app.browserOpen && app.activeTab === 'browser' ? app.closeBrowser() : app.openBrowser())}
-    >
-      <Icon name="globe" size={16} />
-      {#if app.control.active}<span class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-blue"></span>{/if}
-    </button>
-  </header>
+  {#if app.team && !app.isPrimary && view}<JobBar />{/if}
 
   {#if empty}
     <div class="min-h-0 flex-1"></div>
@@ -321,10 +319,21 @@
     <div class="relative min-h-0 flex-1">
       <!-- The thread runs on under the composer's glass, and fades out in the strip below it. -->
       <div bind:this={scroller} {onscroll} class="h-full overflow-y-auto thread-fade">
-        <div bind:this={thread} class="mx-auto flex max-w-[760px] flex-col gap-6 px-8 pt-4" style="padding-bottom: {dockH + 24}px">
+        <div bind:this={thread} class="mx-auto flex max-w-[760px] flex-col gap-6 px-8 pt-6" style="padding-bottom: {dockH + 24}px">
           {#each shown as node, i (node.message.id)}
             <!-- The last few always render, so a chat opens at its true end. -->
-            <MessageItem {node} last={from + i === view.path.length - 1} far={from + i < view.path.length - 4} />
+            <MessageItem
+              {node}
+              last={from + i === view.path.length - 1 && pendingNodes.length === 0}
+              far={from + i < view.path.length - 4}
+              primary={app.isPrimary}
+              job={app.isPrimary ? jobOf(node) : null}
+              {showAuthor}
+              queued={queued.has(node.message.id)}
+            />
+          {/each}
+          {#each pendingNodes as node (node.message.id)}
+            <MessageItem {node} primary />
           {/each}
         </div>
       </div>
@@ -346,6 +355,16 @@
     bind:clientHeight={dockH}
     class="z-[3] mx-auto w-full max-w-[824px] shrink-0 px-8 {empty ? 'relative' : 'absolute inset-x-0 bottom-0'} {empty && !stage ? '' : 'pb-[18px]'}"
   >
+    {#if elsewhere}
+      <div class="mb-2.5" data-approval-elsewhere>
+        {#if elsewhereFrom}
+          <button class="mb-1.5 inline-flex max-w-full items-center gap-1 px-1 text-[12.5px] text-fg-3 transition-colors hover:text-fg" onclick={() => app.open(elsewhereFrom.id)}>
+            <span class="truncate">From {elsewhereFrom.label}</span><Icon name="chevronRight" size={12} class="shrink-0" />
+          </button>
+        {/if}
+        <ComputerWaitCard wait={elsewhere} />
+      </div>
+    {/if}
     <Composer
       bind:this={composer}
       tall={empty && !stage}
@@ -353,15 +372,11 @@
       placeholder={empty ? 'Ask anything' : 'Reply'}
       {model}
       onmodel={(id) => app.updateSession({ model: id })}
-      browserEnabled={app.chat.browserEnabled}
-      onbrowser={toggleBrowser}
-      computerEnabled={app.chat.computerEnabled}
-      oncomputer={() => app.updateSession({ computerEnabled: !app.chat.computerEnabled })}
     />
   </div>
 
   {#if empty}
-    <div class="min-h-0 transition-[flex-grow] duration-500 {stage ? 'flex-[0]' : 'flex-1 pb-[52px]'}"></div>
+    <div class="min-h-0 transition-[flex-grow] duration-500 {stage ? 'flex-[0]' : 'flex-1'}"></div>
 
     <!-- The voice stage on a new chat. -->
     <div
@@ -374,62 +389,30 @@
       </div>
       <div class="mt-2.5 flex h-[18px] items-center gap-2.5 text-[13px] text-fg-3">
         {#if voice.home === 'ready' && voice.phase === 'idle'}
-          <span>Enter to send · click the orb to keep talking · Esc to start over</span>
+          <span>Enter to send · {shortcut('M')} to keep talking · Esc to start over</span>
         {:else if voice.phase !== 'transcribing'}
           <span class="font-label text-[12.5px] font-medium text-fg-2 tabular-nums">{clock(voice.elapsed)}</span>
-          <span>{voice.held ? 'Release to transcribe' : 'Click the orb to finish · Esc to cancel'}</span>
+          <span>{voice.held ? 'Release to transcribe' : `${shortcut('M')} or the mic to finish · Esc to cancel`}</span>
         {/if}
       </div>
     </div>
 
-    {#if orbAt}
-      <button
-        bind:this={orbButton}
-        class="absolute z-[2] grid place-items-center rounded-full {orbGlides ? 'orb-glide' : ''}"
-        style="left: {orbAt.x}px; top: {orbAt.y}px; width: {orbAt.s}px; height: {orbAt.s}px"
-        aria-label={voice.recording ? 'Finish talking' : 'Talk'}
-        data-tip-no-label
-        use:tip={stage ? null : { text: 'Talk', kbd: shortcut('M') }}
-        onclick={orbClick}
+    {#if mascotAt}
+      <!-- Not a control: voice starts and stops from the composer's mic and Ctrl+M (Cmd+M). -->
+      <div
+        bind:this={mascotHost}
+        class="pointer-events-none absolute z-[2] {mascotGlides ? 'mascot-glide' : ''}"
+        style="left: {mascotAt.x}px; top: {mascotAt.y}px; width: {mascotAt.s}px; height: {mascotAt.s}px"
         in:fade={{ duration: 260 }}
-        onintroend={() => (orbGlides = true)}
+        onintroend={() => (mascotGlides = true)}
       >
-        <span
-          class="orb"
-          style="--s: 100%; --lvl: {stage ? voice.level.toFixed(3) : 0}"
-          use:orb={{ state: orbState, level: stage && voice.recording ? voice.level : undefined }}
-        ></span>
-      </button>
+        <Mascot size="100%" state={stage ? mascotState : ''} level={stage && voice.recording ? voice.level : undefined} />
+      </div>
     {/if}
   {/if}
 </section>
 
 <SelectionReply {scroller} onreply={(block) => composer?.append(block)} />
-
-{#if promptOpen}
-  <div class="fixed inset-0 z-50 grid place-items-center p-6" role="dialog" aria-modal="true" aria-label="Chat instructions">
-    <button class="absolute inset-0 bg-scrim backdrop-blur-[4px]" aria-label="Close" transition:fade={{ duration: 150 }} onclick={() => (promptOpen = false)}></button>
-    <div class="glass-strong relative w-full max-w-lg rounded-[20px] p-6" transition:pop>
-      <h2 class="font-display text-[22px] leading-tight font-normal tracking-[-0.02em]">Instructions for this chat</h2>
-      <p class="mt-1 text-[13.5px] text-fg-3">Replaces the global instructions for this chat only.</p>
-      <!-- svelte-ignore a11y_autofocus -->
-      <textarea
-        autofocus
-        bind:value={promptDraft}
-        rows="9"
-        class="mt-4 w-full resize-y rounded-[10px] bg-[var(--glass-bg)] px-3 py-2.5 font-mono text-[12.5px] leading-relaxed shadow-[inset_0_0_0_1px_var(--line)] outline-none focus:shadow-[inset_0_0_0_1px_var(--line-2)]"
-        onkeydown={(e) => e.key === 'Escape' && (promptOpen = false)}
-      ></textarea>
-      <div class="mt-4 flex items-center gap-2">
-        {#if hasOverride}
-          <button class="btn quiet" onclick={() => savePrompt(null)}>Use global</button>
-        {/if}
-        <button class="btn ml-auto" onclick={() => (promptOpen = false)}>Cancel</button>
-        <button class="btn solid" onclick={() => savePrompt(promptDraft)}>Save</button>
-      </div>
-    </div>
-  </div>
-{/if}
 
 <style>
   .fadeable {
@@ -441,15 +424,11 @@
     opacity: 0;
     transform: translateY(-8px);
   }
-  .canvas.voice .topbar {
-    opacity: 0;
-    pointer-events: none;
-  }
   /* Lines that scroll past the composer fade out in the strip below it. */
   .thread-fade {
     mask-image: linear-gradient(to bottom, #000 calc(100% - 46px), transparent calc(100% - 16px));
   }
-  .orb-glide {
+  .mascot-glide {
     transition:
       left 650ms var(--ease-studio),
       top 650ms var(--ease-studio),

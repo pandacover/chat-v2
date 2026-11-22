@@ -5,37 +5,30 @@
   import type { Attachment } from '@shared/types'
   import { isMac, modKey, shortcut } from '@/lib/keys'
   import { fade, pop } from '@/lib/motion'
-  import { orb } from '@/lib/orb'
   import { app } from '@/lib/store.svelte'
   import { clock, voice } from '@/lib/voice.svelte'
   import { applyEdit, listEditing } from '@/lib/textarea'
   import AttachmentChip from './AttachmentChip.svelte'
   import Icon from './Icon.svelte'
+  import Mascot from './Mascot.svelte'
   import ModelPicker from './ModelPicker.svelte'
   import PointButton from './PointButton.svelte'
+  import { openSettingsAt } from '@/lib/settingsNav'
 
   let {
     placeholder = 'Message',
     tall = false,
     inChat = true,
     model,
-    onmodel,
-    browserEnabled = false,
-    onbrowser,
-    computerEnabled = false,
-    oncomputer
+    onmodel
   }: {
     placeholder?: string
     /** Home: a taller box. */
     tall?: boolean
-    /** In a chat the orb takes the mic's place while it listens; on Home the orb is in the middle. */
+    /** In a chat the mascot takes the mic's place while it listens; on Home the mascot is in the middle. */
     inChat?: boolean
     model: string
     onmodel: (id: string) => void
-    browserEnabled?: boolean
-    onbrowser: () => void
-    computerEnabled?: boolean
-    oncomputer: () => void
   } = $props()
 
   let text = $state('')
@@ -55,11 +48,25 @@
   const busy = $derived(app.streaming)
   // A test, not text.trim(): that copied the whole draft on every key, and a paste can be megabytes.
   const hasText = $derived(/\S/.test(text))
-  const canSend = $derived((hasText || app.draftAttachments.length > 0) && uploading === 0 && app.analyzing.size === 0 && !busy)
+  // Nothing waits on a reply: a message sent while one runs (to Tomo, in a job or a bot's own
+  // thread) is queued and answered as soon as it ends.
+  const sendsWhileBusy = $derived((app.isPrimary || !!app.view?.session.jobId) && (hasText || app.draftAttachments.length > 0))
+  const canSend = $derived((hasText || app.draftAttachments.length > 0) && uploading === 0 && app.analyzing.size === 0 && (!busy || sendsWhileBusy))
   // While a Show-me step waits, a message answers it (the reply goes on); attachments stay in the draft.
   const answering = $derived(app.teaching && hasText)
-  const computerOn = $derived(computerEnabled && app.computerSupported)
-  const stopping = $derived(busy && !answering)
+  const computerOn = $derived(app.chat.computerEnabled && app.computerSupported)
+  // The bot's tools, shown, not switched: they are set in Settings › Bots.
+  const botName = $derived(app.currentBot?.name ?? 'Tomo')
+  const tools = $derived([
+    ...(app.chat.browserEnabled ? [{ id: 'browser', icon: 'globe' as const, label: 'the browser' }] : []),
+    ...(computerOn ? [{ id: 'computer', icon: 'monitor' as const, label: 'your computer' }] : [])
+  ])
+  const toolsTip = $derived(
+    tools.length > 0
+      ? `${botName} can use ${tools.map((t) => t.label).join(' and ')}. Change in Settings › Bots`
+      : `${botName} has no tools on. Turn on the browser or computer in Settings › Bots`
+  )
+  const stopping = $derived(busy && !answering && !sendsWhileBusy)
 
   export const focus = () => textarea?.focus()
 
@@ -208,7 +215,7 @@
     }
   }
 
-  // A ring leaves the mic's orb on each spike in the voice.
+  // A ring leaves the mic's mascot on each spike in the voice.
   $effect(() => {
     void voice.spikes
     const host = untrack(() => micButton)
@@ -276,7 +283,7 @@
         : ''}"
     ></textarea>
     {#if listenLine}
-      <!-- Voice in a chat: the orb takes the mic's place, and this line the text's. -->
+      <!-- Voice in a chat: the mascot takes the mic's place, and this line the text's. -->
       <div class="absolute inset-0 flex items-start gap-2.5 px-[18px] pt-[15px] text-[15px]" in:fade={{ duration: 120 }}>
         <span class="thinking">{voice.phase === 'transcribing' ? 'Transcribing' : 'Listening'}</span>
         {#if voice.phase !== 'transcribing'}
@@ -301,29 +308,11 @@
     />
     <button class="icon-btn size-8" use:tip={'Attach files'} onclick={() => fileInput?.click()}><Icon name="paperclip" size={16} /></button>
 
-    <button
-      class="toggle"
-      role="switch"
-      aria-checked={browserEnabled}
-      aria-label="Browser"
-      use:tip={browserEnabled ? 'The assistant can use the browser in this chat' : 'Let the assistant use the browser in this chat'}
-      onclick={onbrowser}
-    >
-      <Icon name="globe" size={15} /><span class="hidden @sm:inline">Browser</span>
+    <!-- What the chat's bot can use: its tools, set in Settings › Bots, not switched per chat. -->
+    <button class="tools" aria-label="{botName}'s tools" data-tools={tools.map((t) => t.id).join(' ') || 'none'} use:tip={toolsTip} onclick={() => openSettingsAt('bots')}>
+      {#each tools as t (t.id)}<Icon name={t.icon} size={14} />{:else}<Icon name="sliders" size={14} />{/each}
     </button>
-    {#if app.computerSupported}
-      <button
-        class="toggle"
-        role="switch"
-        aria-checked={computerEnabled}
-        aria-label="Computer"
-        use:tip={computerEnabled ? 'The assistant can see your screen and use your apps in this chat' : 'Let the assistant see your screen and use your apps in this chat'}
-        onclick={oncomputer}
-      >
-        <Icon name="monitor" size={15} /><span class="hidden @sm:inline">Computer</span>
-      </button>
-      {#if computerOn}<PointButton onadded={() => textarea?.focus()} />{/if}
-    {/if}
+    {#if computerOn}<PointButton onadded={() => textarea?.focus()} />{/if}
     <span class="ml-auto"></span>
     <ModelPicker placement="up" value={model} onchange={onmodel} />
     <button
@@ -340,11 +329,7 @@
       onpointerleave={micUp}
     >
       {#if listenLine}
-        <span
-          class="orb"
-          style="--s: 32px; --pk: 0.22; --lvl: {voice.level.toFixed(3)}"
-          use:orb={{ state: voice.phase === 'transcribing' ? 'thinking' : 'listening', level: voice.recording ? voice.level : undefined }}
-        ></span>
+        <Mascot size={30} state={voice.phase === 'transcribing' ? 'thinking' : 'listening'} level={voice.recording ? voice.level : undefined} />
       {:else}
         <Icon name="mic" size={18} />
       {/if}
@@ -406,33 +391,23 @@
   .fit {
     field-sizing: content;
   }
-  .toggle {
+  /* The bot's tools: quiet icons, read-only here. */
+  .tools {
     display: inline-flex;
     flex: none;
     align-items: center;
-    gap: 6px;
-    height: 30px;
+    gap: 5px;
+    height: 28px;
     margin-left: 2px;
-    padding: 0 11px 0 9px;
+    padding: 0 9px;
     border-radius: 999px;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--fg-3);
+    color: var(--fg-4);
     transition:
       background-color 150ms,
       color 150ms;
   }
-  .toggle:hover {
+  .tools:hover {
     background: var(--wash);
-    color: var(--fg);
-  }
-  .toggle[aria-checked='true'] {
-    background: var(--solid);
-    color: var(--on-solid);
-  }
-  @container (width < 24rem) {
-    .toggle {
-      padding: 0 8px;
-    }
+    color: var(--fg-2);
   }
 </style>

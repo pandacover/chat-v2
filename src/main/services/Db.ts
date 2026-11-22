@@ -7,17 +7,24 @@ import type {
   Message,
   MessageStatus,
   PathNode,
+  Post,
   Role,
   AudioAnalysis,
-  MemoryFact,
-  MemoryRevision,
+  ListedSession,
   Session,
   Usage
 } from '@shared/types'
 import type { ComputerMode } from '@shared/computer'
 import { DbError, NotFound, errorMessage } from '../errors'
+import { BOTS_AND_JOBS_MIGRATION, BOT_MODULES_MIGRATION, type NewMessage, WORKERS_MIGRATION, makeJobsDb } from './jobsDb'
+import { PROGRESS_NOTES_MIGRATION, stuckStore } from './stuckStore'
+import { MEMORY_RECORDS_MIGRATION, makeMemoryStore } from './memoryStore'
+import { usageRows } from '../usage/rows'
+import { RECONCILER_MIGRATION, makeReconcilerDb } from './reconcilerDb'
 
-const MIGRATIONS: string[] = [
+export { MEMORY_LIMIT, type MemoryChange } from './memoryStore'
+
+export const MIGRATIONS: string[] = [
   `create table sessions (
     id text primary key,
     title text not null,
@@ -112,11 +119,87 @@ const MIGRATIONS: string[] = [
   alter table messages add column agent_cost real;
   create index messages_agent_session on messages(agent_session);`,
   // What a computer chat's last message was read as: 'do' (operate the computer) or 'teach' (show me how).
-  `alter table sessions add column computer_mode text not null default 'do';`
+  `alter table sessions add column computer_mode text not null default 'do';`,
+  // Long-running replies (agent/watch.ts): the progress notes written at checkpoints, per chat,
+  // and every pause for being stuck, with whether the user resumed it, to tune the thresholds by.
+  `create table progress_notes (
+    id integer primary key autoincrement,
+    session_id text not null references sessions(id) on delete cascade,
+    message_id text not null,
+    step integer not null,
+    done text not null,
+    left_to_do text not null,
+    closer text not null,
+    verdict text not null,
+    confidence real not null,
+    created_at integer not null
+  );
+  create index progress_notes_session on progress_notes(session_id);
+  create table stuck_pauses (
+    id integer primary key autoincrement,
+    session_id text not null references sessions(id) on delete cascade,
+    message_id text not null,
+    signal text not null,
+    step integer not null,
+    reason text not null,
+    created_at integer not null,
+    resumed_at integer
+  );
+  create index stuck_pauses_message on stuck_pauses(message_id);`,
+  // Memory records replace memory_facts: stable ids, versions with sources, purge, full-text search.
+  MEMORY_RECORDS_MIGRATION,
+  // Usage (src/main/usage): each run of a reply with its API-equivalent cost and when it ran, and
+  // readings of the plan's usage windows, from which a chat's (later, a job's) share is estimated;
+  // and replies paused at a limit, which continue by themselves at resume_at. Runs keep no link to
+  // their chat, so deleting it leaves the dollars spent in the totals. Earlier replies' costs are
+  // carried over, timed when they started.
+  `create table usage_runs (
+    id integer primary key autoincrement,
+    session_id text not null,
+    message_id text,
+    auth text,
+    model text,
+    started_at integer not null,
+    ended_at integer not null,
+    cost real not null default 0
+  );
+  create index usage_runs_ended on usage_runs(ended_at);
+  create table usage_samples (
+    id integer primary key autoincrement,
+    win text not null,
+    percent real not null,
+    resets_at integer,
+    at integer not null,
+    source text not null
+  );
+  create index usage_samples_win on usage_samples(win, at);
+  create table usage_pauses (
+    message_id text primary key references messages(id) on delete cascade,
+    session_id text not null,
+    win text,
+    resets_at integer,
+    resume_at integer not null,
+    created_at integer not null
+  );
+  insert into usage_runs (session_id, message_id, model, started_at, ended_at, cost)
+    select session_id, id, model, created_at, created_at, coalesce(json_extract(usage, '$.cost'), 0)
+      from messages where role = 'assistant' and usage is not null and json_valid(usage);`,
+  // Bots and jobs (see jobsDb.ts): every chat becomes a finished job owned by the primary bot.
+  BOTS_AND_JOBS_MIGRATION,
+  // The daily reconciler's runs and the jobs it has read (see reconcilerDb.ts).
+  RECONCILER_MIGRATION,
+  // Rules (agent/rules.ts): the computer and browser switches of each chat become the primary bot's modules.
+  BOT_MODULES_MIGRATION,
+  // Checkpoints' progress notes become job notes (stuckStore.ts): progress_notes moves into them and goes.
+  PROGRESS_NOTES_MIGRATION,
+  // Workers (services/Team.ts): bots' posts in a job's shared thread, and each bot's own threads.
+  WORKERS_MIGRATION,
+  // Unread threads in the sidebar: when the user last opened each thread, and when a reply last
+  // ended or a bot reported back in it. Every thread there already starts as read.
+  `alter table sessions add column read_at integer;
+  alter table sessions add column activity_at integer;
+  update sessions set read_at = cast(strftime('%s', 'now') as integer) * 1000;`
 ]
-
-/** At most this many facts are kept; past it, new ones are dropped until some are removed. */
-export const MEMORY_LIMIT = 150
 
 interface SessionRow {
   id: string
@@ -125,12 +208,22 @@ interface SessionRow {
   system_prompt: string | null
   root_id: string
   forked_from_session_id: string | null
-  browser_enabled: number
-  computer_enabled: number
   computer_mode: string
   pinned_at: number | null
   created_at: number
   updated_at: number
+  bot_id: string | null
+  job_id: string | null
+  kind: string
+  read_at: number | null
+  activity_at: number | null
+}
+
+/** A session row with where its thread stands (listSessions). */
+interface ListedRow extends SessionRow {
+  streaming: number
+  last_reply: string | null
+  limit_paused: number
 }
 
 interface MessageRow {
@@ -146,6 +239,10 @@ interface MessageRow {
   error: string | null
   usage: string | null
   created_at: number
+  author_bot_id: string | null
+  post_kind: string | null
+  post_to: string | null
+  post_state: string | null
 }
 
 interface AttachmentRow {
@@ -171,13 +268,28 @@ const toSession = (r: SessionRow): Session => ({
   systemPrompt: r.system_prompt,
   rootId: r.root_id,
   forkedFromSessionId: r.forked_from_session_id,
-  browserEnabled: r.browser_enabled === 1,
-  computerEnabled: r.computer_enabled === 1,
   computerMode: r.computer_mode === 'teach' ? 'teach' : 'do',
   pinnedAt: r.pinned_at,
   createdAt: r.created_at,
-  updatedAt: r.updated_at
+  updatedAt: r.updated_at,
+  botId: r.bot_id,
+  jobId: r.job_id,
+  kind: r.kind === 'primary' || r.kind === 'worker' ? r.kind : 'shared'
 })
+
+const toListed = (r: ListedRow): ListedSession => ({
+  ...toSession(r),
+  state: {
+    readAt: r.read_at,
+    activityAt: r.activity_at,
+    streaming: r.streaming === 1,
+    lastReply: (r.last_reply as MessageStatus | null) ?? null,
+    limitPaused: r.limit_paused === 1
+  }
+})
+
+/** How a reply ending makes its thread unread: an interrupted one (the app quit) doesn't. */
+const ENDED: ReadonlySet<MessageStatus> = new Set(['complete', 'stopped', 'paused', 'error'])
 
 const toAttachment = (r: AttachmentRow): StoredAttachment => ({
   id: r.id,
@@ -211,27 +323,19 @@ const parseUsageJson = (raw: string | null): Usage | null => {
   }
 }
 
-export interface NewMessage {
-  sessionId: string
-  parentId: string
-  role: Role
-  content: string
-  status: MessageStatus
-  model?: string | null
-}
+export type { NewMessage }
 
-/** Changes the memory extractor asked for; `update` and `remove` refer to fact ids. */
-export interface MemoryChange {
-  add: string[]
-  update: Array<{ id: number; fact: string }>
-  remove: number[]
+const POST_KINDS = ['task', 'message', 'report', 'topic', 'rollover'] as const
+const POST_STATES = ['held', 'declined', 'stopped'] as const
+const postOf = (r: MessageRow): Post | null => {
+  const kind = POST_KINDS.find((k) => k === r.post_kind)
+  return kind ? { kind, to: r.post_to, state: POST_STATES.find((s) => s === r.post_state) ?? null } : null
 }
-
-const factKey = (fact: string) => fact.trim().toLowerCase().replace(/[.!]+$/, '')
 
 export const makeDb = (file: string) => {
   const db = new DatabaseSync(file)
-  db.exec('pragma journal_mode = wal; pragma foreign_keys = on; pragma synchronous = normal;')
+  // secure_delete zeroes what is deleted, so memory purged (memoryStore.purgeRecord) leaves no copy in the file.
+  db.exec('pragma journal_mode = wal; pragma foreign_keys = on; pragma synchronous = normal; pragma secure_delete = on;')
   const version = (db.prepare('pragma user_version').get() as { user_version: number }).user_version
   MIGRATIONS.slice(version).forEach((sql, i) => {
     db.exec('begin')
@@ -335,7 +439,9 @@ export const makeDb = (file: string) => {
       error: r.error,
       createdAt: r.created_at,
       attachments: (atts.get(r.id) ?? []).map(publicAttachment),
-      usage: parseUsageJson(r.usage)
+      usage: parseUsageJson(r.usage),
+      authorBotId: r.author_bot_id,
+      post: postOf(r)
     }))
   }
 
@@ -353,8 +459,8 @@ export const makeDb = (file: string) => {
     const id = randomUUID()
     const now = Date.now()
     run(
-      `insert into messages (id, session_id, parent_id, role, content, status, line_count, model, created_at)
-       values (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      `insert into messages (id, session_id, parent_id, role, content, status, line_count, model, created_at, author_bot_id, post_kind, post_to, post_state)
+       values (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
       id,
       m.sessionId,
       m.parentId,
@@ -362,10 +468,16 @@ export const makeDb = (file: string) => {
       m.content,
       m.status,
       m.model ?? null,
-      now
+      now,
+      m.authorBotId ?? null,
+      m.post?.kind ?? null,
+      m.post?.to ?? null,
+      m.post?.state ?? null
     )
     run('update messages set active_child_id = ? where id = ?', id, m.parentId)
     run('update sessions set updated_at = ? where id = ?', now, m.sessionId)
+    // A bot reporting back is news in the thread until the user opens it.
+    if (m.post?.kind === 'report') run('update sessions set activity_at = ? where id = ?', now, m.sessionId)
     return getMessage(id)!
   }
 
@@ -469,8 +581,6 @@ export const makeDb = (file: string) => {
         systemPrompt: source.systemPrompt,
         forkedFromSessionId: source.id
       })
-      if (source.browserEnabled) run('update sessions set browser_enabled = 1 where id = ?', fork.id)
-      if (source.computerEnabled) run('update sessions set computer_enabled = 1 where id = ?', fork.id)
       run('update sessions set computer_mode = ? where id = ?', source.computerMode, fork.id)
       let parentId = fork.rootId
       const stored = attachmentsFor(path.map((m) => m.id))
@@ -481,7 +591,9 @@ export const makeDb = (file: string) => {
           role: m.role,
           content: m.content,
           status: m.status === 'streaming' ? 'interrupted' : m.status,
-          model: m.model
+          model: m.model,
+          authorBotId: m.authorBotId,
+          post: m.post
         })
         run(
           `update messages set line_count = ?, error = ?, usage = ?,
@@ -512,107 +624,7 @@ export const makeDb = (file: string) => {
       return getSession(fork.id)!
     })
 
-  /** The profile now, or as it was at revision `rev`. */
-  const liveFacts = (rev?: number): MemoryFact[] =>
-    (rev === undefined
-      ? all<{ id: number; fact: string; created_at: number }>(
-          'select id, fact, created_at from memory_facts where removed_rev is null order by id'
-        )
-      : all<{ id: number; fact: string; created_at: number }>(
-          `select id, fact, created_at from memory_facts
-            where added_rev <= ? and (removed_rev is null or removed_rev > ?) order by id`,
-          rev,
-          rev
-        )
-    ).map((r) => ({ id: r.id, fact: r.fact, createdAt: r.created_at }))
-
-  const memoryRev = (): number => one<{ rev: number | null }>('select max(rev) as rev from memory_revisions')?.rev ?? 0
-
-  /**
-   * Applies a change as one new revision. Adds that repeat a live fact are skipped, so the
-   * extractor can be sloppy. Returns what changed, or null when nothing did (no revision).
-   */
-  const changeMemory = (
-    change: MemoryChange,
-    origin: { kind: MemoryRevision['kind']; sessionId?: string | null; note?: string | null }
-  ): { rev: number; added: string[]; removed: string[] } | null =>
-    transaction(() => {
-      const live = liveFacts()
-      const byId = new Map(live.map((f) => [f.id, f]))
-      const removeIds = new Set<number>()
-      const adds: string[] = []
-      const seen = new Set<string>()
-      for (const id of change.remove) if (byId.has(id)) removeIds.add(id)
-      for (const u of change.update) {
-        const old = byId.get(u.id)
-        if (!old || factKey(old.fact) === factKey(u.fact)) continue
-        removeIds.add(u.id)
-        adds.push(u.fact)
-        seen.add(factKey(u.fact))
-      }
-      for (const f of live) if (!removeIds.has(f.id)) seen.add(factKey(f.fact))
-      for (const fact of change.add) {
-        if (seen.has(factKey(fact))) continue
-        seen.add(factKey(fact))
-        adds.push(fact)
-      }
-      const room = Math.max(0, MEMORY_LIMIT - (live.length - removeIds.size))
-      const added = adds.slice(0, room)
-      if (added.length === 0 && removeIds.size === 0) return null
-      const now = Date.now()
-      const rev = Number(
-        run(
-          'insert into memory_revisions (kind, session_id, note, created_at) values (?, ?, ?, ?)',
-          origin.kind,
-          origin.sessionId ?? null,
-          origin.note ?? null,
-          now
-        ).lastInsertRowid
-      )
-      for (const id of removeIds) run('update memory_facts set removed_rev = ? where id = ?', rev, id)
-      for (const fact of added) run('insert into memory_facts (fact, added_rev, created_at) values (?, ?, ?)', fact, rev, now)
-      return { rev, added, removed: [...removeIds].map((id) => byId.get(id)!.fact) }
-    })
-
-  const memoryHistory = (limit = 100): MemoryRevision[] => {
-    const revs = all<{ rev: number; kind: string; session_id: string | null; note: string | null; created_at: number }>(
-      'select * from memory_revisions order by rev desc limit ?',
-      limit
-    )
-    if (revs.length === 0) return []
-    const oldest = revs.at(-1)!.rev
-    const facts = all<{ fact: string; added_rev: number; removed_rev: number | null }>(
-      'select fact, added_rev, removed_rev from memory_facts where added_rev >= ? or removed_rev >= ? order by id',
-      oldest,
-      oldest
-    )
-    return revs.map((r) => ({
-      rev: r.rev,
-      kind: r.kind as MemoryRevision['kind'],
-      sessionId: r.session_id,
-      note: r.note,
-      createdAt: r.created_at,
-      added: facts.filter((f) => f.added_rev === r.rev).map((f) => f.fact),
-      removed: facts.filter((f) => f.removed_rev === r.rev).map((f) => f.fact)
-    }))
-  }
-
-  /** Brings back the profile as it was at `rev`, as a new revision, so history is kept. */
-  const restoreMemory = (rev: number) =>
-    transaction(() => {
-      const target = liveFacts(rev)
-      const live = liveFacts()
-      const wanted = new Set(target.map((t) => factKey(t.fact)))
-      const have = new Set(live.map((f) => factKey(f.fact)))
-      return changeMemory(
-        {
-          add: target.filter((t) => !have.has(factKey(t.fact))).map((t) => t.fact),
-          update: [],
-          remove: live.filter((f) => !wanted.has(factKey(f.fact))).map((f) => f.id)
-        },
-        { kind: 'restored', note: `Restored version ${rev}` }
-      )
-    })
+  const memory = makeMemoryStore({ all, one, run, transaction, exec: (sql) => db.exec(sql) })
 
   /** Deletes a session; returns the attachment files and Claude Code sessions nothing else refers to. */
   const deleteSession = (id: string): { files: string[]; agentSessions: string[] } =>
@@ -632,19 +644,40 @@ export const makeDb = (file: string) => {
       }
     })
 
+  const jobs = makeJobsDb({ all, one, run, transaction, getSession, createSession, forkSession, deleteSession, activePath, insertMessage, getMessage })
+
   return {
-    listSessions: () => all<SessionRow>('select * from sessions order by updated_at desc').map(toSession),
+    ...jobs,
+    /** Threads, each with where it stands; the primary's conversation is primarySession(). */
+    listSessions: (): ListedSession[] =>
+      all<ListedRow>(
+        `select s.*,
+           exists (select 1 from messages m where m.session_id = s.id and m.status = 'streaming') as streaming,
+           (select m.status from messages m where m.session_id = s.id and m.role = 'assistant' and m.post_kind is null
+              order by m.seq desc limit 1) as last_reply,
+           exists (select 1 from usage_pauses p where p.session_id = s.id) as limit_paused
+         from sessions s where s.kind != 'primary' order by s.updated_at desc`
+      ).map(toListed),
+    /** The user opened a thread, or saw a reply end in it. */
+    markRead: (id: string) => {
+      run('update sessions set read_at = ? where id = ?', Date.now(), id)
+    },
     /**
      * Deletes chats that never got a message (left over from when "New chat" saved a row
-     * straight away). Returns how many went.
+     * straight away), and jobs left with no thread. Returns how many chats went.
      */
     pruneEmptySessions: (): number =>
-      Number(
-        run(
-          `delete from sessions where not exists (
-             select 1 from messages m where m.session_id = sessions.id and m.role != 'root')`
-        ).changes
-      ),
+      transaction(() => {
+        // The primary's conversation holds no messages of its own (its turns are in job threads).
+        const gone = Number(
+          run(
+            `delete from sessions where kind != 'primary' and not exists (
+               select 1 from messages m where m.session_id = sessions.id and m.role != 'root')`
+          ).changes
+        )
+        jobs.pruneOrphanJobs()
+        return gone
+      }),
     getSession,
     createSession,
     updateSession: (
@@ -653,8 +686,6 @@ export const makeDb = (file: string) => {
         title?: string
         model?: string | null
         systemPrompt?: string | null
-        browserEnabled?: boolean
-        computerEnabled?: boolean
         computerMode?: ComputerMode
         pinned?: boolean
       }
@@ -662,10 +693,6 @@ export const makeDb = (file: string) => {
       // Neither pinning nor unpinning touches updated_at, so the chat keeps its date group.
       if (patch.pinned === true) run('update sessions set pinned_at = coalesce(pinned_at, ?) where id = ?', Date.now(), id)
       if (patch.pinned === false) run('update sessions set pinned_at = null where id = ?', id)
-      if (patch.browserEnabled !== undefined)
-        run('update sessions set browser_enabled = ? where id = ?', patch.browserEnabled ? 1 : 0, id)
-      if (patch.computerEnabled !== undefined)
-        run('update sessions set computer_enabled = ? where id = ?', patch.computerEnabled ? 1 : 0, id)
       if (patch.computerMode !== undefined) run('update sessions set computer_mode = ? where id = ?', patch.computerMode, id)
       if (patch.title !== undefined) run('update sessions set title = ? where id = ?', patch.title, id)
       if (patch.model !== undefined) run('update sessions set model = ? where id = ?', patch.model, id)
@@ -729,6 +756,9 @@ export const makeDb = (file: string) => {
           tailPartial ? 1 : 0,
           messageId
         )
+        // A reply that ended is news in its thread until the user sees it.
+        if (ENDED.has(status))
+          run(`update sessions set activity_at = ? where id = (select session_id from messages where id = ? and role = 'assistant')`, Date.now(), messageId)
       }),
     setUsage: (messageId: string, usage: Usage) => {
       run('update messages set usage = ? where id = ?', JSON.stringify(usage), messageId)
@@ -858,22 +888,10 @@ export const makeDb = (file: string) => {
         run('delete from attachments where message_id is null and created_at < ?', olderThan)
         return rows.map((r) => r.path).filter((p) => !one('select 1 from attachments where path = ?', p))
       }),
-    liveFacts,
-    memoryRev,
-    changeMemory,
-    memoryHistory,
-    restoreMemory,
-    /**
-     * The memory revision a chat sees. It is fixed the first time the chat asks, so the
-     * profile reaches the model once per chat and the system prompt stays the same after.
-     */
-    sessionMemoryRev: (sessionId: string): number => {
-      const row = one<{ memory_rev: number | null }>('select memory_rev from sessions where id = ?', sessionId)
-      if (row?.memory_rev != null) return row.memory_rev
-      const rev = memoryRev()
-      run('update sessions set memory_rev = ? where id = ?', rev, sessionId)
-      return rev
-    },
+    ...memory,
+    ...stuckStore(run, all, memory.writeCheckpointNote),
+    ...usageRows({ all, one, run }),
+    ...makeReconcilerDb({ all, one, run, transaction, getSession, activePath }),
     close: () => db.close()
   }
 }

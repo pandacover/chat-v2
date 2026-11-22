@@ -81,9 +81,14 @@ const send = async (text) => {
 const lastReply = () => page.locator('[data-reply-scope]').last()
 
 try {
-  // The switch. There is no mode control: each message is read for doing or showing.
+  // There is no mode control: each message is read for doing or showing.
+  // Computer use is Tomo's (Settings › Bots), not a switch of the chat: the composer's tools open it there.
+  await page.locator('button[data-tools]').click()
+  await page.locator('[data-bot]').waitFor()
   await page.getByRole('switch', { name: 'Computer' }).click()
   await page.getByRole('switch', { name: 'Computer', checked: true }).waitFor()
+  await page.keyboard.press('Escape')
+  await page.locator('button[data-tools~="computer"]').waitFor()
   ok((await page.getByRole('radiogroup', { name: 'Computer mode' }).count()) + (await page.getByRole('radio', { name: 'Show me' }).count()) === 0, 'the composer has no Do it / Show me control')
 
   // Point before any computer reply: the overlay window is made for it, and its page still hears Point.
@@ -95,6 +100,15 @@ try {
   ok(true, 'and its freshly loaded page shows Point')
   await early.keyboard.press('Escape')
   await until(async () => (await early.locator('[data-point]').count()) === 0, 'Esc ends it')
+
+  // Computer work isn't done in Tomo's chat: Tomo hands it to itself, and it runs in its own thread
+  // on a job, which the rest of this test talks to directly.
+  await send('Hand the computer tests to yourself')
+  await until(async () => (await page.locator('[data-post="report"]').count()) === 1, 'Tomo hands the work to itself, and its own thread reports back')
+  const jobRow = page.locator('aside [data-row^="chat:"]', { hasText: 'Computer tests' })
+  await until(async () => (await jobRow.count()) === 1, 'the job is in the sidebar')
+  await jobRow.locator('button').first().click()
+  await until(async () => (await page.locator('[data-chat-title]').count()) === 1 && (await page.locator('[data-chat-title]').innerText()) === 'Computer tests', "the job opens on Tomo's own thread")
 
   // 1. An approval, clicked.
   await send('Delete the old files in Downloads')
@@ -204,14 +218,14 @@ try {
   await step.getByRole('button', { name: 'Done' }).click()
   await until(async () => /Step 3 of 3/i.test(await step.innerText()), "the chat's Done ends the step")
   // A typed answer.
-  const before = await page.locator('[aria-label="Edit message"]').count()
+  const before = await page.locator('[data-user-text]').count()
   await send('There is no switch for it')
   await until(async () => (await lastReply().innerText()).includes('Night light is on.'), 'a typed message answers the step')
   await until(lets, 'the overlay is click-through again once the steps are over', 2000)
   await until(async () => (await notch.count()) === 0, 'and the notch goes with the reply')
   await sleep(300)
   ok((await lastReply().innerText()).split('Night light is on.').length === 2, 'the reply shows its last line once')
-  ok((await page.locator('[aria-label="Edit message"]').count()) === before, 'the typed answer is not a new message')
+  ok((await page.locator('[data-user-text]').count()) === before, 'the typed answer is not a new message')
   await lastReply().getByText(/Computer/).first().click()
   ok((await lastReply().innerText()).includes('You said “There is no switch for it”'), 'the step line keeps what was typed')
   await capture('show-me-done')
