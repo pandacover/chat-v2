@@ -2,13 +2,14 @@
   import { tip } from '@/lib/tooltip'
   import { untrack } from 'svelte'
   import { SvelteSet } from 'svelte/reactivity'
-  import type { Session } from '@shared/types'
+  import type { Bot, Session } from '@shared/types'
+  import { openBotSettings } from '@/lib/settingsNav'
   import { draftTitle, entries, grouped, openEntry, type Entry } from '@/lib/chats.svelte'
   import { fade } from '@/lib/motion'
   import { shortcut } from '@/lib/keys'
   import { app } from '@/lib/store.svelte'
   import { theme, type ThemePref } from '@/lib/theme.svelte'
-  import BotAvatar from './BotAvatar.svelte'
+  import BotAvatar, { PRESENCE_LABELS } from './BotAvatar.svelte'
   import Icon, { type IconName } from './Icon.svelte'
   import UpdateButton from './UpdateButton.svelte'
   import UsageMeter from './UsageMeter.svelte'
@@ -17,8 +18,22 @@
   let confirming = $state<string | null>(null)
   let draft = $state('')
 
-  // Drafts first, then pinned jobs, then open ones, then finished ones by day.
+  // Drafts first, then pinned jobs, then open ones (by owner, with several bots), then finished ones by day.
   const groups = $derived(grouped(entries()))
+
+  /** The job an approval waits in (its shared thread or a bot's own thread on it): its row gets a badge. */
+  const waitJob = $derived.by(() => {
+    const w = app.computerWait
+    return w ? (app.sessions.find((s) => s.id === w.sessionId)?.jobId ?? null) : null
+  })
+
+  /** A bot in the roster opens its latest thread of its own; the primary, its conversation. */
+  const openBot = (b: Bot) => {
+    if (b.isPrimary) return void app.openPrimary()
+    const thread = app.latestThreadOf(b.id)
+    if (thread) void app.open(thread.id)
+    else openBotSettings(b.id)
+  }
 
   // Collapsed groups, by label, kept across launches.
   const COLLAPSED_KEY = 'chat-v2:collapsed-groups'
@@ -227,6 +242,29 @@
       <Icon name="search" size={16} />Search<kbd class="studio-kbd ml-auto">{shortcut('K')}</kbd>
     </button>
 
+    {#if app.team}
+      <!-- The roster, once there are several bots: what each is doing. -->
+      <div class="shrink-0" data-roster in:fade={{ duration: 160 }}>
+        <div class="mono-label mt-3 mb-0.5 px-2.5 py-1.5">Bots</div>
+        {#each app.bots as b (b.id)}
+          {@const presence = app.presence[b.id] ?? 'idle'}
+          {@const open = app.view?.session.kind === 'worker' && app.view.session.botId === b.id}
+          <button
+            class="nav-item !h-8 !gap-2.5 {open ? 'on' : ''}"
+            data-roster-bot={b.name}
+            use:tip={b.isPrimary ? `${b.name}'s conversation` : app.latestThreadOf(b.id) ? `${b.name}'s latest thread` : `${b.name} hasn't had a job yet`}
+            onclick={() => openBot(b)}
+          >
+            <BotAvatar bot={b} size={20} {presence} />
+            <span class="min-w-0 flex-1 truncate">{b.name}</span>
+            {#if presence !== 'idle'}
+              <span class="shrink-0 font-label text-[11.5px] {presence === 'waiting' || presence === 'stuck' ? 'text-danger' : 'text-fg-3'}" data-presence-label>{PRESENCE_LABELS[presence]}</span>
+            {/if}
+          </button>
+        {/each}
+      </div>
+    {/if}
+
     <nav bind:this={nav} class="relative -mx-1 min-h-0 flex-1 overflow-y-auto px-1 pb-2 [scrollbar-width:none]">
       {#each rows as row (row.key)}
         <!-- A row that goes leaves at once, so the rows after it glide up in its place. -->
@@ -282,6 +320,7 @@
                     <span class="grid shrink-0 place-items-center text-fg-3" use:tip={parent ? `Forked from “${parent.title}”` : 'Forked job'}><Icon name="branch" size={13} /></span>
                   {/if}
                   <span class="min-w-0 flex-1 truncate text-left {s ? '' : 'italic'}">{s ? e.title : draftTitle(app.draftText(''))}</span>
+                  {#if waitJob === e.job.id}<span class="size-2 shrink-0 rounded-full bg-danger" role="status" aria-label="Needs your OK" use:tip={'Needs your OK'} data-wait-badge></span>{/if}
                 </button>
                 <!-- Over the title rather than beside it, so the title runs to the row's edge; it fades out under the actions. -->
                 <div class="acts pointer-events-none absolute top-1 right-1 flex rounded-r-lg pl-4 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100 {active ? 'on' : ''}">

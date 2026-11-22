@@ -9,6 +9,8 @@
   import type { PathNode } from '@shared/types'
   import BotAvatar from './BotAvatar.svelte'
   import Composer from './Composer.svelte'
+  import ComputerWaitCard from './ComputerWaitCard.svelte'
+  import JobBar from './JobBar.svelte'
   import JobChip from './JobChip.svelte'
   import Mascot from './Mascot.svelte'
   import Icon from './Icon.svelte'
@@ -35,7 +37,7 @@
   const pendingNodes = $derived.by<PathNode[]>(() => {
     const p = app.pending
     if (!p || !app.isPrimary) return []
-    const base = { sessionId: '', parentId: null, activeChildId: null, lineCount: 0, model: null, error: null, createdAt: 0, usage: null, attachments: [] }
+    const base = { sessionId: '', parentId: null, activeChildId: null, lineCount: 0, model: null, error: null, createdAt: 0, usage: null, attachments: [], post: null }
     return [
       { message: { ...base, id: 'pending-user', role: 'user', content: p.text, status: 'complete', authorBotId: null, attachments: p.attachments }, siblingIds: [], siblingIndex: 0 },
       { message: { ...base, id: 'pending-reply', role: 'assistant', content: '', status: 'streaming', authorBotId: app.primaryBot?.id ?? null }, siblingIds: [], siblingIndex: 0 }
@@ -46,6 +48,25 @@
   // A chat from before Claude keeps its old model id; it now runs on the default.
   const model = $derived(isClaudeModel(app.chat.model) ? app.chat.model : (app.settings?.settings.defaultModel ?? ''))
   const hasOverride = $derived(app.chat.systemPrompt != null)
+  /** A bot's own thread on a job. */
+  const worker = $derived(view?.session.kind === 'worker')
+  /** Several bots write here: replies say whose they are. */
+  const showAuthor = $derived(!app.isPrimary && !!view && (worker || view.path.some((n) => n.message.post)))
+  /**
+   * Approvals always come to you: one asked in a thread that isn't open (a bot's own, asking to
+   * pass a request on) shows above the composer, saying where it is from.
+   */
+  const elsewhere = $derived.by(() => {
+    const w = app.computerWait
+    if (w?.kind !== 'approval' || view?.path.some((n) => n.message.id === w.messageId)) return null
+    return w
+  })
+  const elsewhereFrom = $derived.by(() => {
+    const s = elsewhere ? app.sessions.find((x) => x.id === elsewhere.sessionId) : undefined
+    if (!s) return null
+    const bot = app.bots.find((b) => b.id === s.botId)
+    return { id: s.id, label: s.kind === 'worker' && bot ? `${bot.name}'s thread on “${s.title}”` : `“${s.title}”` }
+  })
 
   /**
    * Scroll to end glides to the end and keeps chasing it until it gets there: messages far up the
@@ -277,7 +298,13 @@
     style="padding-left: {app.sidebarOpen ? 16 : 86}px; padding-right: {app.panelToggle && !app.panelOpen ? 46 : 12}px"
   >
     {#if app.isPrimary}<BotAvatar bot={app.primaryBot} size={22} class="ml-1" />{/if}
-    <span class="min-w-0 truncate pl-1 font-medium" data-chat-title>{app.isPrimary ? (app.primaryBot?.name ?? 'Tomo') : (view?.session.title ?? '')}</span>
+    {#if worker && app.currentBot}
+      <!-- A bot's own thread: whose it is, then its job. -->
+      <BotAvatar bot={app.currentBot} size={22} class="ml-1" presence={app.presence[app.currentBot.id] ?? null} />
+      <span class="shrink-0 pl-1 font-medium" data-thread-bot>{app.currentBot.name}</span>
+      <span class="text-fg-4">·</span>
+    {/if}
+    <span class="min-w-0 truncate pl-1 font-medium {worker ? '!font-normal text-fg-2' : ''}" data-chat-title>{app.isPrimary ? (app.primaryBot?.name ?? 'Tomo') : (view?.session.title ?? '')}</span>
     <span class="flex-1"></span>
     <!-- The primary's instructions are its bot's, in Settings; a job's thread can have its own. -->
     {#if !app.isPrimary}
@@ -306,6 +333,8 @@
       {#if app.control.active}<span class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-blue"></span>{/if}
     </button>
   </header>
+
+  {#if app.team && !app.isPrimary && view}<JobBar />{/if}
 
   {#if empty}
     <div class="min-h-0 flex-1"></div>
@@ -337,6 +366,7 @@
               far={from + i < view.path.length - 4}
               primary={app.isPrimary}
               job={app.isPrimary ? (app.jobByThread.get(node.message.sessionId) ?? null) : null}
+              {showAuthor}
             />
           {/each}
           {#each pendingNodes as node (node.message.id)}
@@ -362,6 +392,16 @@
     bind:clientHeight={dockH}
     class="z-[3] mx-auto w-full max-w-[824px] shrink-0 px-8 {empty ? 'relative' : 'absolute inset-x-0 bottom-0'} {empty && !stage ? '' : 'pb-[18px]'}"
   >
+    {#if elsewhere}
+      <div class="mb-2.5" data-approval-elsewhere>
+        {#if elsewhereFrom}
+          <button class="mb-1.5 inline-flex max-w-full items-center gap-1 px-1 text-[12.5px] text-fg-3 transition-colors hover:text-fg" onclick={() => app.open(elsewhereFrom.id)}>
+            <span class="truncate">From {elsewhereFrom.label}</span><Icon name="chevronRight" size={12} class="shrink-0" />
+          </button>
+        {/if}
+        <ComputerWaitCard wait={elsewhere} />
+      </div>
+    {/if}
     <div class="mb-2 flex min-h-7 items-center px-1 empty:hidden"><JobChip /></div>
     <Composer
       bind:this={composer}

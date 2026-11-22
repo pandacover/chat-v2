@@ -68,13 +68,22 @@ export const planTurn = (lineage: readonly Message[], reply: Message, continuing
 
 /** In every system prompt, so it never changes between turns (which would miss the cache). */
 export const HISTORY_NOTE =
-  "If a message starts with earlier turns of this chat inside <user> and <assistant> tags, those are turns you don't have in your history. Answer only what comes after them."
+  "If a message starts with earlier turns of this chat inside <user> and <assistant> tags, those are turns you don't have in your history. Answer only what comes after them. Turns inside <post> tags are what the user's bots said in this job's shared thread (who wrote each, and to whom); <from_bot> is a message another bot sent you."
+
+/** A bot's name for a prompt, by id; an unknown (deleted) bot is "a bot". */
+export type NameOf = (botId: string | null) => string
+
+/** What a bot sent another bot's thread, as that bot's prompt shows it. */
+export const fromBotText = (m: Pick<Message, 'content' | 'authorBotId' | 'post'>, nameOf: NameOf) =>
+  `<from_bot name="${nameOf(m.authorBotId)}"${m.post ? ` kind="${m.post.kind}"` : ''}>\n${m.content}\n</from_bot>`
 
 /** An earlier turn written into a prompt, or null when it has nothing to show. */
-export const transcriptText = (m: Message): string | null => {
-  if (m.role === 'user') return `<user>\n${m.content}\n</user>`
+export const transcriptText = (m: Message, nameOf?: NameOf): string | null => {
+  if (m.role === 'user') return m.authorBotId && nameOf ? fromBotText(m, nameOf) : `<user>\n${m.content}\n</user>`
   const text = summarizeSteps(m.content).trim()
-  return text ? `<assistant>\n${text}\n</assistant>` : null
+  if (!text) return null
+  if (m.post && nameOf) return `<post from="${nameOf(m.authorBotId)}" to="${m.post.to ? nameOf(m.post.to) : 'everyone'}"${m.post.state ? ` ${m.post.state}` : ''}>\n${text}\n</post>`
+  return `<assistant>\n${text}\n</assistant>`
 }
 
 /** How much of a cut-off reply's end is quoted back when continuing it from its own session. */

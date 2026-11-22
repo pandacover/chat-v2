@@ -109,7 +109,8 @@ describe('the move of progress_notes into job notes', () => {
     const file = tempFile()
     const raw = new DatabaseSync(file)
     const at = MIGRATIONS.indexOf(PROGRESS_NOTES_MIGRATION)
-    expect(at).toBe(MIGRATIONS.length - 1)
+    // Every migration before it has run; later ones (workers) run when the app opens the file.
+    expect(at).toBeGreaterThan(0)
     for (const [i, sql] of MIGRATIONS.slice(0, at).entries()) {
       raw.exec(sql)
       raw.exec(`pragma user_version = ${i + 1}`)

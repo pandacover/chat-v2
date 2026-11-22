@@ -9,6 +9,7 @@
 //   - the same call with any result, 5 in a row
 //   - the same error from the same call: a nudge to the model at 3, a pause at 4
 //   - two calls alternating (A, B, A, B), each with the same result every time, over 6 calls
+//   - across bots, the same request bouncing between two of them, over 6 posts (`bouncing`)
 //   - the same 50 characters of text 10 times close together
 // Anything subtler (no change, churn) is judged at checkpoints, on the schedule below.
 
@@ -234,6 +235,32 @@ export const makeDetector = (t: Thresholds = THRESHOLDS) => {
 }
 
 export type Detector = ReturnType<typeof makeDetector>
+
+/** A post between bots in a job's shared thread, as `bouncing` reads it. */
+export interface BotPost {
+  from: string
+  to: string | null
+  text: string
+}
+
+/** A post's text as compared: case and spacing aside. */
+const postKey = (text: string) => text.replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 2000)
+
+/**
+ * The alternating signal across bots: the same request bouncing between two of them. True when the
+ * last `steps` posts (6, as for two calls alternating) go back and forth between the same two bots,
+ * each addressed to the other, and each bot says the same thing every time.
+ */
+export const bouncing = (posts: readonly BotPost[], steps = THRESHOLDS.alternating): boolean => {
+  if (posts.length < steps) return false
+  const tail = posts.slice(-steps)
+  const [a, b] = [tail[0]!, tail[1]!]
+  if (a.from === b.from || a.to !== b.from || b.to !== a.from) return false
+  return tail.every((p, i) => {
+    const like = i % 2 === 0 ? a : b
+    return p.from === like.from && p.to === like.to && postKey(p.text) === postKey(like.text)
+  })
+}
 
 // Checkpoints: a progress note and a judge's look at it. The first comes after 30 model calls,
 // then every 10; 5 after an unclear look, 15 while the work is clearly moving.

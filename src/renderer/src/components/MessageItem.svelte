@@ -20,6 +20,7 @@
   import Icon from './Icon.svelte'
   import Markdown from './Markdown.svelte'
   import Mascot from './Mascot.svelte'
+  import PostCard from './PostCard.svelte'
   import { usageDetail, usageShort } from '@/lib/usage'
   import { listEditing } from '@/lib/textarea'
 
@@ -28,7 +29,8 @@
     last = false,
     far = false,
     primary = false,
-    job = null
+    job = null,
+    showAuthor = false
   }: {
     node: PathNode
     last?: boolean
@@ -41,8 +43,10 @@
     primary?: boolean
     /** The job a turn of the primary's conversation went to. */
     job?: Job | null
+    /** Several bots write in this thread (a job's with posts, or a bot's own): replies say whose they are. */
+    showAuthor?: boolean
   } = $props()
-  const author = $derived(primary ? (app.bots.find((b) => b.id === node.message.authorBotId) ?? app.primaryBot) : null)
+  const author = $derived(primary || showAuthor ? (app.bots.find((b) => b.id === node.message.authorBotId) ?? (primary ? app.primaryBot : null)) : null)
 
   const message = $derived(node.message)
   const streaming = $derived(message.status === 'streaming')
@@ -189,7 +193,10 @@
   }
 </script>
 
-{#if message.role === 'user'}
+{#if message.post || (message.role === 'user' && message.authorBotId)}
+  <!-- A bot's post (a task, message or report), or what a bot sent this bot's own thread. -->
+  <div class="msg {far ? 'far' : ''}"><PostCard {message} job={primary ? job : null} {fresh} /></div>
+{:else if message.role === 'user'}
   <div class="msg user group flex flex-col items-end gap-1.5 {far ? 'far' : ''}" in:fly={{ y: 8, duration: fresh ? 240 : 0 }}>
     {#if message.attachments.length > 0}
       <div class="flex flex-wrap justify-end gap-1.5">
@@ -286,7 +293,7 @@
     {#if author}
       <!-- Who answered, and in which job: the primary's conversation runs across jobs. -->
       <div class="-mb-1 flex h-6 min-w-0 items-center gap-2 text-[13px]" data-reply-author>
-        <BotAvatar bot={author} size={22} state={streaming ? 'thinking' : ''} />
+        <BotAvatar bot={author} size={22} state={streaming ? 'thinking' : ''} presence={showAuthor && streaming ? (app.presence[author.id] ?? null) : null} />
         <span class="shrink-0 font-medium text-fg">{author.name}</span>
         {#if job}
           <span class="text-fg-4">·</span>

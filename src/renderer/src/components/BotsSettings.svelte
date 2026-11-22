@@ -2,11 +2,14 @@
   // Settings › Bots: each bot's name, avatar, model, thinking and instructions, the tool modules it
   // has, and its rules: allow, ask or block for each kind of tool call. Rules always the user's
   // (irreversible actions) are locked to ask or block. Changes save shortly after the last one.
+  // Bots are added and deleted here; any can be made the primary (the fox is the primary's).
   import { onDestroy } from 'svelte'
   import type { Bot, Effort } from '@shared/types'
   import { MODULES, RULE_GROUPS, ruleValue, type ModuleId, type RuleId, type Rules, type Verdict } from '@shared/rules'
+  import { AVATAR_TINTS, avatarOf, type AvatarTint } from '@shared/bots'
   import { shortcut } from '@/lib/keys'
   import { fade } from '@/lib/motion'
+  import { takeSettingsBot } from '@/lib/settingsNav'
   import { app } from '@/lib/store.svelte'
   import { tip } from '@/lib/tooltip'
   import BotAvatar from './BotAvatar.svelte'
@@ -29,8 +32,10 @@
   ]
 
   // One bot at a time: Tomo until workers arrive, then picked from the row at the top.
-  let selectedId = $state(app.primaryBot?.id ?? app.bots[0]?.id ?? '')
+  const askedFor = takeSettingsBot()
+  let selectedId = $state((askedFor && app.bots.some((b) => b.id === askedFor) ? askedFor : null) ?? app.primaryBot?.id ?? app.bots[0]?.id ?? '')
   const selected = $derived(app.bots.find((b) => b.id === selectedId) ?? null)
+  const primaryName = $derived(app.primaryBot?.name ?? 'Tomo')
 
   type Draft = Pick<Bot, 'name' | 'avatar' | 'model' | 'effort' | 'instructions' | 'modules' | 'rules'>
   const draftOf = (b: Bot | null): Draft => ({
@@ -38,7 +43,8 @@
     avatar: b?.avatar ?? null,
     model: b?.model ?? app.settings!.settings.defaultModel,
     effort: b?.effort ?? app.settings!.settings.effort,
-    instructions: b?.instructions ?? app.settings!.settings.systemPrompt,
+    // A worker has only its own; the primary started from Settings' instructions.
+    instructions: b?.instructions ?? (b && !b.isPrimary ? '' : app.settings!.settings.systemPrompt),
     modules: [...(b?.modules ?? [])],
     rules: { ...(b?.rules ?? {}) }
   })
@@ -51,7 +57,8 @@
     timer = undefined
     pendingFor = null
     onstatus('saving')
-    const ok = await app.updateBot(id, { ...patch, name: patch.name.trim() || 'Tomo' })
+    const fallback = app.bots.find((b) => b.id === id)?.isPrimary ? 'Tomo' : 'New bot'
+    const ok = await app.updateBot(id, { ...patch, name: patch.name.trim() || fallback })
     onstatus(ok ? 'saved' : 'idle')
     clearTimeout(savedTimer)
     if (ok) savedTimer = setTimeout(() => onstatus('idle'), 1600)
@@ -76,6 +83,7 @@
     flush()
     selectedId = id
     draft = draftOf(app.bots.find((b) => b.id === id) ?? null)
+    confirmingDelete = false
   }
 
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => {
@@ -89,26 +97,80 @@
 
   const computerOn = $derived(draft.modules.includes('computer') && app.computerSupported)
   const moduleLabel = (id: ModuleId) => MODULES.find((m) => m.id === id)?.label ?? id
+
+  // Adding, deleting and the primary.
+  let confirmingDelete = $state(false)
+  const add = async () => {
+    flush()
+    const bot = await app.createBot({ name: 'New bot' })
+    if (!bot) return
+    selectedId = bot.id
+    draft = draftOf(bot)
+    confirmingDelete = false
+  }
+  const remove = async () => {
+    const id = selectedId
+    confirmingDelete = false
+    clearTimeout(timer)
+    timer = undefined
+    pendingFor = null
+    await app.removeBot(id)
+    selectedId = app.primaryBot?.id ?? app.bots[0]?.id ?? ''
+    draft = draftOf(app.bots.find((b) => b.id === selectedId) ?? null)
+  }
+  const makePrimary = async () => {
+    flush()
+    await app.setPrimary(selectedId)
+  }
+
+  // The avatar: the fox (the primary's), an initial on a tint, or a picture.
+  const avatar = $derived(avatarOf(draft.avatar))
+  const TINT_LABELS: Record<AvatarTint, string> = { plain: 'Plain', blue: 'Blue', green: 'Green', red: 'Red', warm: 'Warm' }
+  let picker: HTMLInputElement | undefined = $state()
+  /** A picture, cropped square from its centre and shrunk to 96 px, as a small data URL. */
+  const pickImage = async (file: File | undefined) => {
+    if (!file) return
+    try {
+      const bitmap = await createImageBitmap(file)
+      const side = Math.min(bitmap.width, bitmap.height)
+      const canvas = document.createElement('canvas')
+      canvas.width = canvas.height = 96
+      canvas.getContext('2d')!.drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, 96, 96)
+      set('avatar', `image:${canvas.toDataURL('image/webp', 0.85)}`)
+    } catch {
+      app.toast("That picture couldn't be read.")
+    } finally {
+      if (picker) picker.value = ''
+    }
+  }
 </script>
 
 <section id="settings-bots">
   <h3 class="mt-1.5 mb-1 font-display text-[22px] leading-[1.2] font-normal tracking-[-0.02em]">Bots</h3>
-  <p class="mb-5 max-w-[60ch] text-fg-3">Who answers you, and what each may do on its own. Anything a rule says to ask about comes to you on an approval card, in its chat.</p>
+  <p class="mb-5 max-w-[60ch] text-fg-3">
+    Who answers you, and what each may do on its own. {primaryName} hands work to the other bots, and they report back. Anything a rule says to ask about comes to you on an approval card.
+  </p>
 
-  {#if app.bots.length > 1}
-    <div class="mb-4 flex flex-wrap gap-1.5" role="radiogroup" aria-label="Bot">
-      {#each app.bots as b (b.id)}
-        <button
-          role="radio"
-          aria-checked={b.id === selectedId}
-          class="flex h-9 items-center gap-2 rounded-full pr-3.5 pl-1.5 text-[13px] font-medium transition-colors {b.id === selectedId ? 'glass text-fg' : 'text-fg-2 hover:bg-wash'}"
-          onclick={() => pick(b.id)}
-        >
-          <BotAvatar bot={b} size={26} />{b.name}
-        </button>
-      {/each}
-    </div>
-  {/if}
+  <div class="mb-4 flex flex-wrap items-center gap-1.5">
+    {#if app.bots.length > 1}
+      <div class="contents" role="radiogroup" aria-label="Bot">
+        {#each app.bots as b (b.id)}
+          <button
+            role="radio"
+            aria-checked={b.id === selectedId}
+            class="flex h-9 items-center gap-2 rounded-full pr-3.5 pl-1.5 text-[13px] font-medium transition-colors {b.id === selectedId ? 'glass text-fg' : 'text-fg-2 hover:bg-wash'}"
+            data-bot-pick={b.name}
+            onclick={() => pick(b.id)}
+          >
+            <BotAvatar bot={b} size={26} presence={app.presence[b.id] ?? null} />{b.name}
+          </button>
+        {/each}
+      </div>
+    {/if}
+    <button class="btn quiet sm !h-9 !gap-1.5 !rounded-full !px-3.5" data-add-bot use:tip={`A worker: ${primaryName} hands it jobs, and you can talk to it directly`} onclick={add}>
+      <Icon name="plus" size={14} />Add a bot
+    </button>
+  </div>
 
   <div class="group-card" data-bot={selected?.id}>
     <div class="srow !justify-start !gap-3.5">
@@ -125,15 +187,42 @@
         </div>
         <span>
           {#if selected?.isPrimary}
-            Hears everything you say without picking a job (typed, or with <span class="whitespace-nowrap">{shortcut('M')}</span>), and opens a job for each topic.
+            Hears everything you say without picking a job (typed, or with <span class="whitespace-nowrap">{shortcut('M')}</span>), opens a job for each topic, and hands jobs to the other bots.
           {:else}
-            A worker: it takes on the jobs it is given.
+            A worker: {primaryName} hands it jobs, and it reports back. Open any of its threads to talk to it directly.
           {/if}
         </span>
       </div>
-      <div class="seg" role="radiogroup" aria-label="Avatar">
-        <button role="radio" aria-checked={draft.avatar === 'mascot'} use:tip={'The fox'} onclick={() => set('avatar', 'mascot')}>Fox</button>
-        <button role="radio" aria-checked={draft.avatar !== 'mascot'} use:tip={'The first letter of its name'} onclick={() => set('avatar', null)}>Initial</button>
+    </div>
+    <div class="srow">
+      <div class="l"><b>Avatar</b><span>{selected?.isPrimary ? 'The fox, the first letter of its name, or a picture' : 'The first letter of its name on a colour, or a picture'}</span></div>
+      <div class="flex shrink-0 items-center gap-1" role="radiogroup" aria-label="Avatar">
+        {#if selected?.isPrimary}
+          <button role="radio" class="swatch" aria-checked={avatar.kind === 'mascot'} aria-label="The fox" use:tip={'The fox'} onclick={() => set('avatar', 'mascot')}>
+            <BotAvatar bot={{ name: draft.name, avatar: 'mascot' }} size={26} />
+          </button>
+        {/if}
+        {#each AVATAR_TINTS as t (t)}
+          <button
+            role="radio"
+            class="swatch"
+            aria-checked={avatar.kind === 'initial' && avatar.tint === t}
+            aria-label={TINT_LABELS[t]}
+            use:tip={TINT_LABELS[t]}
+            data-tint={t}
+            onclick={() => set('avatar', t === 'plain' ? null : `tint:${t}`)}
+          >
+            <BotAvatar bot={{ name: draft.name || '?', avatar: `tint:${t}` }} size={26} />
+          </button>
+        {/each}
+        <button role="radio" class="swatch" aria-checked={avatar.kind === 'image'} aria-label="A picture" use:tip={'A picture'} onclick={() => picker?.click()}>
+          {#if avatar.kind === 'image'}
+            <BotAvatar bot={draft} size={26} />
+          {:else}
+            <span class="grid size-[26px] place-items-center rounded-full text-fg-3 shadow-[inset_0_0_0_1px_var(--line-2)]"><Icon name="camera" size={13} /></span>
+          {/if}
+        </button>
+        <input bind:this={picker} type="file" accept="image/png,image/jpeg,image/webp" class="hidden" onchange={(e) => void pickImage(e.currentTarget.files?.[0])} />
       </div>
     </div>
     <div class="srow">
@@ -164,16 +253,37 @@
             </button>
           {/if}
         </div>
-        <span>Sent with every reply. A job can replace them with its own from the button at its top right.</span>
+        <span>
+          {selected?.isPrimary
+            ? 'Sent with every reply. A job can replace them with its own from the button at its top right.'
+            : `What it is for and how it works. Its first line tells ${primaryName} what to hand it.`}
+        </span>
         <textarea
           value={draft.instructions ?? ''}
           oninput={(e) => set('instructions', e.currentTarget.value)}
           rows="5"
           aria-label="Instructions"
-          class="mt-2.5 block min-h-[84px] w-full resize-y rounded-[10px] bg-transparent px-3 py-2.5 text-[13.5px] shadow-[inset_0_0_0_1px_var(--line)] outline-none focus:shadow-[inset_0_0_0_1px_var(--line-2)]"
+          placeholder={selected?.isPrimary ? '' : 'Researches questions on the web and reports what it found, with sources.'}
+          class="mt-2.5 block min-h-[84px] w-full resize-y rounded-[10px] bg-transparent px-3 py-2.5 text-[13.5px] shadow-[inset_0_0_0_1px_var(--line)] outline-none placeholder:text-fg-4 focus:shadow-[inset_0_0_0_1px_var(--line-2)]"
         ></textarea>
       </div>
     </div>
+    {#if selected && !selected.isPrimary}
+      <div class="srow">
+        <div class="l"><b>Primary</b><span>Make {draft.name || 'it'} the bot that hears everything you say and hands out the work</span></div>
+        <button class="btn sm shrink-0" data-make-primary onclick={makePrimary}>Make primary</button>
+      </div>
+      <div class="srow">
+        {#if confirmingDelete}
+          <div class="l" in:fade={{ duration: 120 }}><b>Delete {draft.name || 'this bot'}?</b><span>Its threads and what it said stay, unsigned.</span></div>
+          <button class="btn quiet sm shrink-0" onclick={() => (confirmingDelete = false)}>Keep</button>
+          <button class="btn sm shrink-0 !text-danger" data-confirm-delete onclick={remove}>Delete</button>
+        {:else}
+          <div class="l"><b>Delete</b><span>Stops what it is doing; its threads stay, readable</span></div>
+          <button class="btn quiet sm shrink-0 !text-danger" data-delete-bot onclick={() => (confirmingDelete = true)}>Delete bot</button>
+        {/if}
+      </div>
+    {/if}
   </div>
 
   <div class="mono-label mx-0.5 mt-[22px] mb-2.5">Tools</div>
@@ -205,7 +315,9 @@
       <button class="ml-auto text-[12px] text-fg-3 hover:text-fg" in:fade={{ duration: 120 }} onclick={() => set('rules', {})}>Reset to defaults</button>
     {/if}
   </div>
-  <p class="mx-0.5 mb-2.5 text-[12.5px] text-fg-3">Allow runs it. Ask waits for your OK on an approval card. Block never runs it. Some actions are always yours to approve.</p>
+  <p class="mx-0.5 mb-2.5 text-[12.5px] text-fg-3">
+    Allow runs it. Ask waits for your OK on an approval card. Block never runs it. Some actions are always yours to approve. A bot asking another bot that may do more than it may waits for your OK too.
+  </p>
   <div class="group-card" aria-label="Rules">
     {#each RULE_GROUPS as g (g.id)}
       {@const off = g.needs !== null && !draft.modules.includes(g.needs)}
@@ -308,5 +420,20 @@
   }
   .verdicts button.block[aria-checked='true'] {
     color: var(--danger);
+  }
+  /* An avatar choice: a ring around the one picked. */
+  .swatch {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 9999px;
+    transition: box-shadow 120ms;
+  }
+  .swatch:hover {
+    box-shadow: 0 0 0 1px var(--line-2);
+  }
+  .swatch[aria-checked='true'] {
+    box-shadow: 0 0 0 1.5px var(--fg);
   }
 </style>
