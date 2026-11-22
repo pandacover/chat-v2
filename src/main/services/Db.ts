@@ -10,6 +10,7 @@ import type {
   Post,
   Role,
   AudioAnalysis,
+  ListedSession,
   Session,
   Usage
 } from '@shared/types'
@@ -192,7 +193,12 @@ export const MIGRATIONS: string[] = [
   // Checkpoints' progress notes become job notes (stuckStore.ts): progress_notes moves into them and goes.
   PROGRESS_NOTES_MIGRATION,
   // Workers (services/Team.ts): bots' posts in a job's shared thread, and each bot's own threads.
-  WORKERS_MIGRATION
+  WORKERS_MIGRATION,
+  // Unread threads in the sidebar: when the user last opened each thread, and when a reply last
+  // ended or a bot reported back in it. Every thread there already starts as read.
+  `alter table sessions add column read_at integer;
+  alter table sessions add column activity_at integer;
+  update sessions set read_at = cast(strftime('%s', 'now') as integer) * 1000;`
 ]
 
 interface SessionRow {
@@ -209,6 +215,15 @@ interface SessionRow {
   bot_id: string | null
   job_id: string | null
   kind: string
+  read_at: number | null
+  activity_at: number | null
+}
+
+/** A session row with where its thread stands (listSessions). */
+interface ListedRow extends SessionRow {
+  streaming: number
+  last_reply: string | null
+  limit_paused: number
 }
 
 interface MessageRow {
@@ -261,6 +276,20 @@ const toSession = (r: SessionRow): Session => ({
   jobId: r.job_id,
   kind: r.kind === 'primary' || r.kind === 'worker' ? r.kind : 'shared'
 })
+
+const toListed = (r: ListedRow): ListedSession => ({
+  ...toSession(r),
+  state: {
+    readAt: r.read_at,
+    activityAt: r.activity_at,
+    streaming: r.streaming === 1,
+    lastReply: (r.last_reply as MessageStatus | null) ?? null,
+    limitPaused: r.limit_paused === 1
+  }
+})
+
+/** How a reply ending makes its thread unread: an interrupted one (the app quit) doesn't. */
+const ENDED: ReadonlySet<MessageStatus> = new Set(['complete', 'stopped', 'paused', 'error'])
 
 const toAttachment = (r: AttachmentRow): StoredAttachment => ({
   id: r.id,
@@ -447,6 +476,8 @@ export const makeDb = (file: string) => {
     )
     run('update messages set active_child_id = ? where id = ?', id, m.parentId)
     run('update sessions set updated_at = ? where id = ?', now, m.sessionId)
+    // A bot reporting back is news in the thread until the user opens it.
+    if (m.post?.kind === 'report') run('update sessions set activity_at = ? where id = ?', now, m.sessionId)
     return getMessage(id)!
   }
 
@@ -617,8 +648,20 @@ export const makeDb = (file: string) => {
 
   return {
     ...jobs,
-    /** Threads; the primary's conversation is primarySession(). */
-    listSessions: () => all<SessionRow>(`select * from sessions where kind != 'primary' order by updated_at desc`).map(toSession),
+    /** Threads, each with where it stands; the primary's conversation is primarySession(). */
+    listSessions: (): ListedSession[] =>
+      all<ListedRow>(
+        `select s.*,
+           exists (select 1 from messages m where m.session_id = s.id and m.status = 'streaming') as streaming,
+           (select m.status from messages m where m.session_id = s.id and m.role = 'assistant' and m.post_kind is null
+              order by m.seq desc limit 1) as last_reply,
+           exists (select 1 from usage_pauses p where p.session_id = s.id) as limit_paused
+         from sessions s where s.kind != 'primary' order by s.updated_at desc`
+      ).map(toListed),
+    /** The user opened a thread, or saw a reply end in it. */
+    markRead: (id: string) => {
+      run('update sessions set read_at = ? where id = ?', Date.now(), id)
+    },
     /**
      * Deletes chats that never got a message (left over from when "New chat" saved a row
      * straight away), and jobs left with no thread. Returns how many chats went.
@@ -713,6 +756,9 @@ export const makeDb = (file: string) => {
           tailPartial ? 1 : 0,
           messageId
         )
+        // A reply that ended is news in its thread until the user sees it.
+        if (ENDED.has(status))
+          run(`update sessions set activity_at = ? where id = (select session_id from messages where id = ? and role = 'assistant')`, Date.now(), messageId)
       }),
     setUsage: (messageId: string, usage: Usage) => {
       run('update messages set usage = ? where id = ?', JSON.stringify(usage), messageId)

@@ -122,6 +122,7 @@ export const pinWindow = (win: BrowserWindow, on: boolean) => {
 
 const handlers: Record<string, Handler> = {
   'sessions:list': () => Db.use((db) => db.use((d) => d.listSessions())),
+  'sessions:markRead': (id) => Db.use((db) => db.use((d) => d.markRead(str(id, 'id')))),
   // A new job's thread, owned by the primary bot.
   'sessions:create': () =>
     Effect.gen(function* () {

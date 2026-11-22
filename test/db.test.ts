@@ -5,7 +5,9 @@ import { join } from 'node:path'
 import { Effect, Layer, ManagedRuntime } from 'effect'
 import { AppPaths } from '../src/main/services/AppPaths'
 import { Attachments } from '../src/main/services/Attachments'
-import { Db, makeDb } from '../src/main/services/Db'
+import { DatabaseSync } from 'node:sqlite'
+import { Db, MIGRATIONS, makeDb } from '../src/main/services/Db'
+import { unread } from '../src/renderer/src/lib/sections'
 
 const dirs: string[] = []
 afterEach(() => {
@@ -140,5 +142,82 @@ describe('attachment blocks', () => {
     } finally {
       await runtime.dispose()
     }
+  })
+})
+
+describe('unread threads', () => {
+  const stateOf = (db: ReturnType<typeof makeDb>, id: string) => db.listSessions().find((s) => s.id === id)!.state
+  const turn = (db: ReturnType<typeof makeDb>, threadId: string) => {
+    const s = db.getSession(threadId)!
+    const leaf = db.activePath(s).at(-1)?.message.id ?? s.rootId
+    const user = db.insertMessage({ sessionId: s.id, parentId: leaf, role: 'user', content: 'Hi', status: 'complete' })
+    return db.insertMessage({ sessionId: s.id, parentId: user.id, role: 'assistant', content: '', status: 'streaming' })
+  }
+
+  test('the migration adds read and activity times, with every thread there already read', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chat-v2-db-'))
+    dirs.push(dir)
+    const file = join(dir, 'chat.db')
+    const before = makeDb(file)
+    const { thread } = before.createJob({ title: 'Old job', botId: 'tomo' })
+    const r = turn(before, thread.id)
+    before.setStatus(r.id, 'complete')
+    before.close()
+    // Back to how the app left it before this migration: the columns gone, one version down.
+    const raw = new DatabaseSync(file)
+    raw.exec(`alter table sessions drop column read_at; alter table sessions drop column activity_at; pragma user_version = ${MIGRATIONS.length - 1}`)
+    raw.close()
+    const t0 = Date.now() - 1000
+    const db = makeDb(file)
+    const state = stateOf(db, thread.id)
+    expect(state.readAt).toBeGreaterThan(t0)
+    expect(state.activityAt).toBeNull()
+    expect(unread(db.listSessions().find((s) => s.id === thread.id)!)).toBe(false)
+    expect((new DatabaseSync(file).prepare('pragma user_version').get() as { user_version: number }).user_version).toBe(MIGRATIONS.length)
+    db.close()
+  })
+
+  test('a reply that ends makes its thread unread until it is opened; the user’s own messages never do', () => {
+    const { db } = open()
+    const { thread } = db.createJob({ title: 'Job', botId: 'tomo' })
+    const r = turn(db, thread.id)
+    expect(stateOf(db, thread.id)).toMatchObject({ activityAt: null, streaming: true, lastReply: 'streaming' })
+    expect(unread(db.listSessions().find((s) => s.id === thread.id)!)).toBe(false)
+    db.setStatus(r.id, 'complete')
+    const ended = stateOf(db, thread.id)
+    expect(ended).toMatchObject({ streaming: false, lastReply: 'complete' })
+    expect(ended.activityAt).not.toBeNull()
+    expect(unread(db.listSessions().find((s) => s.id === thread.id)!)).toBe(true)
+    db.markRead(thread.id)
+    expect(unread(db.listSessions().find((s) => s.id === thread.id)!)).toBe(false)
+    // Only the user writing: nothing new to read.
+    const user = db.insertMessage({ sessionId: thread.id, parentId: r.id, role: 'user', content: 'Thanks', status: 'complete' })
+    expect(unread(db.listSessions().find((s) => s.id === thread.id)!)).toBe(false)
+    // A reply cut off by quitting isn't news either.
+    const cut = db.insertMessage({ sessionId: thread.id, parentId: user.id, role: 'assistant', content: '', status: 'streaming' })
+    db.setStatus(cut.id, 'interrupted')
+    expect(unread(db.listSessions().find((s) => s.id === thread.id)!)).toBe(false)
+    expect(stateOf(db, thread.id).lastReply).toBe('interrupted')
+  })
+
+  test('a bot reporting back makes the thread unread; a task handed out does not', () => {
+    const { db } = open()
+    const { thread } = db.createJob({ title: 'Job', botId: 'tomo' })
+    db.markRead(thread.id)
+    db.appendPost({ threadId: thread.id, authorBotId: 'tomo', text: 'Do it', post: { kind: 'task', to: null, state: null } })
+    expect(unread(db.listSessions().find((s) => s.id === thread.id)!)).toBe(false)
+    expect(stateOf(db, thread.id).lastReply).toBeNull()
+    db.appendPost({ threadId: thread.id, authorBotId: 'tomo', text: 'Done it', post: { kind: 'report', to: null, state: null } })
+    expect(unread(db.listSessions().find((s) => s.id === thread.id)!)).toBe(true)
+  })
+
+  test('a reply paused at a usage limit shows on its thread', () => {
+    const { db } = open()
+    const { thread } = db.createJob({ title: 'Job', botId: 'tomo' })
+    const r = turn(db, thread.id)
+    db.setStatus(r.id, 'stopped')
+    expect(stateOf(db, thread.id).limitPaused).toBe(false)
+    db.setUsagePause({ messageId: r.id, sessionId: thread.id, window: 'five_hour', resetsAt: Date.now() + 1000, resumeAt: Date.now() + 1000, createdAt: Date.now() })
+    expect(stateOf(db, thread.id)).toMatchObject({ limitPaused: true, lastReply: 'stopped' })
   })
 })
