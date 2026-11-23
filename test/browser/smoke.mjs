@@ -10,7 +10,7 @@
 //   node test/browser/smoke.mjs <playwright-core dir> <outDir>
 import { spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -41,6 +41,9 @@ const env = { ...process.env, CHAT_V2_HEADLESS: '1', CHAT_V2_FAKE_QUERY: join(wo
 delete env.ELECTRON_RUN_AS_NODE
 const app = await _electron.launch({ executablePath: require(join(repo, 'node_modules/electron')), args: [repo, `--user-data-dir=${data}`], env })
 const log = []
+// Recordings go here, not into the real Videos folder.
+const videos = join(work, 'videos')
+await app.evaluate(({ app: a }, dir) => a.setPath('videos', dir), videos)
 app.process().stdout.on('data', (d) => log.push(...d.toString().split('\n').filter(Boolean)))
 app.process().stderr.on('data', (d) => log.push(...d.toString().split('\n').filter(Boolean)))
 
@@ -125,6 +128,12 @@ try {
   ok((await panelState()) === 'parked', 'still no panel in Tomo’s chat after its reply')
   await until(async () => (await replyTexts()).some((t) => t.includes('The browsing job is done')), 'the job reports back to Tomo', 30_000)
   ok((await panelState()) === 'parked', 'nor once the report is in')
+  // The screenshot the job's thread saved comes with its report, into Tomo's chat.
+  const carried = page.locator('[data-post="report"] [data-post-files] img[alt^="screenshot-"]')
+  await until(async () => (await carried.count()) === 1, "the report brings the job's screenshot into Tomo's chat")
+  ok(await carried.evaluate((img) => img.complete && img.naturalWidth > 100), 'and it loads')
+  await carried.scrollIntoViewIfNeeded()
+  await capture('1b-report-with-screenshot')
 
   // The job's thread has the browser, its steps and its artifact.
   await jobRow().first().click()
@@ -133,6 +142,15 @@ try {
   ok(/Opened: ok/.test(thread) && /Waited: ok/.test(thread), `the page loaded and the wait ran while out of sight (${thread.match(/Opened: [^\n]*|Waited: [^\n]*/g)})`)
   ok(/Screenshot: ok/.test(thread), `a screenshot taken out of sight came back (${thread.match(/Screenshot: [^\n]*/)})`)
   ok((await tabs()).includes('browser'), 'its panel has the browser tab')
+  ok(/Saved screenshot: ok/.test(thread), `a screenshot saved out of sight is attached (${thread.match(/Saved screenshot: [^\n]*/)})`)
+  const shotImg = page.locator('[data-reply-scope]:not([data-post]) img[alt^="screenshot-"]')
+  await until(async () => (await shotImg.count()) > 0, "the saved screenshot shows in the thread's reply")
+  ok(/Recording started: ok/.test(thread), `recording starts out of sight (${thread.match(/Recording started: [^\n]*/)})`)
+  const video = /Video: (\S+\.webm)/.exec(thread)?.[1]
+  ok(!!video && existsSync(video), `the recording is saved (${thread.match(/Video: [^\n]*/)})`)
+  ok(video.startsWith(videos), `into the Videos folder (${video})`)
+  ok(statSync(video).size > 20_000, `with frames in it (${statSync(video).size} bytes)`)
+  ok(readdirSync(join(videos, 'Tomo')).length === 1, 'one video, nothing left running')
   await capture('2-job-thread-with-browser')
   await page.locator('[data-reply-scope] button', { hasText: 'Notes' }).first().click()
   await until(async () => (await tabs()).includes('artifact:notes'), 'its artifact opens in a tab beside the browser')

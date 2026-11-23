@@ -77,6 +77,14 @@
     void persist(pendingFor, $state.snapshot(draft) as Draft)
   }
   onDestroy(flush)
+  // The primary changed this bot from the chat (edit_bot) while Settings is open: show it, unless an edit here waits to save.
+  let shownAt = app.bots.find((b) => b.id === selectedId)?.updatedAt ?? 0
+  $effect(() => {
+    const at = selected?.updatedAt ?? 0
+    if (at === shownAt) return
+    shownAt = at
+    if (!timer) draft = draftOf(selected)
+  })
 
   const pick = (id: string) => {
     if (id === selectedId) return

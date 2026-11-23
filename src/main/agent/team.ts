@@ -8,6 +8,8 @@
 //   message(text, to)      posts in a job's shared thread, to one bot or everyone; naming a bot
 //                          not on the job brings it in
 //   list_jobs()            open jobs: title, status, owner, bots on it, one-line summary
+//   create_bot(...)        primary only, in its chat with the user: a new worker bot, or changes
+//   edit_bot(bot, ...)     to one, made only once the user approves them on the approval card
 //
 // No one waits. The app carries what bots say between threads: a post to a bot is its next turn
 // (held while it is mid-reply), and a report or message to the primary is a turn in the primary's
@@ -20,8 +22,9 @@
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod'
 import type { Step } from '@shared/steps'
-import type { Bot } from '@shared/types'
-import { MODULES } from '@shared/rules'
+import type { Bot, BotPatch, Effort } from '@shared/types'
+import { MODULES, RULE_IDS, RULE_ITEMS, type ModuleId, type RuleId, type Rules, type Verdict, cleanRules, ruleValue } from '@shared/rules'
+import { MODELS, isClaudeModel, modelName } from '@shared/models'
 import type { RunContext, ToolModuleFactory } from './module'
 
 /** What a tool call comes to: the text the model gets, and the step line the user sees. */
@@ -38,9 +41,91 @@ export interface TeamDeps {
   readonly startJob: (ctx: RunContext, input: { bot: string; task: string; title?: string | undefined; subTask?: boolean | undefined }) => Promise<TeamResult>
   readonly message: (ctx: RunContext, input: { text: string; to?: string | undefined; thread?: string | undefined }, signal: AbortSignal) => Promise<TeamResult>
   readonly listJobs: (ctx: RunContext) => Promise<TeamResult>
+  /** A new worker (no `bot`), or changes to the one `bot` names, once the user approves them. */
+  readonly makeBot: (ctx: RunContext, input: BotInput, signal: AbortSignal) => Promise<TeamResult>
 }
 
-const LOAD = 'ToolSearch "select:mcp__team__start_job,mcp__team__message,mcp__team__list_jobs"'
+const TOOLS = ['start_job', 'message', 'list_jobs']
+const BOT_TOOLS = ['create_bot', 'edit_bot']
+const load = (names: readonly string[]) => `ToolSearch "select:${names.map((n) => `mcp__team__${n}`).join(',')}"`
+const LOAD = load(TOOLS)
+
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const satisfies readonly Effort[]
+
+/** What create_bot and edit_bot are given: `bot` names the one to change, and is absent for a new one. */
+export interface BotInput {
+  bot?: string | undefined
+  name?: string | undefined
+  instructions?: string | undefined
+  model?: string | undefined
+  effort?: string | undefined
+  tools?: string[] | undefined
+  rules?: Record<string, string> | undefined
+}
+
+/**
+ * The model's input as a change to a bot (`before` is the bot it changes, null for a new one), or
+ * what is wrong with it. Models go by id or name; rules are merged into the bot's own.
+ */
+export const botPatchFrom = (input: BotInput, before: Bot | null): { patch: BotPatch } | { error: string } => {
+  const patch: BotPatch = {}
+  if (input.name !== undefined) {
+    const name = input.name.trim().slice(0, 40)
+    if (!name) return { error: 'The name is empty.' }
+    patch.name = name
+  }
+  if (input.instructions !== undefined) patch.instructions = input.instructions.trim() || null
+  if (input.model?.trim()) {
+    const m = input.model.trim()
+    const low = m.toLowerCase()
+    const id = MODELS.find((x) => x.id === m || x.name.toLowerCase() === low || x.name.split(' ')[0]!.toLowerCase() === low)?.id ?? m
+    if (!isClaudeModel(id)) return { error: `“${m}” isn't a Claude model. The models: ${MODELS.map((x) => `${x.name} (${x.id})`).join(', ')}.` }
+    patch.model = id
+  }
+  if (input.effort?.trim()) {
+    const e = EFFORTS.find((x) => x === input.effort!.trim().toLowerCase())
+    if (!e) return { error: `The effort is one of ${EFFORTS.join(', ')}.` }
+    patch.effort = e
+  }
+  if (input.tools !== undefined) {
+    const asked = input.tools.map((t) => t.trim().toLowerCase())
+    const unknown = asked.filter((t) => !MODULES.some((m) => m.id === t))
+    if (unknown.length) return { error: `There is no tool set called ${unknown.map((u) => `“${u}”`).join(', ')}. The tool sets: ${MODULES.map((m) => m.id).join(', ')}.` }
+    patch.modules = MODULES.map((m) => m.id).filter((id) => asked.includes(id))
+  }
+  if (input.rules !== undefined) {
+    const bad = Object.entries(input.rules).filter(([k, v]) => !RULE_ITEMS.has(k as RuleId) || !['allow', 'ask', 'block'].includes(v))
+    if (bad.length) return { error: `Rules map these ids to allow, ask or block: ${RULE_IDS.join(', ')}. Not understood: ${bad.map(([k, v]) => `${k}: ${v}`).join(', ')}.` }
+    patch.rules = cleanRules({ ...(before?.rules ?? {}), ...input.rules })
+  }
+  if (before && Object.keys(patch).length === 0) return { error: 'Nothing to change: give at least one of name, instructions, model, effort, tools or rules.' }
+  return { patch }
+}
+
+const toolsLabel = (ms: readonly ModuleId[]) => ms.map((m) => MODULES.find((x) => x.id === m)?.label ?? m).join(', ') || 'none'
+const verdictWord = (v: Verdict) => (v === 'allow' ? 'allowed' : v === 'ask' ? 'asks you' : 'blocked')
+const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s)
+
+/** What the approval card says a change does: a line per thing it sets, before → after when it changes a bot. */
+export const describeBotChange = (patch: BotPatch, before: Bot | null): string[] => {
+  const lines: string[] = []
+  const from = <T>(was: T, now: T, show: (v: T) => string) => (before ? `${show(was)} → ${show(now)}` : show(now))
+  if (patch.name !== undefined && patch.name !== before?.name) lines.push(`Name: ${from(before?.name ?? '', patch.name, (v) => v)}`)
+  if (patch.model !== undefined && patch.model !== before?.model) lines.push(`Model: ${from(before?.model ?? null, patch.model, (v) => (v ? modelName(v) : 'the default'))}`)
+  if (patch.effort !== undefined && patch.effort !== before?.effort) lines.push(`Thinking: ${from(before?.effort ?? null, patch.effort, (v) => v ?? 'the default')}`)
+  if (patch.modules !== undefined && (!before || toolsLabel(patch.modules) !== toolsLabel(before.modules))) lines.push(`Tools: ${from(before?.modules ?? [], patch.modules, toolsLabel)}`)
+  if (patch.rules !== undefined) {
+    const was: Rules = before?.rules ?? {}
+    for (const id of RULE_IDS) {
+      if (before ? ruleValue(was, id) === ruleValue(patch.rules, id) : patch.rules[id] === undefined) continue
+      const item = RULE_ITEMS.get(id)!
+      lines.push(`${item.group.label} · ${item.label}: ${from(ruleValue(was, id), ruleValue(patch.rules, id), verdictWord)}`)
+    }
+  }
+  if (patch.instructions !== undefined && patch.instructions !== before?.instructions)
+    lines.push(`${before ? 'New instructions' : 'Instructions'}: ${patch.instructions ? cut(patch.instructions, 700) : 'none'}`)
+  return lines
+}
 
 /** One line per bot for the prompt: its name, what it is for (its instructions' first line), its tool modules. */
 export const rosterLines = (bots: readonly Bot[], me: Bot) =>
@@ -66,14 +151,21 @@ export const SELF_NAMES = /^(yourself|myself|me|self|you|itself)$/i
  */
 export const teamInstructions = (me: Bot, primary: Bot, bots: readonly Bot[], place: TeamPlace = 'chat') => {
   const roster = rosterLines(bots, me)
-  if (me.isPrimary && place !== 'own')
-    return `You lead a team of bots who work for the user. Load the team tools with ${LOAD}.
+  if (me.isPrimary && place !== 'own') {
+    const chat = place === 'chat'
+    return `You lead a team of bots who work for the user. Load the team tools with ${chat ? load([...TOOLS, ...BOT_TOOLS]) : LOAD}.
 - start_job(bot, task, title): opens a new job and hands it the task: to one of your bots, or to yourself (bot "yourself"), when none suits it or you have none. The work runs in the job's own thread, in parallel, while you carry on with the user. Hand off anything that takes steps or will take long, write work included; you don't need to ask the user first. sub_task: true makes it part of the job you are in.
 - message(text, to, thread): posts in a job's shared thread, to one bot or to everyone on it. Naming a bot not on the job brings it in. In your chat with the user, name the job with thread (its job_id).
-- list_jobs(): the open jobs, their bots and where each stands.
+- list_jobs(): the open jobs, their bots and where each stands.${
+      chat
+        ? `
+- create_bot(name, instructions, model, effort, tools, rules) and edit_bot(bot, ...): make a new bot, or change one of your bots (not yourself). Use them when the user asks, or when work keeps coming up that a bot of its own would suit and the user agrees to one you suggest. Each shows the user an approval card with exactly what it sets and does nothing until they approve, so don't also ask in text. Give a new bot instructions whose first line says what it is for, and only the tools its work needs. If the user denies it, ask what they'd like instead.`
+        : ''
+    }
 Once you hand work off you don't track it or wait for it: tell the user who is on it and carry on with them. When the work reports back, or a bot writes to you, it arrives in your conversation with the user as a turn of its own, a <from_bot> message naming who sent it, whether it is a report or a message, and its job. The user sees it there as a card just above your reply, so don't repeat it: tell them the outcome in a sentence or two and anything they need to do or decide. If a bot's report calls for a next step, take it; your own report is the work you handed yourself, done.
 Everything bots say to each other is in the job's shared thread, which you and the user can read. Give each task whole and self-contained: the job's thread can't see this conversation.
 ${roster ? `Your bots:\n${roster}` : 'You have no other bots yet: hand work to yourself.'}`
+  }
   if (me.isPrimary)
     return `This is your own thread on a job you handed yourself. Load the team tools with ${LOAD}.
 - message(text, to): posts in this job's shared thread, to one of your bots or to everyone on it; naming a bot not on the job brings it in. Its answer arrives as your next turn here: end your reply when you need it.
@@ -135,9 +227,40 @@ export const teamModule =
       () => guarded(ctx, () => deps.listJobs(ctx)),
       { searchHint: 'list_jobs: see open jobs, what each bot is working on', annotations: { readOnlyHint: true } }
     )
+    // Making and changing bots: the primary, in its chat with the user, where the user approves.
+    const botFields = {
+      instructions: z.string().optional().describe('Its standing instructions (its system prompt). The first line says what it is for: the roster shows it'),
+      model: z.string().optional().describe(`A Claude model, by id or name: ${MODELS.map((m) => `${m.id} (${m.note})`).join('; ')}. Left out, the app's default`),
+      effort: z.enum(EFFORTS).optional().describe('How long it thinks: low, medium (the usual), high, xhigh, max'),
+      tools: z
+        .array(z.string())
+        .optional()
+        .describe(`Its tool sets, replacing what it has: ${MODULES.map((m) => `"${m.id}" (${m.hint})`).join('; ')}. None leaves it memory and job notes`),
+      rules: z
+        .record(z.string(), z.enum(['allow', 'ask', 'block']))
+        .optional()
+        .describe(
+          `By rule id: allow, ask (the user approves each such call) or block; a rule left out keeps what it was. Rule ids: ${RULE_IDS.map((id) => `${id} (${RULE_ITEMS.get(id)!.label}, default ${RULE_ITEMS.get(id)!.default})`).join('; ')}`
+        )
+    }
+    const createBot = tool(
+      'create_bot',
+      'Primary only. Makes a new worker bot, once the user approves it on an approval card showing exactly what it sets; until then nothing is made. Use it when the user wants a bot, or agreed to one you suggested.',
+      { name: z.string().describe('Its name, short (up to 40 characters)'), ...botFields },
+      (a) => guarded(ctx, () => deps.makeBot(ctx, { ...a, bot: undefined }, ctx.signal)),
+      { searchHint: 'create_bot: make a new bot, add a worker, set up a bot for a kind of work' }
+    )
+    const editBot = tool(
+      'edit_bot',
+      "Primary only. Changes one of the user's bots (not yourself): only what you give changes, and rules merge into its own. The user approves the change on an approval card showing before and after; until then nothing changes.",
+      { bot: z.string().describe("The bot's name now"), name: z.string().optional().describe('A new name'), ...botFields },
+      (a) => guarded(ctx, () => deps.makeBot(ctx, a, ctx.signal)),
+      { searchHint: 'edit_bot: change, modify, rename or reconfigure a bot: its instructions, model, tools or rules' }
+    )
+    const botTools = me.isPrimary && place === 'chat' ? [createBot, editBot] : []
     return {
       name: 'team',
       instructions: teamInstructions(me, primary, bots, place),
-      server: createSdkMcpServer({ name: 'team', version: '1.0.0', tools: [startJob, message, listJobs] })
+      server: createSdkMcpServer({ name: 'team', version: '1.0.0', tools: [startJob, message, listJobs, ...botTools] })
     }
   }

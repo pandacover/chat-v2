@@ -958,6 +958,10 @@ class AppState {
       this.threadChanged(e.sessionId)
       return
     }
+    if (e.type === 'bots') {
+      void this.loadBots()
+      return
+    }
     if (e.type === 'jobs') {
       // Summaries and usage land in bursts after each reply: one reload for them all.
       clearTimeout(this.jobsTimer)

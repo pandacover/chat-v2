@@ -133,7 +133,7 @@ export class Chat extends Context.Service<
      * and answered at once unless a reply is still running there, in which case it is held and
      * answered once that ends. `via` marks it as shown in that conversation (the primary's).
      */
-    readonly queue: (input: { sessionId: string; text: string; from: string; post?: Post | null; via?: string | null }) => Effect.Effect<{ messageId: string; started: boolean }, ChatError>
+    readonly queue: (input: { sessionId: string; text: string; from: string; post?: Post | null; via?: string | null; attachmentIds?: readonly string[] }) => Effect.Effect<{ messageId: string; started: boolean }, ChatError>
     /**
      * Answers the turns a thread ends on that nothing answered yet (messages held while a reply ran),
      * all in one reply. Every reply that ends does this for its thread; so does startup.
@@ -766,7 +766,7 @@ export class Chat extends Context.Service<
         return (yield* insertUserTurn(input)).view
       })
 
-      const queue = Effect.fn('Chat.queue')(function* (input: { sessionId: string; text: string; from: string; post?: Post | null; via?: string | null }) {
+      const queue = Effect.fn('Chat.queue')(function* (input: { sessionId: string; text: string; from: string; post?: Post | null; via?: string | null; attachmentIds?: readonly string[] }) {
         const session = yield* db.require('Session', (d) => d.getSession(input.sessionId))
         const { parentId, busy } = yield* db.use((d) => ({
           parentId: d.activePath(session).at(-1)?.message.id ?? session.rootId,
@@ -776,7 +776,8 @@ export class Chat extends Context.Service<
           sessionId: session.id,
           parentId,
           text: input.text,
-          attachmentIds: [],
+          // Files a report carries from the reply it reports (a screenshot it saved): bound to this turn too.
+          attachmentIds: [...(input.attachmentIds ?? [])],
           from: input.from,
           post: input.post ?? null,
           hold: busy,
