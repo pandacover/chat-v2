@@ -7,7 +7,7 @@
 </script>
 
 <section class="flex h-full min-w-0 flex-col" aria-label="Panel" data-panel-home>
-  <header class="flex h-[52px] shrink-0 items-center gap-1 border-b border-line px-2.5">
+  <header class="flex h-[52px] shrink-0 items-center gap-1 bg-canvas px-2.5">
     {@render tabs()}
   </header>
   <div class="grid min-h-0 flex-1 place-items-center overflow-y-auto bg-canvas p-6">
