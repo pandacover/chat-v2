@@ -3,7 +3,8 @@
   // another bot sent to a bot's own thread. In Tomo's conversation a report comes as this card,
   // labelled with its job, which it opens. The card names who wrote it and who it is for, and says
   // when it is waiting for the user's OK, was declined, or was stopped for bouncing.
-  import type { Job, Message } from '@shared/types'
+  import type { Attachment, Job, Message } from '@shared/types'
+  import AttachmentChip from './AttachmentChip.svelte'
   import { tip } from '@/lib/tooltip'
   import { fly } from '@/lib/motion'
   import { app } from '@/lib/store.svelte'
@@ -22,6 +23,11 @@
   const inThread = $derived(message.role === 'user')
   const postState = $derived(message.post?.state ?? null)
   const presence = $derived(author ? (app.presence[author.id] ?? null) : null)
+
+  const saveImage = async (a: Attachment) => {
+    const path = await app.attempt(() => window.api.attachments.saveAs(a.id, a.name))
+    if (path) app.toast(`Saved to ${path}`, 'info')
+  }
 
   let copied = $state(false)
   const copy = async () => {
@@ -60,6 +66,23 @@
   <div class="text-[14.5px]">
     <Markdown source={message.content} streaming={false} live={false} />
   </div>
+  {#if message.attachments.length > 0}
+    <!-- What the reporting bot made for you (a screenshot it saved), carried from its thread. -->
+    <div class="mt-2.5 flex flex-wrap gap-2" data-post-files>
+      {#each message.attachments as a (a.id)}
+        {#if a.kind === 'image'}
+          <div class="group/shot relative max-w-md overflow-hidden rounded-[12px] shadow-[0_0_0_1px_var(--ring)]">
+            <img src={window.api.attachments.url(a.id)} alt={a.name} class="block max-h-72 w-auto" />
+            <button class="btn solid sm absolute top-2 right-2 opacity-0 transition-opacity group-hover/shot:opacity-100 focus-visible:opacity-100" use:tip={`Save ${a.name}`} onclick={() => saveImage(a)}>
+              Save
+            </button>
+          </div>
+        {:else}
+          <AttachmentChip attachment={a} />
+        {/if}
+      {/each}
+    </div>
+  {/if}
   {#if postState}
     <div class="mt-2 flex items-center gap-1.5 text-[12.5px] {postState === 'held' ? 'text-danger' : 'text-fg-3'}">
       <Icon name={postState === 'held' ? 'lock' : postState === 'declined' ? 'x' : 'alert'} size={13} />

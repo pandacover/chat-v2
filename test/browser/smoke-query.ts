@@ -45,11 +45,21 @@ const script: Script = async function* (t) {
     const waited = yield* t.tool('mcp__browser__wait', { seconds: 7 })
     const shot = yield* t.tool('mcp__browser__screenshot', {})
     const shotOk = !shot.result?.isError && (shot.result?.content ?? []).some((c) => c.type === 'image' && (c.data ?? '').length > 1000)
+    // The user asked for a screenshot and a recording: saved, still out of sight.
+    const saved = yield* t.tool('mcp__browser__screenshot', { save: true })
+    const started = yield* t.tool('mcp__browser__record', { action: 'start' })
+    yield* t.tool('mcp__browser__scroll', { direction: 'down' })
+    yield* t.tool('mcp__browser__wait', { seconds: 2 })
+    const stopped = yield* t.tool('mcp__browser__record', { action: 'stop' })
+    const video = /saved to (.+\.webm)/.exec(textOf(stopped))?.[1]
     yield* t.text(
       [
         `Opened: ${/Test page for Tomo/.test(textOf(opened)) ? 'ok' : `failed (${textOf(opened).slice(0, 120)})`}.`,
         `Waited: ${/Waited|Test page/.test(textOf(waited)) ? 'ok' : 'failed'}.`,
         `Screenshot: ${shotOk ? 'ok' : `failed (${textOf(shot).slice(0, 120)})`}.`,
+        `Saved screenshot: ${/attached to your reply/.test(textOf(saved)) ? 'ok' : `failed (${textOf(saved).slice(0, 160)})`}.`,
+        `Recording started: ${/Recording the browser panel/.test(textOf(started)) ? 'ok' : `failed (${textOf(started).slice(0, 160)})`}.`,
+        `Video: ${video ?? `failed (${textOf(stopped).slice(0, 160)})`}`,
         '<artifact identifier="notes" title="Notes">\n<h1>Notes</h1>\n</artifact>',
         '',
         END

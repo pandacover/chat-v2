@@ -433,6 +433,8 @@ export type StreamEvent =
   | { type: 'computerMode'; messageId: string; mode: ComputerMode }
   /** Jobs changed (a new one, a title, a summary, a status): reload the list. */
   | { type: 'jobs' }
+  /** Bots changed outside Settings (the primary made or changed one): reload them. */
+  | { type: 'bots' }
   /** A thread changed outside a reply the window started: a bot posted, or a bot's reply began. */
   | { type: 'thread'; sessionId: string }
   /** What every bot is doing now. */

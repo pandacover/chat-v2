@@ -20,6 +20,10 @@
 // do more than it can (agent/rules.ts `exceeds`) is held until the user approves it, on the same
 // card as every other approval; the doing bot's own rules still apply as it works. A request that
 // keeps bouncing between two bots is stopped (agent/stuck.ts `bouncing`).
+//
+// The primary makes and changes workers too (create_bot, edit_bot), in its chat with the user, and
+// only once the user approves the card that says exactly what the change sets. It never changes
+// itself: that stays the user's, in Settings.
 import { Cause, Context, Effect, Layer } from 'effect'
 import { parseContent } from '@shared/artifacts'
 import { splitSteps } from '@shared/steps'
@@ -30,7 +34,7 @@ import { ComputerUse } from '../computer'
 import { exceeds } from '../agent/rules'
 import { bouncing } from '../agent/stuck'
 import type { RunContext } from '../agent/module'
-import { SELF_NAMES, type TeamDeps, type TeamPlace, type TeamResult, teamModule } from '../agent/team'
+import { SELF_NAMES, type TeamDeps, type TeamPlace, type TeamResult, botPatchFrom, describeBotChange, teamModule } from '../agent/team'
 import { LIST_OPEN } from '../jobs'
 import { Broadcaster, Chat, titleFrom } from './Chat'
 import { Db, type DbApi } from './Db'
@@ -168,11 +172,11 @@ export class Team extends Context.Service<
        * Hands a post to `to` in its own thread on `job`, bringing it onto the job if it wasn't: as
        * its next turn, which starts its reply, or waits for the one running there to end.
        */
-      const deliver = (job: Job, from: Bot, to: Bot, text: string, kind: Post['kind']) =>
+      const deliver = (job: Job, from: Bot, to: Bot, text: string, kind: Post['kind'], files: readonly string[] = []) =>
         Effect.gen(function* () {
           const thread = sync((d) => d.workerThread(job.id, to.id, true))
           if (!thread) return null
-          yield* chat.queue({ sessionId: thread.id, text, from: from.id, post: { kind, to: to.id, state: null } })
+          yield* chat.queue({ sessionId: thread.id, text, from: from.id, post: { kind, to: to.id, state: null }, attachmentIds: files })
           return thread
         })
 
@@ -181,10 +185,10 @@ export class Team extends Context.Service<
        * user at once, or after the reply it is writing there. The post in the job's shared thread is
        * the job's record; the user sees this one.
        */
-      const toPrimary = (from: Bot, text: string, kind: Post['kind']) =>
+      const toPrimary = (from: Bot, text: string, kind: Post['kind'], files: readonly string[] = []) =>
         Effect.gen(function* () {
           const { session, primary } = sync((d) => ({ session: d.primarySession(), primary: d.primaryBot() }))
-          yield* chat.queue({ sessionId: session.id, text, from: from.id, post: { kind, to: primary.id, state: null }, via: session.id })
+          yield* chat.queue({ sessionId: session.id, text, from: from.id, post: { kind, to: primary.id, state: null }, via: session.id, attachmentIds: files })
           return session.id
         })
 
@@ -193,17 +197,24 @@ export class Team extends Context.Service<
        * primary's own thread on the job when it works on it itself (a job it handed itself), unless
        * that is where it comes from; to its conversation with the user otherwise.
        */
-      const toPrimaryOn = (job: Job, from: Bot, fromThread: string, text: string, kind: Post['kind']) =>
+      const toPrimaryOn = (job: Job, from: Bot, fromThread: string, text: string, kind: Post['kind'], files: readonly string[] = []) =>
         Effect.gen(function* () {
           const primary = sync((d) => d.primaryBot())
           const own = sync((d) => d.workerThread(job.id, primary.id))
-          if (own && own.id !== fromThread) return (yield* deliver(job, from, primary, text, kind))?.id ?? own.id
-          return yield* toPrimary(from, text, kind)
+          if (own && own.id !== fromThread) return (yield* deliver(job, from, primary, text, kind, files))?.id ?? own.id
+          return yield* toPrimary(from, text, kind, files)
         })
 
-      /** Posts in a job's shared thread; `via` also shows it in the primary's conversation (a notice for the user). */
-      const post = (job: Job, author: Bot, text: string, p: Post, notice = false) =>
-        sync((d) => d.appendPost({ threadId: job.threadId!, authorBotId: author.id, text, post: p, via: notice ? d.primarySession().id : null }))
+      /**
+       * Posts in a job's shared thread; `via` also shows it in the primary's conversation (a notice for
+       * the user). `files` are attachments it carries (a report's screenshots), bound to it too.
+       */
+      const post = (job: Job, author: Bot, text: string, p: Post, notice = false, files: readonly string[] = []) =>
+        sync((d) => {
+          const posted = d.appendPost({ threadId: job.threadId!, authorBotId: author.id, text, post: p, via: notice ? d.primarySession().id : null })
+          if (files.length) d.bindAttachments(files, posted.message.id)
+          return posted
+        })
 
       /** Two bots passing the same request back and forth: stopped, and the user told in the primary's conversation. */
       const bounced = (job: Job, from: Bot, to: Bot, text: string, kind: Post['kind']) => {
@@ -357,6 +368,51 @@ export class Team extends Context.Service<
             })
           ),
 
+        makeBot: (ctx, input, signal) =>
+          Effect.runPromise(
+            Effect.gen(function* () {
+              const { me, bots, place } = deps.who(ctx)
+              if (!me.isPrimary || place !== 'chat') return fail('Only the primary bot makes and changes bots, in its chat with the user.')
+              const creating = input.bot === undefined
+              const before = creating ? null : findBot(bots, input.bot!)
+              if (!creating && !before) return fail(`There is no bot called “${input.bot}”. Your bots: ${nameList(bots.filter((b) => !b.isPrimary)) || 'none yet'}.`)
+              if (before?.id === me.id) return fail("You can't change yourself: the user changes you in Settings › Bots.")
+              const parsed = botPatchFrom(input, before)
+              if ('error' in parsed) return fail(parsed.error)
+              const { patch } = parsed
+              const newName = patch.name ?? before?.name
+              const clash = bots.find((b) => b.id !== before?.id && newName !== undefined && same(b.name, newName))
+              if (clash) return fail(`There is already a bot called “${clash.name}”: pick another name.`)
+              const lines = describeBotChange(patch, before)
+              if (!creating && lines.length === 0) return { ok: true, text: `${before!.name} already has all of that: nothing changed.`, step: null } satisfies TeamResult
+              const title = creating ? `${me.name} wants to make a bot, “${patch.name}”` : `${me.name} wants to change ${before!.name}`
+              const label = creating ? `Made the bot ${patch.name}` : `Changed ${before!.name}`
+              const approved = yield* Effect.promise(() =>
+                Effect.runPromise(computer.ask({ sessionId: ctx.sessionId, messageId: ctx.messageId }, title, lines.join('\n')), { signal }).catch(() => false)
+              )
+              if (!approved)
+                return {
+                  ok: false,
+                  text: `The user didn't approve ${creating ? 'making this bot' : 'this change'}, so nothing changed. Don't try again another way: ask what they'd like instead.`,
+                  step: { tool: 'team_bot', label: creating ? `Make the bot ${patch.name}` : `Change ${before!.name}`, ok: false, denied: true }
+                } satisfies TeamResult
+              const bot = sync((d) => {
+                if (creating) return d.createBot(patch)
+                d.updateBot(before!.id, patch)
+                return d.getBot(before!.id)!
+              })
+              broadcaster.send({ type: 'bots' })
+              pushPresence()
+              return {
+                ok: true,
+                text: creating
+                  ? `Made the bot ${bot.name}. It is on your team now: hand it work with start_job. The user can change it in Settings › Bots.`
+                  : `Changed ${bot.name}. Its replies from now on run with the change; one running now finishes as it started.`,
+                step: { tool: 'team_bot', label, ok: true, detail: lines[0] }
+              } satisfies TeamResult
+            })
+          ),
+
         listJobs: async () => {
           const { jobs, bots, presence } = sync((d) => ({ jobs: d.listJobs(), bots: d.listBots(), presence: currentPresence() }))
           const name = (id: string | null) => bots.find((b) => b.id === id)?.name ?? 'nobody'
@@ -392,10 +448,12 @@ export class Team extends Context.Service<
             // Who asked: the nearest turn that wasn't a report (answering a report reports to whoever asked before it).
             const asked = reply.parentId ? d.lineage(reply.parentId).findLast((m) => m.role === 'user' && m.post?.kind !== 'report') : undefined
             const requester = asked?.authorBotId ? d.getBot(asked.authorBotId) : undefined
-            return job?.threadId && bot ? { reply, job, bot, requester } : null
+            // What the reply made for whoever asked (a screenshot it saved) goes with its report.
+            const files = (d.storedAttachmentsFor([reply.id]).get(reply.id) ?? []).map((a) => a.id)
+            return job?.threadId && bot ? { reply, job, bot, requester, files } : null
           })
           if (!info) return
-          const { reply, job, bot, requester } = info
+          const { reply, job, bot, requester, files } = info
           // Quitting cuts replies off; they report when continued. A reply that asked another bot
           // reports once the answer is in.
           // Paused at a usage limit, it goes on by itself at the reset, and reports when it ends.
@@ -415,8 +473,10 @@ export class Team extends Context.Service<
           if (!requester.isPrimary && bounced(job, bot, requester, text, 'report')) {
             changed(job.threadId, sync((d) => d.primarySession().id))
           } else {
-            post(job, bot, text, { kind: 'report', to: requester.id, state: null })
-            const back = requester.isPrimary ? yield* toPrimaryOn(job, bot, reply.sessionId, text, 'report') : (yield* deliver(job, bot, requester, text, 'report'))?.id
+            post(job, bot, text, { kind: 'report', to: requester.id, state: null }, false, files)
+            const back = requester.isPrimary
+              ? yield* toPrimaryOn(job, bot, reply.sessionId, text, 'report', files)
+              : (yield* deliver(job, bot, requester, text, 'report', files))?.id
             changed(job.threadId, back)
           }
           pushPresence()

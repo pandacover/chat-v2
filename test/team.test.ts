@@ -63,6 +63,7 @@ const gate = (name: string) => {
  *   try wait                  calls the wait tool there used to be
  *   open job                  start_job, from wherever it runs
  *   list                      list_jobs
+ *   create {json} / edit {json}  create_bot / edit_bot with that input
  *   gate <name>               waits until the test opens it
  *   slow <name>               the same, said as work
  *   hold-<name>               anywhere in a report Tomo answers: its reply waits on that gate
@@ -101,6 +102,7 @@ const script: Script = async function* (t) {
     else if (line === 'try wait') out.push(say(yield* t.tool('mcp__team__wait', { timeout_seconds: 1 })))
     else if (line === 'open job') out.push(say(yield* t.tool('mcp__team__start_job', { bot: 'Builder', task: 'Something new' })))
     else if (line === 'list') out.push(say(yield* t.tool('mcp__team__list_jobs', {})))
+    else if ((m = /^(create|edit) (\{.+\})$/.exec(line))) out.push(say(yield* t.tool(`mcp__team__${m[1]}_bot`, JSON.parse(m[2]!))))
     else if ((m = /^(?:gate|slow) (\w+)/.exec(line))) {
       yield* t.text(`${who} is on it.\n`)
       await t.wait(gate(m[1]!).promise)
@@ -131,7 +133,7 @@ const setup = (dir?: string) => {
   const jobs = Jobs.layer.pipe(Layer.provideMerge(chat), Layer.provide(providers), Layer.provide(broadcaster))
   const team = Team.layer.pipe(Layer.provide(Layer.mergeAll(chat, providers)), Layer.provide(broadcaster))
   const runtime = ManagedRuntime.make(Layer.mergeAll(jobs, team, providers))
-  const run = <A, E>(eff: Effect.Effect<A, E, Jobs | Chat | Db | Team | ComputerUse>) => runtime.runPromise(eff)
+  const run = <A, E>(eff: Effect.Effect<A, E, Jobs | Chat | Db | Team | ComputerUse | Attachments>) => runtime.runPromise(eff)
   const d = <A>(f: (d: Parameters<Parameters<Db['Service']['use']>[0]>[0]) => A) => run(Db.use((db) => db.use(f)))
   const until = async (ok: () => boolean | Promise<boolean>, what: string, ms = 5000) => {
     const t0 = Date.now()
@@ -192,7 +194,7 @@ describe('the team tools', () => {
     expect(systemOf(third)).toContain('You lead a team of bots')
     expect(systemOf(third)).toContain('- Scout: Finds things out on the web. (tools: none beyond memory and notes)')
     // Nobody waits: the tool is gone, and the instructions say the answer comes as a turn.
-    expect(systemOf(third)).toContain('select:mcp__team__start_job,mcp__team__message,mcp__team__list_jobs"')
+    expect(systemOf(third)).toContain('select:mcp__team__start_job,mcp__team__message,mcp__team__list_jobs,mcp__team__create_bot,mcp__team__edit_bot"')
     expect(systemOf(third)).not.toMatch(/\bwait\(/)
     expect(systemOf(third)).toContain("don't track it or wait for it")
     expect(systemOf(third)).toContain("don't repeat it")
@@ -585,6 +587,152 @@ describe('the team tools', () => {
     const conversation = (await t.conversation()).map((n) => n.message)
     expect(conversation.some((m) => m.authorBotId === 'tomo' && m.post?.kind === 'report' && m.content.includes('Builder and Scout kept passing the same request back and forth'))).toBe(true)
     expect(t.tomoAnswers()).toHaveLength(0)
+    await t.runtime.dispose()
+  })
+})
+
+describe('what a worker makes goes with its report', () => {
+  test("a screenshot a worker's reply saved is on its report: in the job's thread and in Tomo's conversation, where Tomo sees it", async () => {
+    const t = setup()
+    const scout = await t.addBot({ name: 'Scout', modules: ['browser'] })
+    await t.send('start Scout | slow shot')
+    // While Scout works, its reply saves a screenshot (what browser_screenshot with save does).
+    const job = await (async () => {
+      await t.until(async () => (await t.d((x) => x.listJobs())).length === 1, 'the job')
+      return (await t.d((x) => x.listJobs()))[0]!
+    })()
+    const thread = await (async () => {
+      await t.until(async () => !!(await t.d((x) => x.workerThread(job.id, scout.id))), "Scout's thread")
+      return (await t.d((x) => x.workerThread(job.id, scout.id)))!
+    })()
+    await t.until(async () => (await t.d((x) => x.streamingIds(thread.id))).length === 1, "Scout's reply")
+    const replyId = (await t.d((x) => x.streamingIds(thread.id)))[0]!
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4])
+    const shot = await t.run(Attachments.use((a) => a.add({ name: 'screenshot-120000.png', mime: 'image/png', data: png.buffer })))
+    await t.d((x) => x.bindAttachments([shot.id], replyId))
+    gate('shot').open()
+    await t.until(async () => t.tomoAnswers().length === 1, "Tomo's answer to the report")
+    await t.until(t.idle, 'all replies')
+
+    const filesOf = (id: string) => t.d((x) => (x.storedAttachmentsFor([id]).get(id) ?? []).map((a) => [a.name, a.path]))
+    const original = await filesOf(replyId)
+    expect(original.map(([n]) => n)).toEqual(['screenshot-120000.png'])
+    // The report in the job's shared thread and the turn in Tomo's conversation carry the same file.
+    const report = (await t.posts(job.title)).find((p) => p.post?.kind === 'report')!
+    expect(await filesOf(report.id)).toEqual(original)
+    const turn = (await t.conversation()).find((n) => n.message.post?.kind === 'report')!.message
+    expect(turn.attachments.map((a) => a.name)).toEqual(['screenshot-120000.png'])
+    expect(await filesOf(turn.id)).toEqual(original)
+    // Tomo's reply to the report was given the image with it.
+    const answer = t.tomoAnswers()[0]!
+    expect(answer.prompt.some((b) => b.type === 'image')).toBe(true)
+    await t.runtime.dispose()
+  })
+
+  test('a report with nothing attached carries nothing', async () => {
+    const t = setup()
+    await t.addBot({ name: 'Scout' })
+    await t.send('start Scout | Find a flight')
+    await t.until(async () => t.tomoAnswers().length === 1, "Tomo's answer to the report")
+    await t.until(t.idle, 'all replies')
+    const turn = (await t.conversation()).find((n) => n.message.post?.kind === 'report')!.message
+    expect(turn.attachments).toEqual([])
+    expect(t.tomoAnswers()[0]!.prompt.some((b) => b.type === 'image')).toBe(false)
+    await t.runtime.dispose()
+  })
+})
+
+describe('the primary makes and changes bots, with the user’s OK', () => {
+  const waiting = (t: T) => t.run(ComputerUse.use((c) => Effect.sync(c.waiting)))
+  const card = async (t: T) => {
+    await t.until(async () => (await waiting(t))?.kind === 'approval', 'the approval card')
+    const w = (await waiting(t))!
+    if (w.kind !== 'approval') throw new Error('not an approval')
+    return w
+  }
+  const lastSaid = async (t: T) => (await t.conversation()).at(-1)!.message.content
+
+  test('create_bot shows what it makes, and makes it only once approved; the window is told', async () => {
+    const t = setup()
+    const input = { name: 'Scout', instructions: 'Finds things out on the web.\nCites sources.', model: 'Haiku', effort: 'low', tools: ['browser'], rules: { 'browser.act': 'ask' } }
+    await t.send(`create ${JSON.stringify(input)}`)
+    const c = await card(t)
+    expect(c.title).toBe('Tomo wants to make a bot, “Scout”')
+    expect(c.detail.split('\n')).toEqual([
+      'Name: Scout',
+      'Model: Haiku 5.5',
+      'Thinking: low',
+      'Tools: Browser',
+      'Browser · Click and type on pages: asks you',
+      'Instructions: Finds things out on the web.',
+      'Cites sources.'
+    ])
+    // Nothing made while the card waits.
+    expect((await t.d((x) => x.listBots())).map((b) => b.name)).toEqual(['Tomo'])
+    await t.run(ComputerUse.use((x) => x.approve(c.id, true)))
+    await t.until(t.idle, 'the reply')
+    const scout = (await t.d((x) => x.listBots())).find((b) => b.name === 'Scout')!
+    expect(scout).toMatchObject({ isPrimary: false, model: 'claude-haiku-5-5', effort: 'low', modules: ['browser'], rules: { 'browser.act': 'ask' }, instructions: 'Finds things out on the web.\nCites sources.' })
+    expect(t.events.some((e) => e.type === 'bots')).toBe(true)
+    expect(await lastSaid(t)).toContain('Made the bot Scout')
+    expect(await lastSaid(t)).toContain('::step {"tool":"team_bot","label":"Made the bot Scout"')
+    // The next reply's roster has it.
+    await t.send('hello')
+    await t.until(t.idle, 'the next reply')
+    expect(systemOf(t.replies().at(-1)!)).toContain('- Scout: Finds things out on the web. (tools: Browser)')
+    await t.runtime.dispose()
+  })
+
+  test('denied, nothing is made; a bad input or a taken name never reaches the card', async () => {
+    const t = setup()
+    await t.send('create {"name":"Scout","tools":["browser"]}')
+    const c = await card(t)
+    await t.run(ComputerUse.use((x) => x.approve(c.id, false)))
+    await t.until(t.idle, 'the reply')
+    expect((await t.d((x) => x.listBots())).map((b) => b.name)).toEqual(['Tomo'])
+    expect(await lastSaid(t)).toContain("The user didn't approve making this bot")
+    expect(await lastSaid(t)).toContain('"denied":true')
+
+    await t.addBot({ name: 'Scout' })
+    await t.send('create {"name":"scout"}\ncreate {"name":"Other","tools":["telepathy"]}\ncreate {"name":"Other","model":"gpt-5"}\nedit {"bot":"Tomo","effort":"max"}\nedit {"bot":"Nobody","effort":"max"}\nedit {"bot":"Scout"}')
+    await t.until(t.idle, 'the reply')
+    const said = await lastSaid(t)
+    expect(said).toContain('There is already a bot called “Scout”')
+    expect(said).toContain('There is no tool set called “telepathy”')
+    expect(said).toContain('“gpt-5” isn\'t a Claude model')
+    expect(said).toContain("You can't change yourself")
+    expect(said).toContain('There is no bot called “Nobody”')
+    expect(said).toContain('Nothing to change')
+    expect(await waiting(t)).toBeNull()
+    await t.runtime.dispose()
+  })
+
+  test('edit_bot shows before and after, merges rules, and changes only what it was given', async () => {
+    const t = setup()
+    const builder = await t.addBot({ name: 'Builder', instructions: 'Builds things.', modules: ['computer'], rules: { 'files.write': 'allow' } })
+    await t.send('edit {"bot":"builder","name":"Maker","tools":["computer","browser"],"rules":{"shell.run":"block","shell.irreversible":"allow"}}')
+    const c = await card(t)
+    expect(c.title).toBe('Tomo wants to change Builder')
+    expect(c.detail.split('\n')).toEqual(['Name: Builder → Maker', 'Tools: Computer → Computer, Browser', 'Shell · Other commands: asks you → blocked'])
+    await t.run(ComputerUse.use((x) => x.approve(c.id, true)))
+    await t.until(t.idle, 'the reply')
+    const after = (await t.d((x) => x.getBot(builder.id)))!
+    // A locked rule never becomes allow; the rule it had stays.
+    expect(after).toMatchObject({ name: 'Maker', instructions: 'Builds things.', modules: ['computer', 'browser'], rules: { 'files.write': 'allow', 'shell.run': 'block', 'shell.irreversible': 'ask' } })
+    expect(await lastSaid(t)).toContain('Changed Maker')
+    await t.runtime.dispose()
+  })
+
+  test("workers, and Tomo on a job's thread, don't get the bot tools", async () => {
+    const t = setup()
+    await t.addBot({ name: 'Scout' })
+    await t.send('start Scout | create {"name":"Spy"}')
+    await t.until(async () => t.tomoAnswers().length === 1, "Tomo's answer to the report")
+    await t.until(t.idle, 'all replies')
+    const scoutCall = t.replies().find((c) => botOf(c) === 'Scout')!
+    expect(systemOf(scoutCall)).not.toContain('create_bot')
+    expect((await t.d((x) => x.listBots())).map((b) => b.name)).toEqual(['Tomo', 'Scout'])
+    expect(await waiting(t)).toBeNull()
     await t.runtime.dispose()
   })
 })
