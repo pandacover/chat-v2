@@ -60,6 +60,7 @@ const gate = (name: string) => {
  * Every bot, scripted. A message is read line by line:
  *   start <Bot> | <task>      start_job
  *   ask <Bot> | <text>        message
+ *   tell <job> [to <Bot>] | <text>  message to that job (by id or title), everyone on it when no bot
  *   try wait                  calls the wait tool there used to be
  *   open job                  start_job, from wherever it runs
  *   list                      list_jobs
@@ -83,6 +84,12 @@ const script: Script = async function* (t) {
   }
   const who = botOf(t.call)
   const said = asked(t.call)
+  // A worker whose request Claude's API keeps failing.
+  if (who !== 'Tomo' && said.trim() === 'fail 500') {
+    yield* t.text('Looking into it.\n')
+    yield* t.apiError('server_error', 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}')
+    return
+  }
   if (who === 'Builder' && said.trim() === 'Do the thing') {
     yield* t.text('No, you do it.')
     yield t.result()
@@ -98,12 +105,15 @@ const script: Script = async function* (t) {
     await t.wait(gate(hold).promise)
     out.push(`${hold} released`)
   }
-  // A worker's task can carry several commands, joined with ' ; '; told "No, you do it.", it asks again.
-  const lines = who !== 'Tomo' && said.trim() === 'No, you do it.' ? ['ask Builder | Do the thing'] : said.split(who === 'Tomo' ? '\n' : /\n| ; /)
+  // A worker's task (and Tomo's, in its own thread on a job) can carry several commands, joined with
+  // ' ; '; told "No, you do it.", it asks again.
+  const own = systemOf(t.call).includes('working on a task you handed yourself')
+  const lines = who !== 'Tomo' && said.trim() === 'No, you do it.' ? ['ask Builder | Do the thing'] : said.split(who === 'Tomo' && !own ? '\n' : /\n| ; /)
   for (const line of lines.map((l) => l.trim()).filter(Boolean)) {
     let m: RegExpExecArray | null
     if ((m = /^start (\w+) \| (.+)$/.exec(line))) out.push(say(yield* t.tool('mcp__team__start_job', { bot: m[1], task: m[2], title: m[2] })))
     else if ((m = /^ask (\w+) \| (.+)$/.exec(line))) out.push(say(yield* t.tool('mcp__team__message', { to: m[1], text: m[2] })))
+    else if ((m = /^tell (.+?)(?: to (\w+))? \| (.+)$/.exec(line))) out.push(say(yield* t.tool('mcp__team__message', { thread: m[1], ...(m[2] ? { to: m[2] } : {}), text: m[3] })))
     else if (line === 'try wait') out.push(say(yield* t.tool('mcp__team__wait', { timeout_seconds: 1 })))
     else if (line === 'open job') out.push(say(yield* t.tool('mcp__team__start_job', { bot: 'Builder', task: 'Something new' })))
     else if (line === 'list') out.push(say(yield* t.tool('mcp__team__list_jobs', {})))
@@ -614,6 +624,76 @@ approve {"thread":"${job.id}","user_words":"approve stuff for me on that job"}`)
       'Tomo done: Scout done: Check the map'
     ])
     expect((await t.conversation()).filter((n) => n.message.role === 'assistant' && !n.message.post)).toHaveLength(3)
+    await t.runtime.dispose()
+  })
+
+  test("Tomo's message to a job it handed itself steers its own thread mid-reply, once, and restarts it when done", async () => {
+    const t = setup()
+    // A worker on the team, so the job's threads get the team tools.
+    await t.addBot({ name: 'Scout' })
+    await t.send('start yourself | slow s1 ; list')
+    const ownThread = async () => {
+      const job = (await t.d((x) => x.listJobs()))[0]
+      return job ? ((await t.d((x) => x.workerThread(job.id, 'tomo'))) ?? null) : null
+    }
+    const ownCalls = () => t.replies().filter((c) => systemOf(c).includes('working on a task you handed yourself'))
+    await t.until(async () => ownCalls().length === 1 && !!(await ownThread()), 'its own thread runs')
+    const job = (await t.d((x) => x.listJobs()))[0]!
+    // Mid-reply (waiting on s1): a correction from Tomo's chat, to everyone on the job.
+    await t.send(`tell ${job.id} | Use the blue map`)
+    const chatReply = async () => {
+      const last = (await t.conversation()).at(-1)!.message
+      return last.role === 'assistant' && last.status === 'complete' && last.content.includes('Posted') ? last.content : null
+    }
+    await t.until(async () => (await chatReply()) !== null, "Tomo's chat reply")
+    const told = (await chatReply())!
+    expect(told).toContain(`Posted to everyone on the job in “${job.title}”.`)
+    expect(told).toContain('Your own thread on the job is mid-reply: it gets this with the result of its next tool call')
+    gate('s1').open()
+    await t.until(async () => (await t.posts(job.title)).some((p) => p.post?.kind === 'report'), "the own thread's report")
+    await t.until(t.idle, 'replies')
+    // The running reply took the correction in with its next tool result, and nothing answers it again.
+    expect(ownCalls()).toHaveLength(1)
+    const own = (await ownThread())!
+    const path = (await t.d((x) => x.activePath(own))).map((n) => n.message)
+    expect(path.map((m) => [m.role, m.post?.kind ?? null, m.post?.state ?? null])).toEqual([
+      ['user', 'task', null],
+      ['assistant', null, null],
+      ['user', 'message', 'steered']
+    ])
+    expect(path[1]!.content).toContain('While you were working, this came for you in this thread.')
+    expect(path[1]!.content).toContain('<from_bot name="Tomo" kind="message">\nUse the blue map\n</from_bot>')
+    expect(await t.d((x) => unanswered(x.activePath(own)))).toBe(false)
+    // Done now: another message starts it again, in the same thread.
+    await t.send(`tell ${job.id} to Tomo | Now check the red one`)
+    await t.until(async () => ownCalls().length === 2, 'the own thread starts again')
+    await t.until(t.idle, 'replies')
+    expect(asked(ownCalls()[1]!)).toBe('Now check the red one')
+    expect((await t.d((x) => x.activePath(own))).at(-1)!.message.content).toBe('Tomo done: Now check the red one')
+    await t.runtime.dispose()
+  })
+
+  test("a worker's reply failing on Claude's API reports why, and how to pick it up again", async () => {
+    const t = setup()
+    await t.addBot({ name: 'Scout' })
+    await t.send('start Scout | fail 500')
+    await t.until(async () => t.tomoAnswers().length === 1, "Tomo's answer to the report")
+    await t.until(t.idle, 'replies')
+    const report = (await t.conversation()).find((n) => n.message.post?.kind === 'report')!.message.content
+    expect(report).toContain("Scout's reply stopped on an error: Claude's API had a server error (500). That's on Anthropic's side, not a problem with the task or a tool")
+    expect(report).toContain('To pick it up, message Scout asking it to carry on: it continues from where it stopped.')
+    expect(report).toContain('So far:\nLooking into it.')
+    expect(report).not.toContain('{"type"')
+    await t.runtime.dispose()
+  })
+
+  test('a message that would reach no one says so instead of posting', async () => {
+    const t = setup()
+    const { job } = await t.d((x) => x.createJob({ title: 'Solo', botId: 'tomo' }))
+    await t.send(`tell ${job.id} | Anyone there?`)
+    await t.until(t.idle, 'the reply')
+    expect((await t.conversation()).at(-1)!.message.content).toContain('No one else is on “Solo”, so a message to everyone would reach no one.')
+    expect(await t.posts('Solo')).toEqual([])
     await t.runtime.dispose()
   })
 

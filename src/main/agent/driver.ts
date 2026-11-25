@@ -14,7 +14,7 @@ import type { Step } from '@shared/steps'
 import type { Effort, NewAttachmentInput, Usage } from '@shared/types'
 import { errorMessage } from '../errors'
 import type { RunContext, ToolModule, ToolModuleFactory } from './module'
-import type { Pause, Watch, WatchControl } from './watch'
+import type { HookAnswer, Pause, Watch, WatchControl } from './watch'
 import { type AccountReading, REJECTED, probeAccount, rateLimitOf } from '../usage/sdk'
 
 /** `query` from the SDK, or a stand-in in tests. */
@@ -83,6 +83,8 @@ export interface ReplyHooks {
   rateLimit?(info: unknown): void
   /** A tool call started (true) or the last one running ended (false): the bot is working, or thinking again. */
   tool?(running: boolean): void
+  /** What came for the reply while it ran (steering), taken once: it reaches the model with the next tool result. */
+  steer?(): string | null
 }
 
 export interface ReplyResult {
@@ -135,8 +137,28 @@ export const agentEnv = (base: NodeJS.ProcessEnv, deps: Pick<AgentDeps, 'configD
 const textOf = (content: unknown) =>
   Array.isArray(content) ? content.map((b: { type?: string; text?: string }) => (b.type === 'text' ? (b.text ?? '') : '')).join('') : ''
 
-/** What to tell the user when Claude Code reports an error, plus what it said (`detail`). */
-export const describeFailure = (kind: SDKAssistantMessageError | null, detail: string, auth: Auth, model: string) => {
+/**
+ * The HTTP status and message of an API error as Claude Code words it, e.g. `API Error: 500
+ * {"type":"error","error":{"type":"api_error","message":"Internal server error"},"request_id":"…"}`.
+ */
+export const apiErrorOf = (text: string): { status: number; message: string | null } | null => {
+  const m = /API Error:\s*(\d{3})\b\s*([\s\S]*)/i.exec(text)
+  if (!m) return null
+  let message: string | null = null
+  try {
+    const body = JSON.parse(m[2]!.trim()) as { error?: { message?: unknown }; message?: unknown }
+    const said = body.error?.message ?? body.message
+    if (typeof said === 'string') message = said
+  } catch {
+    message = m[2]!.replace(/\s+/g, ' ').trim().slice(0, 120) || null
+  }
+  return { status: Number(m[1]), message }
+}
+
+/** What to tell the user when Claude Code reports an error, plus what it said (`detail`). `retries`: how often Claude Code had retried the request. */
+export const describeFailure = (kind: SDKAssistantMessageError | null, detail: string, auth: Auth, model: string, retries = 0) => {
+  const api = apiErrorOf(detail)
+  const tried = retries > 0 ? `, still failing after ${retries} ${retries === 1 ? 'retry' : 'retries'}` : ''
   const lead = (() => {
     switch (kind) {
       case 'authentication_failed':
@@ -149,7 +171,13 @@ export const describeFailure = (kind: SDKAssistantMessageError | null, detail: s
       case 'rate_limit':
         return "You've reached a usage or rate limit."
       case 'overloaded':
-        return 'Claude is overloaded right now. Try again in a minute.'
+        return `Claude is overloaded right now${tried}. Nothing was wrong with the task or its tools; the work so far is kept, so Continue in a minute.`
+      case 'server_error':
+        return `Claude's API had a server error${api ? ` (${api.status})` : ''}${tried}. That's on Anthropic's side, not a problem with the task or a tool; the work so far is kept, so Continue in a minute.`
+      case 'max_output_tokens':
+        return 'The reply hit the longest output Claude can write in one go. Continue picks it up from there.'
+      case 'invalid_request':
+        return "Claude's API refused the request as invalid. Retry it; if it keeps happening, start a new chat."
       case 'model_not_found':
         return `${model} isn't available to your account.`
       case 'account_on_hold':
@@ -159,7 +187,8 @@ export const describeFailure = (kind: SDKAssistantMessageError | null, detail: s
         return null
     }
   })()
-  const said = detail.replace(/\s+/g, ' ').trim().slice(0, 300)
+  // What it said: an API error's own message, not its JSON envelope.
+  const said = (api?.message ? `${api.status}: ${api.message}` : detail).replace(/\s+/g, ' ').trim().slice(0, 300)
   if (!lead) return said || 'Claude Code stopped with an error.'
   return said && !lead.includes(said) ? `${lead} (${said})` : lead
 }
@@ -172,14 +201,22 @@ const kindOf = (text: string): SDKAssistantMessageError | null =>
       ? 'billing_error'
       : /rate limit|hit your limit/i.test(text)
         ? 'rate_limit'
-        : null
+        : /overloaded|API Error:\s*529\b/i.test(text)
+          ? 'overloaded'
+          : /API Error:\s*5\d\d\b|internal server error|"api_error"/i.test(text)
+            ? 'server_error'
+            : null
 
 type Failure = { kind: SDKAssistantMessageError; text: string }
 
-/** The message for a query that failed: from its error message if there was one, else from what the SDK threw or the result said. */
-const explain = (failure: Failure | null, said: string, auth: Auth, model: string) => {
+/**
+ * The message for a query that failed: from its error message if there was one, else from what the
+ * SDK threw or the result said. An 'unknown' kind is read from the words (an API 500 can come so).
+ */
+const explain = (failure: Failure | null, said: string, auth: Auth, model: string, retries = 0) => {
   const detail = (failure?.text || said).replace(/^Claude Code returned an error result:\s*/, '')
-  return describeFailure(failure?.kind ?? kindOf(detail), detail, auth, model)
+  const kind = failure?.kind && failure.kind !== 'unknown' ? failure.kind : (kindOf(detail) ?? failure?.kind ?? null)
+  return describeFailure(kind, detail, auth, model, retries)
 }
 
 type CallUsage = { input_tokens?: number | null; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null; output_tokens?: number | null }
@@ -212,27 +249,39 @@ const usageOf = (r: SDKResultMessage, cost: number | null, lastCall: number | nu
   }
 }
 
+const NO_ANSWER: HookAnswer = { context: null, stop: null }
+
+/** A failed tool result's words, in one short line for its step (Claude Code wraps them in <tool_use_error>). */
+export const failureLine = (content: unknown): string | null => {
+  const text = typeof content === 'string' ? content : textOf(content)
+  const line = text
+    .replace(/<\/?tool_use_error>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return line ? (line.length > 160 ? `${line.slice(0, 159).trimEnd()}…` : line) : null
+}
+
 /**
  * Tool results reach the watch as soon as Claude Code has them, before the model sees them: a
  * nudge rides along with the result (additionalContext), and a pause stops the reply right there
- * (continue: false). A subagent's calls are its own.
+ * (continue: false). What came for the reply meanwhile (`steer`) rides along the same way. A
+ * subagent's calls are its own.
  */
-const watchHooks = (watch: Watch): Options['hooks'] => {
-  const answer = (a: ReturnType<Watch['hook']>, event: 'PostToolUse' | 'PostToolUseFailure'): HookJSONOutput =>
-    a.stop
-      ? { continue: false, stopReason: a.stop.reason }
-      : a.context
-        ? { hookSpecificOutput: { hookEventName: event, additionalContext: a.context } }
-        : {}
+export const replyHooks = (watch: Watch | null, steer: (() => string | null) | undefined): Options['hooks'] => {
+  const answer = (a: HookAnswer, event: 'PostToolUse' | 'PostToolUseFailure'): HookJSONOutput => {
+    if (a.stop) return { continue: false, stopReason: a.stop.reason }
+    const context = [a.context, steer?.()].filter(Boolean).join('\n\n')
+    return context ? { hookSpecificOutput: { hookEventName: event, additionalContext: context } } : {}
+  }
   const after: HookCallback = async (input) => {
     if (input.hook_event_name !== 'PostToolUse' || input.agent_id) return {}
     const r = input.tool_response as { isError?: unknown } | null
     const failed = !!r && typeof r === 'object' && r.isError === true
-    return answer(watch.hook(input.tool_use_id, input.tool_name, input.tool_input, input.tool_response, failed), 'PostToolUse')
+    return answer(watch ? watch.hook(input.tool_use_id, input.tool_name, input.tool_input, input.tool_response, failed) : NO_ANSWER, 'PostToolUse')
   }
   const failure: HookCallback = async (input) => {
     if (input.hook_event_name !== 'PostToolUseFailure' || input.agent_id || input.is_interrupt) return {}
-    return answer(watch.hook(input.tool_use_id, input.tool_name, input.tool_input, input.error, true), 'PostToolUseFailure')
+    return answer(watch ? watch.hook(input.tool_use_id, input.tool_name, input.tool_input, input.error, true) : NO_ANSWER, 'PostToolUseFailure')
   }
   return { PostToolUse: [{ hooks: [after] }], PostToolUseFailure: [{ hooks: [failure] }] }
 }
@@ -360,7 +409,7 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
         canUseTool: permit(modules),
         includePartialMessages: true,
         // No cap on model calls: the watch pauses a reply that is stuck instead.
-        ...(watch ? { hooks: watchHooks(watch) } : {}),
+        ...(watch || hooks.steer ? { hooks: replyHooks(watch, hooks.steer && (() => (abort.signal.aborted ? null : hooks.steer!()))) } : {}),
         abortController: abort,
         ...(resume
           ? { resume: resume.session, resumeSessionAt: resume.at, ...(resume.fork ? { forkSession: true, sessionId: req.session.id } : {}) }
@@ -374,6 +423,8 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
       const pendingCalls = new Set<string>()
       // A failure on a rate limit pauses the reply (services/Chat.ts) when no event said so already.
       let rejected = false
+      // How often Claude Code retried a failing API request (a 500, an overload) before giving up.
+      let retries = 0
       const limited = (said: string) => {
         if (rejected || (failure?.kind ?? kindOf(said)) !== 'rate_limit') return
         rejected = true
@@ -388,6 +439,10 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
           if (limit !== undefined) {
             rejected ||= (limit as { status?: string }).status === 'rejected'
             hooks.rateLimit?.(limit)
+            continue
+          }
+          if (m.type === 'system' && m.subtype === 'api_retry') {
+            retries = Math.max(retries, m.attempt)
             continue
           }
           // A subagent's messages; the reply is the main thread's.
@@ -407,6 +462,8 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
             // One model call can come as several assistant messages, all with its message id.
             watch?.step((m.message as { id?: string }).id ?? m.uuid)
             if (m.error) failure = { kind: m.error, text: textOf(m.message.content) }
+            // A call went through: retries before it are over.
+            else retries = 0
             if (m.error === 'rate_limit') limited('')
             for (const b of m.message.content) {
               if (b.type !== 'tool_use') continue
@@ -430,7 +487,9 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
               const step = b.type === 'tool_result' ? builtinCalls.get(b.tool_use_id) : undefined
               if (!step || b.type !== 'tool_result') continue
               builtinCalls.delete(b.tool_use_id)
-              await ctx.step({ ...step, ok: step.ok && !b.is_error })
+              // A failed built-in says why on its step line, not only that it failed.
+              const why = b.is_error ? failureLine(b.content) : null
+              await ctx.step({ ...step, ok: step.ok && !b.is_error, ...(why ? { detail: step.detail ? `${step.detail} · ${why}` : why } : {}) })
             }
           } else if (m.type === 'result') result = m
         }
@@ -440,18 +499,18 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
         if (p) return p
         if (abort.signal.aborted) throw abortError()
         limited(errorMessage(e))
-        throw new AgentError(explain(failure, errorMessage(e), req.auth, req.model))
+        throw new AgentError(explain(failure, errorMessage(e), req.auth, req.model, retries))
       }
       const p = pausedResult(result)
       if (p) return p
       if (abort.signal.aborted) throw abortError()
-      if (!result) throw new AgentError(failure ? explain(failure, '', req.auth, req.model) : 'Claude Code ended before the reply did.')
+      if (!result) throw new AgentError(failure ? explain(failure, '', req.auth, req.model, retries) : 'Claude Code ended before the reply did.')
       const sessionCost = result.total_cost_usd
       const usage = usageOf(result, Math.max(0, sessionCost - req.session.baseCost), lastCall)
       if (result.subtype !== 'success' || result.is_error) {
         const said = result.subtype === 'success' ? result.result : result.errors.join(' ')
         limited(said)
-        throw new AgentError(explain(failure, said, req.auth, req.model))
+        throw new AgentError(explain(failure, said, req.auth, req.model, retries))
       }
       return { usage, sessionCost, paused: null }
     } finally {

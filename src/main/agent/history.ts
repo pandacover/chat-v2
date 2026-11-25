@@ -116,6 +116,10 @@ const attr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').rep
 export const fromBotText = (m: Pick<Message, 'content' | 'authorBotId' | 'post'>, nameOf: NameOf, job: TurnJob | null = null) =>
   `<from_bot name="${nameOf(m.authorBotId)}"${m.post ? ` kind="${m.post.kind}"` : ''}${job ? ` job="${attr(job.title)}" job_id="${job.id}"` : ''}>\n${m.content}\n</from_bot>`
 
+/** Comes with the result of a tool call when a bot wrote to a thread mid-reply (Chat's steering). */
+export const STEER_NOTE =
+  "While you were working, this came for you in this thread. It won't come again as a turn of its own: take it into account now, in this reply. If it changes the task or corrects you, change course from here; when you finish, your reply covers it too."
+
 /** An earlier turn written into a prompt, or null when it has nothing to show. */
 export const transcriptText = (m: Message, nameOf?: NameOf, job: TurnJob | null = null): string | null => {
   if (m.role === 'user') return m.authorBotId && nameOf ? fromBotText(m, nameOf, job) : `<user>\n${m.content}\n</user>`

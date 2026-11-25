@@ -136,5 +136,5 @@ export const makePolicy =
         (): PermissionResult => ({ behavior: 'deny', message: 'The user denied this.' })
       )
       // The user moved the mouse to answer; that isn't taking over.
-      .finally(() => d.control.resetTakeover())
+      .finally(() => d.control.answered())
   }
