@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { Api, BrowserEvent, IpcResult, StreamEvent, UpdateState } from '@shared/types'
 import type { UsageEvent } from '@shared/usage'
 
@@ -38,6 +38,7 @@ const api: Api = {
     setStatus: (id, status) => call('jobs:setStatus', id, status),
     detail: (id) => call('jobs:detail', id),
     rename: (id, title) => call('jobs:rename', id, title),
+    stopApproving: (id) => call('jobs:stopApproving', id),
     remove: (id) => call('jobs:remove', id)
   },
   memory: {
@@ -66,6 +67,10 @@ const api: Api = {
   },
   attachments: {
     add: (input) => call('attachments:add', input),
+    addVideoFile: async (file) => {
+      const path = webUtils.getPathForFile(file)
+      return path ? call('attachments:addVideoFile', { path, name: file.name, mime: file.type }) : null
+    },
     discard: (id) => call('attachments:discard', id),
     saveAs: (id, name) => call('attachments:saveAs', id, name),
     setAnalysis: (id, analysis) => call('attachments:setAnalysis', id, analysis),

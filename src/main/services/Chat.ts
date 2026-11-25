@@ -13,6 +13,7 @@ import { playbookBlock } from '../reconciler'
 import { browserModule } from '../agent/browser'
 import { Agent, type Auth, type PromptBlock, type ReplyHooks } from '../agent/driver'
 import { type PrimaryContext, judgeModel, primaryJudge, smallModelJudge } from '../agent/judge'
+import { deputyInstructions, deputyMayAnswer, deputyPrompt, parseDeputy } from '../agent/deputy'
 import { type ProgressNote, type WatchDeps, makeWatch, pauseNote } from '../agent/watch'
 import { CHECKPOINT_PREFIX } from './stuckStore'
 import { SMALL_MODEL } from '@shared/models'
@@ -203,7 +204,7 @@ export class Chat extends Context.Service<
       /** Decides a reply's calls by its bot's rules, and asks on the approval card computer use shows. */
       const gateFor = (bot: Bot): Gate => ({
         decide: (tool, input) => decideAccess(bot, tool, input),
-        ask: (ctx, title, detail, signal) => Effect.runPromise(computer.ask({ sessionId: ctx.sessionId, messageId: ctx.messageId }, title, detail), { signal })
+        ask: (ctx, title, detail, signal, rule) => Effect.runPromise(computer.ask({ sessionId: ctx.sessionId, messageId: ctx.messageId }, title, detail, rule), { signal })
       })
       /** What the chat's last message was read as (do it, or show me how); a follow-up like "next" keeps it. */
       const lastMode = (sessionId: string): Mode =>
@@ -271,6 +272,8 @@ export class Chat extends Context.Service<
       const replyEnds = new Set<(end: { messageId: string; status: MessageStatus; limited?: boolean }) => void>()
       // Replies running now, for presence, and who to tell when that changes.
       const runningReplies = new Map<string, RunningReply>()
+      /** How each running reply adds a step line, for what happens to it from outside (Tomo approving for the user). */
+      const replySteps = new Map<string, ReplyHooks['step']>()
       const activity = new Set<() => void>()
       const active = () => activity.forEach((l) => l())
       /** Records how a memory check went and tells open windows (a toast when something changed). */
@@ -536,6 +539,7 @@ export class Chat extends Context.Service<
               active()
             }
           }
+          replySteps.set(assistant.id, hooks.step)
           runningReplies.set(assistant.id, { messageId: assistant.id, sessionId: session.id, botId: bot.id, working: false })
           active()
           const result = yield* Effect.tryPromise({
@@ -582,6 +586,7 @@ export class Chat extends Context.Service<
               const partial = tail.length > 0
               const stopped = stopRequested.delete(assistant.id)
               computerReplies.delete(assistant.id)
+              replySteps.delete(assistant.id)
               if (runningReplies.delete(assistant.id)) active()
               meter?.replyEnded({ sessionId: assistant.sessionId, messageId: assistant.id, model, startedAt, endedAt: Date.now(), cost: runCost })
               // Then what was held while it ran is answered (afterEnd).
@@ -894,6 +899,42 @@ export class Chat extends Context.Service<
       const linesSince = Effect.fn('Chat.linesSince')(function* (messageId: string, fromIndex: number) {
         return yield* db.require('Message', (d) => d.linesSince(messageId, fromIndex))
       })
+
+      // Tomo approving for the user (agent/deputy.ts): on a job whose approvals the user handed to it,
+      // each approval its threads ask for comes here first. Tomo approves what the user's words and
+      // the task cover (a step line in the reply says so, and why); the rest goes to the user's card.
+      computer.setDeputy(async (request, signal) => {
+        if (!deputyMayAnswer(request.kind)) return null
+        const found = Effect.runSync(
+          db
+            .use((d) => {
+              const session = d.getSession(request.owner.sessionId)
+              const job = session?.jobId ? d.getJob(session.jobId) : undefined
+              if (!session || !job?.approvesForUser) return null
+              const reply = d.getMessage(request.owner.messageId)
+              const task = reply?.parentId ? (d.lineage(reply.parentId).findLast((m) => m.role === 'user')?.content ?? '') : ''
+              return { job, words: job.approvesForUser, primary: d.primaryBot(), bot: d.botOf(session.id), task }
+            })
+            .pipe(Effect.orElseSucceed(() => null))
+        )
+        if (!found) return null
+        const settings = await Effect.runPromise(settingsStore.get).catch(() => null)
+        const model = judgeModel(found.primary.model ?? settings?.defaultModel)
+        const leave = (why: string) => ({ approved: false as const, note: `${found.primary.name} left this one to you: ${why}` })
+        if (!model) return leave('it has no Claude model to decide with.')
+        const context = { name: found.primary.name, words: found.words, job: found.job, bot: found.bot.name, task: found.task }
+        const answer = await Effect.runPromise(ask(model, deputyInstructions(found.primary.name), deputyPrompt(context, request), '45 seconds'), { signal })
+          .then(parseDeputy)
+          .catch(() => null)
+        if (signal.aborted) return null
+        if (!answer) return leave("it couldn't decide.")
+        if (!answer.approve) return leave(answer.why || "your words to it don't clearly cover this.")
+        await replySteps
+          .get(request.owner.messageId)?.({ tool: 'team_deputy', label: `${found.primary.name} approved for you: ${request.title}`, ok: true, ...(answer.why ? { detail: answer.why } : {}) })
+          .catch(() => undefined)
+        return { approved: true }
+      })
+      yield* Effect.addFinalizer(() => Effect.sync(() => computer.setDeputy(null)))
 
       // Tomo's chat starting afresh after a pause once it is past its budget, and its running summary.
       const rollover = yield* makeRollover({ db, settings: settingsStore.get.pipe(Effect.orElseSucceed(() => null)), ask })

@@ -165,7 +165,13 @@ describe('attachments', () => {
     expect(classify('doc.pdf', '')).toBe('pdf')
     expect(classify('main.rs', '')).toBe('text')
     expect(classify('data.json', 'application/json')).toBe('text')
-    expect(classify('movie.mp4', 'video/mp4')).toBe(null)
+    expect(classify('movie.mp4', 'video/mp4')).toBe('video')
+    expect(classify('clip.MOV', '')).toBe('video')
+    expect(classify('screen.webm', 'video/webm')).toBe('video')
+    expect(classify('voice.webm', 'audio/webm')).toBe('audio')
+    expect(classify('odd.bin', 'video/x-something')).toBe('video')
+    // Chromium calls TypeScript files video/mp2t: still text.
+    expect(classify('main.ts', 'video/mp2t')).toBe('text')
   })
 })
 

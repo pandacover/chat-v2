@@ -20,7 +20,9 @@ export default defineConfig({
         // The computer-use overlay (src/main/computer) gets its own, much smaller bridge.
         input: {
           index: resolve(__dirname, 'src/preload/index.ts'),
-          computer: resolve(__dirname, 'src/preload/computer.ts')
+          computer: resolve(__dirname, 'src/preload/computer.ts'),
+          // The video worker's (main/video.ts): it can only read the video it is given.
+          video: resolve(__dirname, 'src/preload/video.ts')
         },
         // Sandboxed preloads must be a single CommonJS file.
         output: { format: 'cjs', entryFileNames: '[name].cjs' }
@@ -37,7 +39,9 @@ export default defineConfig({
         // The computer-use overlay is a page of its own.
         input: {
           index: resolve(__dirname, 'src/renderer/index.html'),
-          'computer-overlay': resolve(__dirname, 'src/renderer/computer-overlay.html')
+          'computer-overlay': resolve(__dirname, 'src/renderer/computer-overlay.html'),
+          // The video worker: frames decoded with WebCodecs, in a hidden view (main/video.ts).
+          'video-worker': resolve(__dirname, 'src/renderer/video-worker.html')
         }
       }
     }

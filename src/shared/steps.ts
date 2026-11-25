@@ -72,8 +72,19 @@ export const isMemoryRun = (steps: Step[]) => steps.length > 0 && steps.every((s
 /** Whether a run of steps only worked with the other bots: handing out jobs, messages, waiting (agent/team.ts). */
 export const isTeamRun = (steps: Step[]) => steps.length > 0 && steps.every((s) => s.tool.startsWith('team_'))
 
+/** Whether a run of steps only looked at or listened to videos (agent/video.ts). */
+export const isVideoRun = (steps: Step[]) => steps.length > 0 && steps.every((s) => s.tool.startsWith('video'))
+
 const usedWhat = (steps: Step[]) =>
-  isDesktopRun(steps) ? 'Used the computer' : isMemoryRun(steps) ? 'Used memory' : isTeamRun(steps) ? 'Worked with the bots' : 'Used the browser'
+  isDesktopRun(steps)
+    ? 'Used the computer'
+    : isMemoryRun(steps)
+      ? 'Used memory'
+      : isTeamRun(steps)
+        ? 'Worked with the bots'
+        : isVideoRun(steps)
+          ? 'Looked at a video'
+          : 'Used the browser'
 
 /** History sent back to a model: step lines become one plain-language summary per run. */
 export const summarizeSteps = (content: string): string =>

@@ -164,8 +164,8 @@ export const exceeds = (requester: AccessBot, doer: AccessBot, request: AccessRe
 /** How a reply asks the user and decides its calls (built per reply in services/Chat.ts). */
 export interface Gate {
   readonly decide: (tool: string, input: Record<string, unknown>) => Decision
-  /** Shows the approval card in the reply's chat; true if the user approved. */
-  readonly ask: (ctx: RunContext, title: string, detail: string, signal: AbortSignal) => Promise<boolean>
+  /** Shows the approval card in the reply's chat (or asks Tomo, where the user let it approve); true if approved. */
+  readonly ask: (ctx: RunContext, title: string, detail: string, signal: AbortSignal, rule?: RuleId) => Promise<boolean>
 }
 
 const DENIED = 'The user denied this.'
@@ -183,7 +183,7 @@ export const ruled =
       if (!own(name)) return m.canUseTool ? m.canUseTool(name, input, signal) : null
       const d = gate.decide(name, input)
       if (d.verdict === 'block') return { behavior: 'deny', message: d.reason ?? DENIED }
-      if (d.verdict === 'ask' && !(await gate.ask(ctx, d.title, d.detail, signal).catch(() => false))) return { behavior: 'deny', message: DENIED }
+      if (d.verdict === 'ask' && !(await gate.ask(ctx, d.title, d.detail, signal, d.rule ?? undefined).catch(() => false))) return { behavior: 'deny', message: DENIED }
       return (m.canUseTool ? await m.canUseTool(name, input, signal) : null) ?? { behavior: 'allow', updatedInput: input }
     }
     return { ...m, canUseTool }

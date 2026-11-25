@@ -82,7 +82,7 @@
     ...(form.auth === 'apiKey'
       ? [{ id: 'anthropicKey' as const, label: 'Anthropic', has: app.settings!.hasAnthropicKey, link: 'https://console.anthropic.com/settings/keys', hint: 'sk-ant-…', use: 'Chat replies, titles and memory.' }]
       : []),
-    { id: 'elevenLabsKey' as const, label: 'ElevenLabs', has: app.settings!.hasElevenLabsKey, link: 'https://elevenlabs.io/app/settings/api-keys', hint: 'Paste your key', use: 'Voice input.' }
+    { id: 'elevenLabsKey' as const, label: 'ElevenLabs', has: app.settings!.hasElevenLabsKey, link: 'https://elevenlabs.io/app/settings/api-keys', hint: 'Paste your key', use: 'Voice input and video transcripts.' }
   ])
 
   const saveKey = async (id: KeyId) => {

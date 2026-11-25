@@ -33,6 +33,7 @@ import { type DbError, type NotFound, errorMessage } from '../errors'
 import { ComputerUse } from '../computer'
 import { exceeds } from '../agent/rules'
 import { bouncing } from '../agent/stuck'
+import { userSaid } from '../agent/deputy'
 import type { RunContext } from '../agent/module'
 import { SELF_NAMES, type TeamDeps, type TeamPlace, type TeamResult, botPatchFrom, describeBotChange, teamModule } from '../agent/team'
 import { LIST_OPEN } from '../jobs'
@@ -324,7 +325,8 @@ export class Team extends Context.Service<
                     computer.ask(
                       { sessionId: ctx.sessionId, messageId: ctx.messageId },
                       `${me.name} asks ${doers} to do what ${me.name} can’t`,
-                      `${text.slice(0, 600)}\n\n${doers} may ${beyond.join(', ')}; ${me.name} may not. ${doers}’s own rules still apply.`
+                      `${text.slice(0, 600)}\n\n${doers} may ${beyond.join(', ')}; ${me.name} may not. ${doers}’s own rules still apply.`,
+                      'team'
                     ),
                     { signal }
                   ).catch(() => false)
@@ -412,6 +414,36 @@ export class Team extends Context.Service<
               } satisfies TeamResult
             })
           ),
+
+        setApprover: async (ctx, input) => {
+          const { me, place } = deps.who(ctx)
+          if (!me.isPrimary || place === 'own') return fail('Only the primary bot approves for the user, from its chat with them or a job’s shared thread.')
+          const job = sync((d) => jobFor(d, ctx, input.thread))
+          if (!job) return fail(input.thread ? `There is no job “${input.thread}”. list_jobs shows them.` : "This conversation isn't on a job: name one with thread.")
+          if (input.words === null) {
+            if (job.approvesForUser) sync((d) => d.setJobApprover(job.id, null))
+            changed(job.threadId)
+            return { ok: true, text: `Approvals on “${job.title}” go to the user again.`, step: { tool: 'team_approver', label: `Approvals on “${job.title}” go to you again`, ok: true } }
+          }
+          // Only on the user's own words, from their own recent messages here: never a bot's, never made up.
+          const said = sync((d) => {
+            const reply = d.getMessage(ctx.messageId)
+            const lineage = reply?.parentId ? d.lineage(reply.parentId) : []
+            return lineage.filter((m) => m.role === 'user' && !m.authorBotId).slice(-6).map((m) => m.content)
+          })
+          const words = input.words.trim()
+          if (!userSaid(words, said))
+            return fail(
+              "Turn this on only when the user has told you, in their own words, that you may approve things for them. Copy those words exactly into user_words (a few words at least). If they haven't said so, don't turn it on: they'll approve each request themselves."
+            )
+          sync((d) => d.setJobApprover(job.id, words))
+          changed(job.threadId)
+          return {
+            ok: true,
+            text: `You now approve for the user on “${job.title}”: its bots' approvals come to you first. You'll approve what their words and the task cover; the rest, and anything irreversible, still goes to them. They can hand approvals back at any time, by telling you or from the job's bar.`,
+            step: { tool: 'team_approver', label: `${me.name} approves for you on “${job.title}”`, ok: true, detail: words.slice(0, 120) }
+          }
+        },
 
         listJobs: async () => {
           const { jobs, bots, presence } = sync((d) => ({ jobs: d.listJobs(), bots: d.listBots(), presence: currentPresence() }))

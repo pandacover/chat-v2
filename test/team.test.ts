@@ -64,6 +64,7 @@ const gate = (name: string) => {
  *   open job                  start_job, from wherever it runs
  *   list                      list_jobs
  *   create {json} / edit {json}  create_bot / edit_bot with that input
+ *   approve {json}            approve_for_user with that input
  *   gate <name>               waits until the test opens it
  *   slow <name>               the same, said as work
  *   hold-<name>               anywhere in a report Tomo answers: its reply waits on that gate
@@ -72,7 +73,11 @@ const gate = (name: string) => {
  */
 const script: Script = async function* (t) {
   if (isAsk(t.call)) {
-    yield* t.text('Named')
+    // Tomo answering an approval for the user (agent/deputy.ts): yes, unless the request says deny-me.
+    if (systemOf(t.call).includes('you may approve, on their behalf')) {
+      const deny = /<request>[\s\S]*deny-me[\s\S]*<\/request>/.test(promptOf(t.call))
+      yield* t.text(JSON.stringify({ approve: !deny, why: deny ? 'You never said I could pass this on.' : 'You let me approve this job.' }))
+    } else yield* t.text('Named')
     yield t.result()
     return
   }
@@ -103,6 +108,7 @@ const script: Script = async function* (t) {
     else if (line === 'open job') out.push(say(yield* t.tool('mcp__team__start_job', { bot: 'Builder', task: 'Something new' })))
     else if (line === 'list') out.push(say(yield* t.tool('mcp__team__list_jobs', {})))
     else if ((m = /^(create|edit) (\{.+\})$/.exec(line))) out.push(say(yield* t.tool(`mcp__team__${m[1]}_bot`, JSON.parse(m[2]!))))
+    else if ((m = /^approve (\{.+\})$/.exec(line))) out.push(say(yield* t.tool('mcp__team__approve_for_user', JSON.parse(m[1]!))))
     else if ((m = /^(?:gate|slow) (\w+)/.exec(line))) {
       yield* t.text(`${who} is on it.\n`)
       await t.wait(gate(m[1]!).promise)
@@ -458,6 +464,57 @@ describe('the team tools', () => {
     expect(t.replies().filter((c) => botOf(c) === 'Builder')).toHaveLength(1)
     // Tomo heard one report, Scout's final one.
     expect(t.tomoAnswers()).toHaveLength(1)
+    await t.runtime.dispose()
+  })
+
+  test('told in the user’s own words, Tomo approves for them on a job; what it won’t approve still asks them', async () => {
+    const t = setup()
+    const scout = await t.addBot({ name: 'Scout', modules: [] })
+    const builder = await t.addBot({ name: 'Builder', modules: ['computer'] })
+    const waiting = () => t.run(ComputerUse.use((c) => Effect.sync(c.waiting)))
+    await t.send('start Scout | gate first ; ask Builder | Write the notes file ; gate second ; ask Builder | deny-me now')
+    const job = await (async () => {
+      await t.until(async () => (await t.d((x) => x.listJobs())).length === 1, 'the job')
+      return (await t.d((x) => x.listJobs()))[0]!
+    })()
+    expect(job.approvesForUser).toBeNull()
+
+    // Words the user never wrote don't turn it on; theirs, quoted, do.
+    // A JSON escape: the words reach the tool, but the message never has them as written.
+    const bs = String.fromCharCode(92)
+    await t.send(`Approve stuff for me on that job, please
+approve {"thread":"${job.id}","user_words":"approve ${bs}u0065verything forever"}`)
+    await t.until(async () => (await t.conversation()).at(-1)!.message.content.includes('Tomo done'), "Tomo's first try")
+    expect((await t.conversation()).at(-1)!.message.content).toContain('Error: Turn this on only when the user has told you')
+    expect((await t.d((x) => x.getJob(job.id)))!.approvesForUser).toBeNull()
+    await t.send(`Approve stuff for me on that job, please
+approve {"thread":"${job.id}","user_words":"approve stuff for me on that job"}`)
+    await t.until(async () => (await t.d((x) => x.getJob(job.id)))!.approvesForUser !== null, 'the grant')
+    expect((await t.d((x) => x.getJob(job.id)))!.approvesForUser).toBe('approve stuff for me on that job')
+    await t.until(async () => (await t.conversation()).at(-1)!.message.content.includes('You now approve for the user'), "Tomo's reply")
+    expect((await t.conversation()).at(-1)!.message.content).toContain('Tomo approves for you on')
+
+    // Scout asks Builder for more than it may do: Tomo approves it, no card, and Scout's reply says so.
+    gate('first').open()
+    await t.until(async () => !!(await t.d((x) => x.workerThread(job.id, builder.id))), "Builder's thread")
+    expect(await waiting()).toBeNull()
+
+    // What Tomo won't approve goes to the user's card, with its reason.
+    gate('second').open()
+    await t.until(async () => (await waiting())?.kind === 'approval', 'the card')
+    const card = (await waiting())!
+    expect(card.kind === 'approval' && card.detail).toContain('Tomo left this one to you: You never said I could pass this on.')
+    await t.run(ComputerUse.use((c) => c.approve(card.id, true)))
+    await t.until(t.idle, 'replies')
+    // Scout's reply says Tomo approved the first for the user, and why; the second was the user's.
+    const scoutThread = (await t.d((x) => x.workerThread(job.id, scout.id)))!
+    const said = (await t.d((x) => x.activePath(x.getSession(scoutThread.id)!).map((n) => n.message.content))).join(' ')
+    expect(said.match(/Tomo approved for you/g)).toHaveLength(1)
+    expect(said).toContain('You let me approve this job.')
+
+    // The user takes it back.
+    await t.d((x) => x.setJobApprover(job.id, null))
+    expect((await t.d((x) => x.getJob(job.id)))!.approvesForUser).toBeNull()
     await t.runtime.dispose()
   })
 

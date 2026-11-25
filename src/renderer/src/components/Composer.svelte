@@ -104,17 +104,24 @@
     })
   })
 
+  const VIDEO_FILE = /\.(mp4|m4v|mov|qt|webm|mkv|avi|wmv|mpe?g|3gp|ogv|flv|m2ts)$/i
+  const isVideo = (f: File) => VIDEO_FILE.test(f.name) || (f.type.startsWith('video/') && !/\.m?ts$/i.test(f.name))
+
   const addFiles = async (files: Iterable<File>) => {
     for (const file of files) {
       uploading += 1
       try {
-        const data = await file.arrayBuffer()
-        const added = await app.attempt(() =>
-          window.api.attachments.add({ name: file.name || 'pasted-image.png', mime: file.type, data })
-        )
+        // A video on disk is copied by the main process: it may be far too big to pass through here.
+        // Undefined: it failed (and said why); null: it isn't on disk, so it is read here like any file.
+        const onDisk = isVideo(file) ? await app.attempt(() => window.api.attachments.addVideoFile(file)) : null
+        if (onDisk === undefined) continue
+        const data = onDisk ? null : await file.arrayBuffer()
+        const added =
+          onDisk ??
+          (await app.attempt(() => window.api.attachments.add({ name: file.name || 'pasted-image.png', mime: file.type, data: data! })))
         if (added) {
           app.addDraftAttachment(added)
-          if (added.kind === 'audio') void app.analyzeDraft(added, data)
+          if (added.kind === 'audio' && data) void app.analyzeDraft(added, data)
         }
       } finally {
         uploading -= 1

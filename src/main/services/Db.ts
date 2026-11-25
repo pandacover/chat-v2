@@ -12,7 +12,8 @@ import type {
   AudioAnalysis,
   ListedSession,
   Session,
-  Usage
+  Usage,
+  VideoInfo
 } from '@shared/types'
 import type { ComputerMode } from '@shared/computer'
 import { DbError, NotFound, errorMessage } from '../errors'
@@ -198,7 +199,12 @@ export const MIGRATIONS: string[] = [
   // ended or a bot reported back in it. Every thread there already starts as read.
   `alter table sessions add column read_at integer;
   alter table sessions add column activity_at integer;
-  update sessions set read_at = cast(strftime('%s', 'now') as integer) * 1000;`
+  update sessions set read_at = cast(strftime('%s', 'now') as integer) * 1000;`,
+  // Videos: their length and size (JSON), and the transcript once one was made (kept, as it costs a
+  // call to make). And the user's words letting Tomo approve for them on a job (Chat.ts's deputy).
+  `alter table attachments add column video text;
+  alter table attachments add column transcript text;
+  alter table jobs add column approves_for_user text;`
 ]
 
 interface SessionRow {
@@ -255,6 +261,7 @@ interface AttachmentRow {
   path: string
   created_at: number
   analysis: string | null
+  video: string | null
 }
 
 export interface StoredAttachment extends Attachment {
@@ -306,7 +313,8 @@ const toAttachment = (r: AttachmentRow): StoredAttachment => ({
   kind: r.kind as AttachmentKind,
   path: r.path,
   createdAt: r.created_at,
-  analysis: parseJson<AudioAnalysis>(r.analysis)
+  analysis: parseJson<AudioAnalysis>(r.analysis),
+  video: parseJson<VideoInfo>(r.video)
 })
 
 const publicAttachment = ({ path: _path, ...a }: StoredAttachment): Attachment => a
@@ -612,8 +620,8 @@ export const makeDb = (file: string) => {
         )
         for (const a of stored.get(m.id) ?? []) {
           run(
-            `insert into attachments (id, message_id, name, mime, size, kind, path, created_at, analysis)
-             values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `insert into attachments (id, message_id, name, mime, size, kind, path, created_at, analysis, video)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             randomUUID(),
             copy.id,
             a.name,
@@ -622,7 +630,8 @@ export const makeDb = (file: string) => {
             a.kind,
             a.path,
             a.createdAt,
-            a.analysis ? JSON.stringify(a.analysis) : null
+            a.analysis ? JSON.stringify(a.analysis) : null,
+            a.video ? JSON.stringify(a.video) : null
           )
         }
         parentId = copy.id
@@ -829,21 +838,23 @@ export const makeDb = (file: string) => {
         for (const { message_id } of all<{ message_id: string }>('select distinct message_id from message_lines')) foldLines(message_id)
         return Number(run(`update messages set status = 'interrupted' where status = 'streaming'`).changes)
       }),
-    insertAttachment: (a: Omit<StoredAttachment, 'id' | 'messageId' | 'createdAt' | 'analysis'>): StoredAttachment => {
+    insertAttachment: (a: Omit<StoredAttachment, 'id' | 'messageId' | 'createdAt' | 'analysis' | 'video'> & { video?: VideoInfo | null }): StoredAttachment => {
       const id = randomUUID()
       const now = Date.now()
+      const video = a.video ?? null
       run(
-        `insert into attachments (id, message_id, name, mime, size, kind, path, created_at)
-         values (?, null, ?, ?, ?, ?, ?, ?)`,
+        `insert into attachments (id, message_id, name, mime, size, kind, path, created_at, video)
+         values (?, null, ?, ?, ?, ?, ?, ?, ?)`,
         id,
         a.name,
         a.mime,
         a.size,
         a.kind,
         a.path,
-        now
+        now,
+        video ? JSON.stringify(video) : null
       )
-      return { ...a, id, messageId: null, createdAt: now, analysis: null }
+      return { ...a, id, messageId: null, createdAt: now, analysis: null, video }
     },
     getAttachment: (id: string): StoredAttachment | undefined => {
       const row = one<AttachmentRow>('select * from attachments where id = ?', id)
@@ -859,8 +870,8 @@ export const makeDb = (file: string) => {
             run('update attachments set message_id = ? where id = ?', messageId, id)
           } else if (a.message_id !== messageId) {
             run(
-              `insert into attachments (id, message_id, name, mime, size, kind, path, created_at, analysis)
-               values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              `insert into attachments (id, message_id, name, mime, size, kind, path, created_at, analysis, video)
+               values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               randomUUID(),
               messageId,
               a.name,
@@ -869,7 +880,8 @@ export const makeDb = (file: string) => {
               a.kind,
               a.path,
               a.created_at,
-              a.analysis
+              a.analysis,
+              a.video
             )
           }
         }
@@ -877,6 +889,22 @@ export const makeDb = (file: string) => {
     storedAttachmentsFor: (messageIds: readonly string[]) => attachmentsFor(messageIds),
     setAnalysis: (id: string, analysis: AudioAnalysis) => {
       run('update attachments set analysis = ? where id = ?', JSON.stringify(analysis), id)
+    },
+    /** The latest video called `name` sent in a chat (names are matched without case). */
+    videoNamed: (sessionId: string, name: string): StoredAttachment | undefined => {
+      const row = one<AttachmentRow>(
+        `select a.* from attachments a join messages m on m.id = a.message_id
+          where m.session_id = ? and a.kind = 'video' and lower(a.name) = lower(?) order by a.created_at desc limit 1`,
+        sessionId,
+        name
+      )
+      return row ? toAttachment(row) : undefined
+    },
+    /** A video's transcript, made before for this file (under any of its attachment rows). */
+    transcriptOf: (path: string): string | null =>
+      one<{ transcript: string }>('select transcript from attachments where path = ? and transcript is not null limit 1', path)?.transcript ?? null,
+    setTranscript: (path: string, transcript: string) => {
+      run('update attachments set transcript = ? where path = ?', transcript, path)
     },
     /** Removes a pending (unsent) attachment and reports whether its file is now unreferenced. */
     discardAttachment: (id: string): string | null => {

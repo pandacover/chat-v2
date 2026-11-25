@@ -15,7 +15,9 @@
   const clock = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`
   const audio = $derived(attachment.kind === 'audio' ? attachment.analysis : null)
   const analyzing = $derived(attachment.kind === 'audio' && app.analyzing.has(attachment.id))
+  const video = $derived(attachment.kind === 'video' ? attachment.video : null)
   const meta = $derived.by(() => {
+    if (attachment.kind === 'video') return video ? `${clock(video.duration)} · ${video.width}×${video.height}` : size
     if (attachment.kind !== 'audio') return size
     if (analyzing) return 'Finding the beat…'
     if (!audio) return size
@@ -42,6 +44,8 @@
         <Icon name="mic" size={14} class="text-muted {analyzing ? 'animate-pulse' : ''}" />
       {/if}
     </div>
+  {:else if attachment.kind === 'video'}
+    <div class="grid size-8 place-items-center rounded-lg bg-bubble text-fg-2" aria-hidden="true"><Icon name="video" size={15} /></div>
   {:else if /^point-\d+\.md$/.test(attachment.name)}
     <!-- Point's note (its image is the chip beside it). -->
     <div class="grid size-8 place-items-center rounded-lg bg-bubble text-fg-2" aria-hidden="true"><Icon name="crosshair" size={15} /></div>
@@ -50,7 +54,7 @@
   {/if}
   <div class="min-w-0 leading-tight">
     <div class="max-w-36 truncate text-[12.5px] text-fg" use:tip={attachment.name}>{attachment.name}</div>
-    <div class="text-[11px] text-muted tabular-nums {analyzing ? 'thinking' : ''}" use:tip={attachment.kind === 'audio' ? audioTip : null}>{meta}</div>
+    <div class="text-[11px] text-muted tabular-nums {analyzing ? 'thinking' : ''}" use:tip={attachment.kind === 'audio' ? audioTip : attachment.kind === 'video' ? `${size}${video ? '' : ' · its length couldn’t be read'}` : null}>{meta}</div>
   </div>
   {#if onremove}
     <button

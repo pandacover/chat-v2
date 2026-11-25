@@ -7,7 +7,7 @@ import { APPROVE_ARM_MS, type ComputerDoing } from '@shared/computer'
 import { type Step, stepText } from '@shared/steps'
 import type { RunContext, ToolModule } from '../agent/module'
 import { makeControl } from './control'
-import { makeInteraction, type Owner, type TeachOutcome, type TeachTarget, type Waiting } from './interaction'
+import { type ApprovalKind, type Deputy, makeInteraction, type Owner, type TeachOutcome, type TeachTarget, type Waiting } from './interaction'
 import type { Platform } from './platform/types'
 import { DEFAULT_ACCESS, decide as decideAccess } from '../agent/rules'
 import { makePolicy, builtinStep, BUILTIN_TOOLS, type PolicyDecision } from './policy'
@@ -21,7 +21,7 @@ export { builtinStep, isReadOnlyCommand, BUILTIN_TOOLS } from './policy'
 export { modeTag, teachAnswer } from './prompt'
 export { decideMode, handsOver } from './intent'
 export { MAX_TASK_READS, MAX_TASK_TOOLS, STOPPED_TEXT, type Mode } from './tools'
-export type { Waiting, TeachOutcome } from './interaction'
+export type { Waiting, TeachOutcome, ApprovalKind, Deputy, DeputyRequest } from './interaction'
 export type { Platform } from './platform/types'
 
 /** Fast models think little on each click-and-look step; the thorough one a bit more. */
@@ -49,8 +49,11 @@ export interface ComputerUseApi {
   /**
    * Asks the user to approve a call of another tool set, on the same card as computer use's own
    * approvals (which brings the window forward). Waits its turn behind another reply's approval.
+   * With `kind` (what it is for), the deputy may answer it first, where the user let Tomo approve.
    */
-  readonly ask: (owner: Owner, title: string, detail: string) => Effect.Effect<boolean>
+  readonly ask: (owner: Owner, title: string, detail: string, kind?: ApprovalKind) => Effect.Effect<boolean>
+  /** Who answers approvals for the user where they let it (services/Chat.ts); asked before the card. */
+  readonly setDeputy: (deputy: Deputy | null) => void
   /** Called with the computer tool each reply runs now, live (null once it ends); returns a function that stops listening. */
   readonly onDoing: (listener: (e: { sessionId: string; messageId: string; doing: ComputerDoing | null }) => void) => () => void
   /** Cuts off input in progress and releases every wait. Input stays off until `userTurn`. The Stop shortcut runs it. */
@@ -175,6 +178,22 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
       draw()
     }
   })
+  let deputy: Deputy | null = null
+  /**
+   * An approval: Tomo answers it first where the user let it approve for them (and `kind` says
+   * what it is for); what Tomo doesn't approve goes to the user's card, with its note on why.
+   */
+  const approval = (owner: Owner, title: string, detail: string, kind?: ApprovalKind) =>
+    Effect.gen(function* () {
+      const d = deputy
+      let shown = detail
+      if (d && kind) {
+        const answer = yield* Effect.tryPromise((signal) => d({ owner, title, detail, kind }, signal)).pipe(Effect.orElseSucceed(() => null))
+        if (answer?.approved) return true
+        if (answer) shown = `${answer.note}\n\n${detail}`.trim()
+      }
+      return yield* interaction.requestApproval(owner, title, shown)
+    })
   // The overlay answers a wait by its id, through the same calls as the chat's card, so both stay in step.
   overlay.onAnswer((a) => {
     if (a.kind === 'approve' || a.kind === 'deny') {
@@ -378,7 +397,7 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
       }),
       builtins: BUILTIN_TOOLS,
       stepFor: builtinStep,
-      canUseTool: makePolicy({ control, interaction, owner, mode: opts.mode, ended: () => ended || ctx.signal.aborted, count, claim, decide: opts.decide ?? defaultDecide }),
+      canUseTool: makePolicy({ control, interaction, owner, mode: opts.mode, ended: () => ended || ctx.signal.aborted, count, claim, decide: opts.decide ?? defaultDecide, ask: approval }),
       end
     }
   }
@@ -386,7 +405,10 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
   return {
     supported: p !== null,
     module,
-    ask: (owner, title, detail) => interaction.requestApproval(owner, title, detail),
+    ask: approval,
+    setDeputy: (d) => {
+      deputy = d
+    },
     stop,
     stopReply: stopOne,
     userTurn,

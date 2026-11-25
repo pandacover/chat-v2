@@ -174,6 +174,8 @@ const handlers: Record<string, Handler> = {
   'jobs:detail': (id) => Team.use((t) => t.detail(str(id, 'id'))),
   'jobs:rename': (id, title) => Db.use((db) => db.use((d) => d.renameJob(str(id, 'id'), str(title, 'title').trim() || NEW_SESSION_TITLE))),
   'jobs:remove': (id) => Jobs.use((j) => j.remove(str(id, 'id'))),
+  // The user takes approvals back from Tomo on a job (Tomo turns it on only when they tell it to).
+  'jobs:stopApproving': (id) => Db.use((db) => db.use((d) => d.setJobApprover(str(id, 'id'), null))),
 
   'memory:get': () => memoryView,
   'memory:add': (fact) => editMemory((d) => d.changeMemory({ add: [typedFact(fact)], update: [], remove: [] }, { kind: 'edited' })),
@@ -232,6 +234,10 @@ const handlers: Record<string, Handler> = {
   'attachments:add': (input: NewAttachmentInput) =>
     Attachments.use((a) =>
       a.add({ name: str(input.name, 'name'), mime: typeof input.mime === 'string' ? input.mime : '', data: input.data })
+    ),
+  'attachments:addVideoFile': (input: { path: string; name: string; mime: string }) =>
+    Attachments.use((a) =>
+      a.addVideoFile({ path: str(input.path, 'path'), name: str(input.name, 'name'), mime: typeof input.mime === 'string' ? input.mime : '' })
     ),
   'attachments:discard': (id) => Attachments.use((a) => a.discard(str(id, 'id'))),
   'attachments:saveAs': (id, name) =>
