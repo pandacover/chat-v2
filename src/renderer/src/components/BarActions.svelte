@@ -1,9 +1,9 @@
 <script lang="ts">
   // The app bar's right end: what acts on the open conversation and the window, in the same row as
-  // the sidebar toggle at the left. The job's own instructions (in a job's thread), keeping the
-  // window on top, and the right panel's toggle, always last, mirroring the sidebar's. The row is
-  // anchored at its right end, so the one button that comes and goes (the instructions) is first:
-  // it moves nothing to its right. On Windows the row stops short of the window's buttons
+  // the sidebar toggle at the left. Export log, the job's own instructions (in a job's thread),
+  // keeping the window on top, and the right panel's toggle, always last, mirroring the sidebar's.
+  // The row is anchored at its right end, so the buttons that come and go (Export log, the
+  // instructions) are first: they move nothing to their right. On Windows the row stops short of the window's buttons
   // (--bar-right); a Mac has its traffic lights at the left, so it runs to the edge.
   import { tip } from '@/lib/tooltip'
   import { dimsBar } from '@/lib/theme.svelte'
@@ -33,6 +33,20 @@
   style="right: calc(var(--bar-right) + 10px)"
   data-bar-actions
 >
+  <!-- Export log: the open thread's job, for the user to send with an issue. Once it has a message. -->
+  {#if app.view && app.view.path.length > 0}
+    {@const id = app.view.session.id}
+    <button
+      class="icon-btn size-8"
+      data-export-log
+      disabled={app.exporting !== null}
+      use:tip={app.exporting === id ? 'Exporting the log…' : 'Export log, to send with an issue'}
+      onclick={() => app.exportLog(id)}
+      in:fade={{ duration: 160 }}
+    >
+      <Icon name="download" size={16} />
+    </button>
+  {/if}
   <!-- The primary's instructions are its bot's, in Settings; a job's thread can have its own. -->
   {#if app.view && !app.isPrimary}
     <button class="icon-btn relative size-8 {hasOverride ? '!text-fg' : ''}" use:tip={'Instructions for this job'} onclick={openPrompt} in:fade={{ duration: 160 }}>

@@ -268,6 +268,16 @@ export interface StoredAttachment extends Attachment {
   path: string
 }
 
+/** A message as an exported log has it (logExport.ts): where it ran in Claude Code, and its files on disk. */
+export interface LoggedMessage extends Message {
+  /** The Claude Code session the reply ran in, and the last entry it wrote there. */
+  agentSession: string | null
+  agentUuid: string | null
+  /** The conversation the user sent it to, when that isn't this thread (the primary's). */
+  viaSessionId: string | null
+  files: StoredAttachment[]
+}
+
 const toSession = (r: SessionRow): Session => ({
   id: r.id,
   title: r.title,
@@ -720,6 +730,25 @@ export const makeDb = (file: string) => {
       Number(run('update sessions set title = ? where id = ? and title = ?', title, id, expected).changes) > 0,
     deleteSession,
     forkSession,
+    /** Every message of a thread, every branch, oldest first, as an exported log has them. */
+    threadLog: (sessionId: string): LoggedMessage[] => {
+      const rows = all<MessageRow & { agent_session: string | null; agent_uuid: string | null; via_session_id: string | null }>(
+        `select * from messages where session_id = ? and role != 'root' order by seq`,
+        sessionId
+      )
+      const files = attachmentsFor(rows.map((r) => r.id))
+      const messages = toMessages(rows)
+      return rows.map((r, i) => ({
+        ...messages[i]!,
+        agentSession: r.agent_session,
+        agentUuid: r.agent_uuid,
+        viaSessionId: r.via_session_id,
+        files: files.get(r.id) ?? []
+      }))
+    },
+    /** A job's threads: its shared ones first, then the bots' own, each in the order they were made. */
+    jobThreads: (jobId: string): Session[] =>
+      all<SessionRow>(`select * from sessions where job_id = ? order by kind != 'shared', created_at, rowid`, jobId).map(toSession),
     streamingIds: (sessionId: string): string[] =>
       all<{ id: string }>(`select id from messages where session_id = ? and status = 'streaming'`, sessionId).map(
         (r) => r.id

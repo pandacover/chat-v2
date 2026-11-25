@@ -703,6 +703,23 @@ class AppState {
     await this.refreshSessions()
   }
 
+  /** The thread an Export log is being written for, so its button waits. */
+  exporting = $state<string | null>(null)
+
+  /** Export log: saves the thread's job, transcripts and files as a zip, for the user to send with an issue. */
+  async exportLog(id: string) {
+    if (this.exporting) return
+    this.exporting = id
+    try {
+      const saved = await this.attempt(() => api.sessions.exportLog(id))
+      if (!saved) return
+      const left = saved.skipped ? ` ${saved.skipped} ${saved.skipped === 1 ? 'file was' : 'files were'} too big or gone, and left out.` : ''
+      this.toast(`Saved the log to ${saved.path}.${left}`, 'info')
+    } finally {
+      this.exporting = null
+    }
+  }
+
   async pin(id: string, pinned: boolean) {
     await this.attempt(() => api.sessions.update(id, { pinned }))
     await this.refreshSessions()
