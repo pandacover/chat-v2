@@ -7,7 +7,7 @@
 // its own session files (in this app's data folder, not the user's ~/.claude), and the next turn
 // resumes the session of the reply it answers (see history.ts).
 import { existsSync, readdirSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import type { CanUseTool, HookCallback, HookJSONOutput, Options, SDKAssistantMessageError, SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { Context, Layer } from 'effect'
 import type { Step } from '@shared/steps'
@@ -311,6 +311,8 @@ export interface AgentApi {
   readonly hasSession: (id: string) => boolean
   /** Deletes the files of sessions no chat needs any more. */
   readonly forget: (ids: readonly string[]) => void
+  /** A session's transcript files: its own, then its subagents' (kept beside it), each with a name relative to the session. */
+  readonly transcripts: (id: string) => Array<{ path: string; name: string }>
   /** Reads the account's usage meter, without calling a model (see usage/sdk.ts). */
   readonly readUsage: (auth: Auth) => Promise<AccountReading>
 }
@@ -567,6 +569,19 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
     reply,
     ask,
     hasSession: (id) => sessionFiles(id).length > 0,
+    transcripts: (id) =>
+      sessionFiles(id).flatMap((file) => {
+        const beside = file.replace(/\.jsonl$/, '')
+        const extra = existsSync(beside)
+          ? readdirSync(beside, { recursive: true, withFileTypes: true })
+              .filter((e) => e.isFile())
+              .map((e) => {
+                const path = join(e.parentPath, e.name)
+                return { path, name: `${id}/${relative(beside, path).replace(/\\/g, '/')}` }
+              })
+          : []
+        return [{ path: file, name: `${id}.jsonl` }, ...extra]
+      }),
     readUsage: (auth) => probeAccount(deps.query, base(auth)),
     forget: (ids) => {
       for (const id of ids)

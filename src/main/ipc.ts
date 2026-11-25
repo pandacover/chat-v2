@@ -1,4 +1,5 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
+import * as os from 'node:os'
 import { join } from 'node:path'
 import { BrowserWindow, app, dialog, ipcMain, shell, systemPreferences } from 'electron'
 import { Cause, Effect, type ManagedRuntime } from 'effect'
@@ -6,7 +7,8 @@ import type { AudioAnalysis, BotPatch, IpcResult, MemoryView, NewAttachmentInput
 import { isClaudeModel } from '@shared/models'
 import { cleanModules, cleanRules } from '@shared/rules'
 import { cleanAvatar } from '@shared/bots'
-import { errorMessage } from './errors'
+import { FileError, errorMessage } from './errors'
+import { collectLog, exportLog, logFileName } from './logExport'
 import { checkForUpdates, downloadUpdate, installUpdate, updateState } from './updater'
 import { publishArtifact } from './protocols'
 import { Attachments } from './services/Attachments'
@@ -149,6 +151,30 @@ const handlers: Record<string, Handler> = {
       const orphans = yield* db.use((d) => d.deleteSession(id))
       yield* (yield* Attachments).removeFiles(orphans.files)
       yield* Agent.use((a) => Effect.sync(() => a.forget(orphans.agentSessions)))
+    }),
+  // Export log: the thread's job, its transcripts and files in a zip the user saves, to attach to an issue.
+  'sessions:exportLog': (id) =>
+    Effect.gen(function* () {
+      const data = yield* (yield* Db).require('Thread', (d) => collectLog(d, str(id, 'id')))
+      const settings = yield* (yield* SettingsStore).get.pipe(Effect.orElseSucceed(() => null))
+      const agent = yield* Agent
+      const title = data.job?.title ?? data.threads[0]?.session.title ?? 'thread'
+      const file = yield* Effect.promise(async () => {
+        // CHAT_V2_EXPORT_DIR (tests only): saves there without asking.
+        if (process.env.CHAT_V2_EXPORT_DIR) return join(process.env.CHAT_V2_EXPORT_DIR, logFileName(title, new Date()))
+        const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+        const options = { title: 'Export log', defaultPath: join(app.getPath('downloads'), logFileName(title, new Date())), filters: [{ name: 'Zip archive', extensions: ['zip'] }] }
+        const result = win ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options)
+        return result.canceled || !result.filePath ? null : result.filePath
+      })
+      if (!file) return null
+      const about = { version: app.getVersion(), platform: process.platform, arch: process.arch, os: `${os.type()} ${os.release()}`, electron: process.versions.electron ?? null }
+      const saved = yield* Effect.tryPromise({
+        try: () => exportLog(data, file, { transcripts: agent.transcripts, about, settings }),
+        catch: (cause) => new FileError({ message: `Could not export the log: ${errorMessage(cause)}`, cause })
+      })
+      if (!process.env.CHAT_V2_EXPORT_DIR) shell.showItemInFolder(saved.path)
+      return saved
     }),
   'sessions:fork': (sessionId, messageId) =>
     Effect.gen(function* () {

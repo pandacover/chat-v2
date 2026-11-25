@@ -20,7 +20,8 @@ const api: Api = {
     rename: (id, title) => call('sessions:rename', id, title),
     remove: (id) => call('sessions:remove', id),
     update: (id, patch) => call('sessions:update', id, patch),
-    fork: (sessionId, messageId) => call('sessions:fork', sessionId, messageId)
+    fork: (sessionId, messageId) => call('sessions:fork', sessionId, messageId),
+    exportLog: (id) => call('sessions:exportLog', id)
   },
   bots: {
     list: () => call('bots:list'),

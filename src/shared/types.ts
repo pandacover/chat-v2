@@ -490,6 +490,15 @@ export interface UpdateState {
   checkedAt: number | null
 }
 
+/** A saved log (Export log): where it went, and what is in it. */
+export interface LogExport {
+  path: string
+  /** Attachments listed in it but left out: too big, or their file was gone. */
+  skipped: number
+  transcripts: number
+  attachments: number
+}
+
 /** Everything the renderer can call on `window.api`. */
 export interface Api {
   sessions: {
@@ -502,6 +511,12 @@ export interface Api {
     remove(id: string): Promise<void>
     update(id: string, patch: SessionPatch): Promise<void>
     fork(sessionId: string, messageId: string): Promise<SessionView>
+    /**
+     * Export log: asks where to save, then writes the thread's job (every thread on it, the
+     * primary's turns about it, each reply's tool calls, Claude Code's transcripts, the files sent)
+     * as a zip. Null when the user cancels.
+     */
+    exportLog(id: string): Promise<LogExport | null>
   }
   bots: {
     list(): Promise<Bot[]>
