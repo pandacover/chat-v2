@@ -584,6 +584,12 @@ class AppState {
     await this.refreshJobs()
   }
 
+  /** Approvals on a job go to the user again: Tomo stops answering them. */
+  async stopApproving(id: string) {
+    await this.attempt(() => api.jobs.stopApproving(id))
+    await this.refreshJobs()
+  }
+
   async renameJob(id: string, title: string) {
     await this.attempt(() => api.jobs.rename(id, title))
     const job = this.jobs.find((j) => j.id === id)

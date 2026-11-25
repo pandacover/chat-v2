@@ -10,6 +10,8 @@
 //   list_jobs()            open jobs: title, status, owner, bots on it, one-line summary
 //   create_bot(...)        primary only, in its chat with the user: a new worker bot, or changes
 //   edit_bot(bot, ...)     to one, made only once the user approves them on the approval card
+//   approve_for_user(...)  primary only, when the user says so: it answers a job's approvals for
+//                          them (agent/deputy.ts), or hands them back
 //
 // No one waits. The app carries what bots say between threads: a post to a bot is its next turn
 // (held while it is mid-reply), and a report or message to the primary is a turn in the primary's
@@ -43,9 +45,12 @@ export interface TeamDeps {
   readonly listJobs: (ctx: RunContext) => Promise<TeamResult>
   /** A new worker (no `bot`), or changes to the one `bot` names, once the user approves them. */
   readonly makeBot: (ctx: RunContext, input: BotInput, signal: AbortSignal) => Promise<TeamResult>
+  /** Lets the primary approve for the user on a job (`words`: theirs, quoted), or hands approvals back (null). */
+  readonly setApprover: (ctx: RunContext, input: { thread?: string | undefined; words: string | null }) => Promise<TeamResult>
 }
 
 const TOOLS = ['start_job', 'message', 'list_jobs']
+const APPROVE_TOOL = 'approve_for_user'
 const BOT_TOOLS = ['create_bot', 'edit_bot']
 const load = (names: readonly string[]) => `ToolSearch "select:${names.map((n) => `mcp__team__${n}`).join(',')}"`
 const LOAD = load(TOOLS)
@@ -162,6 +167,7 @@ export const teamInstructions = (me: Bot, primary: Bot, bots: readonly Bot[], pl
 - create_bot(name, instructions, model, effort, tools, rules) and edit_bot(bot, ...): make a new bot, or change one of your bots (not yourself). Use them when the user asks, or when work keeps coming up that a bot of its own would suit and the user agrees to one you suggest. Each shows the user an approval card with exactly what it sets and does nothing until they approve, so don't also ask in text. Give a new bot instructions whose first line says what it is for, and only the tools its work needs. If the user denies it, ask what they'd like instead.`
         : ''
     }
+- approve_for_user(thread, user_words, on): only when the user explicitly tells you to approve things for them on a job (load it with ${load([APPROVE_TOOL])}). Then the approvals that job's bots ask for come to you before the user: you approve what their words and the task cover, and leave the rest to them. Quote their words exactly as they wrote them. on: false hands approvals back to them. Never offer or turn it on unasked. Irreversible actions always stay with the user.
 Once you hand work off you don't track it or wait for it: tell the user who is on it and carry on with them. When the work reports back, or a bot writes to you, it arrives in your conversation with the user as a turn of its own, a <from_bot> message naming who sent it, whether it is a report or a message, and its job. The user sees it there as a card just above your reply, so don't repeat it: tell them the outcome in a sentence or two and anything they need to do or decide. If a bot's report calls for a next step, take it; your own report is the work you handed yourself, done.
 Everything bots say to each other is in the job's shared thread, which you and the user can read. Give each task whole and self-contained: the job's thread can't see this conversation.
 ${roster ? `Your bots:\n${roster}` : 'You have no other bots yet: hand work to yourself.'}`
@@ -257,10 +263,22 @@ export const teamModule =
       (a) => guarded(ctx, () => deps.makeBot(ctx, a, ctx.signal)),
       { searchHint: 'edit_bot: change, modify, rename or reconfigure a bot: its instructions, model, tools or rules' }
     )
+    const approveForUser = tool(
+      APPROVE_TOOL,
+      "Primary only, and only when the user explicitly says you may approve things for them on a job. Their approvals there (commands, file changes, web actions, requests between bots) then come to you first: you approve what their words and the job's task cover, and the rest still goes to them. Irreversible actions always stay with the user. on: false hands approvals back.",
+      {
+        thread: z.string().optional().describe('The job, by its id from list_jobs; the one this conversation is on when left out'),
+        user_words: z.string().optional().describe("The user's own words saying you may approve for them, copied exactly from their message. Needed to turn it on"),
+        on: z.boolean().optional().describe('false hands approvals back to the user; true (the default) lets you approve')
+      },
+      (a) => guarded(ctx, () => deps.setApprover(ctx, { thread: a.thread, words: a.on === false ? null : (a.user_words ?? '') })),
+      { searchHint: 'approve_for_user: approve on the user’s behalf, auto-approve, answer approvals for the user on a job or thread' }
+    )
     const botTools = me.isPrimary && place === 'chat' ? [createBot, editBot] : []
+    const approveTools = me.isPrimary && place !== 'own' ? [approveForUser] : []
     return {
       name: 'team',
       instructions: teamInstructions(me, primary, bots, place),
-      server: createSdkMcpServer({ name: 'team', version: '1.0.0', tools: [startJob, message, listJobs, ...botTools] })
+      server: createSdkMcpServer({ name: 'team', version: '1.0.0', tools: [startJob, message, listJobs, ...botTools, ...approveTools] })
     }
   }

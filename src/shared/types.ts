@@ -13,7 +13,14 @@ export type Role = 'root' | 'system' | 'user' | 'assistant'
  */
 export type MessageStatus = 'complete' | 'streaming' | 'interrupted' | 'stopped' | 'paused' | 'error'
 
-export type AttachmentKind = 'image' | 'pdf' | 'text' | 'audio'
+export type AttachmentKind = 'image' | 'pdf' | 'text' | 'audio' | 'video'
+
+/** A video upload's length (seconds) and picture size, read when it is added. */
+export interface VideoInfo {
+  duration: number
+  width: number
+  height: number
+}
 
 /** Tempo and beats of an audio upload, measured on this device. */
 export interface AudioAnalysis {
@@ -41,6 +48,8 @@ export interface Attachment {
   createdAt: number
   /** Audio only: filled in once the file has been analysed. */
   analysis: AudioAnalysis | null
+  /** Video only: null when it couldn't be read (a format Chromium can't decode). */
+  video: VideoInfo | null
 }
 
 /**
@@ -226,6 +235,11 @@ export interface Job {
   parentJobId: string | null
   /** One line on where the job stands, kept fresh after replies. */
   summary: string | null
+  /**
+   * The user's own words letting Tomo approve for them on this job: its threads' approvals go to
+   * Tomo, which approves what those words cover and leaves the rest to the user. Null: the user approves.
+   */
+  approvesForUser: string | null
   usage: JobUsage | null
   createdAt: number
   updatedAt: number
@@ -511,6 +525,8 @@ export interface Api {
     detail(id: string): Promise<JobDetail>
     rename(id: string, title: string): Promise<void>
     remove(id: string): Promise<void>
+    /** Approvals on the job go to the user again, not Tomo. */
+    stopApproving(id: string): Promise<void>
   }
   memory: {
     get(): Promise<MemoryView>
@@ -539,6 +555,8 @@ export interface Api {
   }
   attachments: {
     add(input: NewAttachmentInput): Promise<Attachment>
+    /** A video file from disk (picked or dropped), copied by the main process; null when it isn't on disk. */
+    addVideoFile(file: File): Promise<Attachment | null>
     setAnalysis(id: string, analysis: AudioAnalysis): Promise<void>
     discard(id: string): Promise<void>
     /** Asks where to save a copy of the file and writes it; null when the user cancels. */

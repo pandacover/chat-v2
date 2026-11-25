@@ -2,7 +2,8 @@ import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import { Effect } from 'effect'
 import type { Step } from '@shared/steps'
 import type { Control } from './control'
-import type { Interaction, Owner } from './interaction'
+import type { RuleId } from '@shared/rules'
+import type { ApprovalKind, Interaction, Owner } from './interaction'
 import { ACT_TOOLS, SERVER, STOPPED_TEXT } from './tools'
 import type { Mode } from './tools'
 
@@ -24,6 +25,8 @@ const ASK_APPROVAL = `mcp__${SERVER}__ask_approval`
 /** A call's verdict under the bot's rules (agent/rules.ts `decide`, bound to the reply's bot). */
 export interface PolicyDecision {
   readonly verdict: 'allow' | 'ask' | 'block'
+  /** The rule the call falls under (agent/rules.ts), which says whether Tomo may approve it for the user. */
+  readonly rule?: RuleId | null
   readonly title: string
   readonly detail: string
   readonly reason?: string
@@ -99,6 +102,8 @@ export interface PolicyDeps {
   readonly claim: () => string | null
   /** The bot's rules for a call: allow, ask, or block. */
   readonly decide: (name: string, input: Record<string, unknown>) => PolicyDecision
+  /** Asks for the OK on the approval card (or Tomo, where the user let it approve for them). */
+  readonly ask: (owner: Owner, title: string, detail: string, kind?: ApprovalKind) => Effect.Effect<boolean>
 }
 
 const allow = (input: Record<string, unknown>): PermissionResult => ({ behavior: 'allow', updatedInput: input })
@@ -125,7 +130,7 @@ export const makePolicy =
     if (ACT_TOOLS.has(name) && d.mode() === 'teach')
       return { behavior: 'deny', message: "The user wants to learn this (teach mode): don't act for them. Guide them with teach_step instead." }
     if (rule.verdict === 'allow' || name === ASK_APPROVAL) return allow(input)
-    return Effect.runPromise(d.interaction.requestApproval(d.owner, rule.title, rule.detail), { signal })
+    return Effect.runPromise(d.ask(d.owner, rule.title, rule.detail, rule.rule ?? undefined), { signal })
       .then(
         (ok): PermissionResult => (ok ? allow(input) : { behavior: 'deny', message: 'The user denied this.' }),
         (): PermissionResult => ({ behavior: 'deny', message: 'The user denied this.' })

@@ -56,6 +56,7 @@ const job = (over: Partial<Job> & { id: string }): Job => ({
   ownerBotId: 'tomo',
   parentJobId: null,
   summary: null,
+  approvesForUser: null,
   usage: null,
   createdAt: 0,
   updatedAt: 0,

@@ -29,6 +29,8 @@ import { Jobs } from './services/Jobs'
 import { Reconciler } from './services/Reconciler'
 import { Team } from './services/Team'
 import { ElevenLabs } from './services/ElevenLabs'
+import { videosLayer } from './services/Videos'
+import { probeVideo, videoFrames } from './video'
 import { type SecretCipher, SettingsStore } from './services/SettingsStore'
 
 // The app was called chat-v2, and its data (chats, settings, keys) lives in a folder of that name.
@@ -245,7 +247,7 @@ const makeRuntime = () => {
   const db = Db.layer(join(root, 'chat.db'))
   const settings = SettingsStore.layer(cipher).pipe(Layer.provide(paths))
   const base = Layer.mergeAll(db, settings, paths)
-  const providers = Layer.mergeAll(Agent.layer(agentDeps(root)), ElevenLabs.layer, Attachments.layerWith(shrinkImage), Browser.layer(emitBrowser, (id) => webContents.fromId(id))).pipe(
+  const providers = Layer.mergeAll(Agent.layer(agentDeps(root)), ElevenLabs.layer, Attachments.layerWith(shrinkImage, probeVideo), Browser.layer(emitBrowser, (id) => webContents.fromId(id))).pipe(
     Layer.provideMerge(base)
   )
   const computer = computerLayer.pipe(Layer.provide(base))
@@ -266,9 +268,11 @@ const makeRuntime = () => {
   )
   // Workers: the team tools, reports and presence (services/Team.ts), over the same Chat.
   const team = Team.layer.pipe(Layer.provide(Layer.mergeAll(chat, providers, computer)), Layer.provide(Layer.succeed(Broadcaster, broadcaster)))
+  // The video tools (agent/video.ts): frames decoded in a short-lived worker view (video.ts), transcripts from Scribe.
+  const videos = videosLayer({ probe: probeVideo, frames: videoFrames }).pipe(Layer.provide(Layer.mergeAll(chat, providers, computer)))
   // The daily memory review (reconciler.ts), when the app is idle.
   const reconciler = Reconciler.layer.pipe(Layer.provide(providers), Layer.provide(Layer.succeed(Broadcaster, broadcaster)))
-  return ManagedRuntime.make(Layer.mergeAll(jobs, team, providers, computer, usage, reconciler))
+  return ManagedRuntime.make(Layer.mergeAll(jobs, team, videos, providers, computer, usage, reconciler))
 }
 
 let runtime: ManagedRuntime.ManagedRuntime<MainServices | AppPaths, unknown> | null = null

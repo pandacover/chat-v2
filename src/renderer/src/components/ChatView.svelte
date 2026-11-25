@@ -10,6 +10,7 @@
   import Composer from './Composer.svelte'
   import ComputerWaitCard from './ComputerWaitCard.svelte'
   import JobBar from './JobBar.svelte'
+  import ApproverStrip from './ApproverStrip.svelte'
   import Mascot from './Mascot.svelte'
   import Icon from './Icon.svelte'
   import MessageItem from './MessageItem.svelte'
@@ -297,6 +298,7 @@
   class:voice={stage}
 >
   {#if app.team && !app.isPrimary && view}<JobBar />{/if}
+  {#if !app.isPrimary && view?.session.jobId}<ApproverStrip jobId={view.session.jobId} />{/if}
 
   {#if empty}
     <div class="min-h-0 flex-1"></div>

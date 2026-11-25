@@ -163,9 +163,14 @@ describe('unread threads', () => {
     const r = turn(before, thread.id)
     before.setStatus(r.id, 'complete')
     before.close()
-    // Back to how the app left it before this migration: the columns gone, one version down.
+    // Back to how the app left it before this migration: its columns (and those of the ones after it) gone, the version down to it.
+    const at = MIGRATIONS.findIndex((m) => m.includes('add column read_at'))
     const raw = new DatabaseSync(file)
-    raw.exec(`alter table sessions drop column read_at; alter table sessions drop column activity_at; pragma user_version = ${MIGRATIONS.length - 1}`)
+    raw.exec(
+      `alter table sessions drop column read_at; alter table sessions drop column activity_at;
+       alter table attachments drop column video; alter table attachments drop column transcript; alter table jobs drop column approves_for_user;
+       pragma user_version = ${at}`
+    )
     raw.close()
     const t0 = Date.now() - 1000
     const db = makeDb(file)

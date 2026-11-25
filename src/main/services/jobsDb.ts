@@ -142,6 +142,7 @@ interface JobRow {
   owner_bot_id: string | null
   parent_job_id: string | null
   summary: string | null
+  approves_for_user: string | null
   usage: string | null
   created_at: number
   updated_at: number
@@ -181,6 +182,7 @@ const toJob = (r: JobRow): Job => ({
   ownerBotId: r.owner_bot_id,
   parentJobId: r.parent_job_id,
   summary: r.summary,
+  approvesForUser: r.approves_for_user ?? null,
   usage: json<JobUsage | null>(r.usage, null),
   createdAt: r.created_at,
   updatedAt: r.updated_at,
@@ -658,6 +660,10 @@ export const makeJobsDb = ({ all, one, run, transaction, getSession, createSessi
     },
     setJobSummary: (id: string, summary: string | null) => {
       run('update jobs set summary = ? where id = ?', summary, id)
+    },
+    /** Lets Tomo approve for the user on a job (their words), or hands approvals back to them (null). */
+    setJobApprover: (id: string, words: string | null) => {
+      run('update jobs set approves_for_user = ? where id = ?', words, id)
     },
     /** Renames a job and its threads. */
     renameJob: (id: string, title: string) =>

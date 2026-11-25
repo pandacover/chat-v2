@@ -1,5 +1,27 @@
 import { Deferred, Effect } from 'effect'
+import type { RuleId } from '@shared/rules'
 import type { ScreenRect } from './platform/types'
+
+/**
+ * What an approval is for: a call under one of the bot's rules (agent/rules.ts), or a request
+ * across bots (team). An approval asked without one (the model's own ask before an irreversible
+ * step, a change to a bot) is always the user's.
+ */
+export type ApprovalKind = RuleId | 'team'
+
+/** An approval Tomo may answer for the user: where it is asked, what it is, and what it is for. */
+export interface DeputyRequest {
+  readonly owner: Owner
+  readonly title: string
+  readonly detail: string
+  readonly kind: ApprovalKind
+}
+
+/**
+ * Answers approvals for the user where they let it (services/Chat.ts): approved, or left to the
+ * user with a note for their card on why. Null when it isn't its to answer.
+ */
+export type Deputy = (request: DeputyRequest, signal: AbortSignal) => Promise<{ approved: true } | { approved: false; note: string } | null>
 
 /** The reply a wait belongs to, so the chat can show it in the right place. */
 export interface Owner {
