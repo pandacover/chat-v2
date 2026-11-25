@@ -13,6 +13,12 @@ type Ctl<A> = Effect.Effect<A, ControlError>
 type Act<A> = Effect.Effect<A, ControlError | UserTookOver | Stopped>
 
 const TAKEOVER_PX = 28
+/**
+ * After the user answers an approval or a Show-me step, their hand is still on the mouse: input
+ * this soon after doesn't arm the takeover check, so the pointer drifting on from the click that
+ * answered isn't read as taking over. The first input after it arms the check again.
+ */
+export const ANSWER_GRACE_MS = 2000
 /** Screenshots are scaled to this width: ~35% fewer image tokens than 1280, and clicks go by element id. */
 export const SHOT_WIDTH = 1024
 /** A zoomed region fits in this box, at most at the screen's own pixel density (never enlarged). */
@@ -41,6 +47,11 @@ export const typeChunks = (text: string, size = TYPE_CHUNK): string[] => {
 export const makeControl = (p: Platform) => {
   let shot: Pick<Screenshot, 'imageWidth' | 'imageHeight' | 'screen' | 'window'> | null = null
   let leftAt: { x: number; y: number } | null = null
+  /** Until when input doesn't arm the takeover check (ANSWER_GRACE_MS after the user answered). */
+  let graceUntil = 0
+  const leave = (at: { x: number; y: number }) => {
+    leftAt = Date.now() < graceUntil ? null : at
+  }
   /** The user is pointing at the screen (Point): the overlay takes every click, so no input meanwhile. */
   let held = false
   const names = new Map<number, string>()
@@ -94,7 +105,7 @@ export const makeControl = (p: Platform) => {
       Effect.andThen(lift(f)),
       Effect.tap(() =>
         Effect.sync(() => {
-          if (cursorAfter) leftAt = cursorAfter
+          if (cursorAfter) leave(cursorAfter)
         })
       )
     )
@@ -212,7 +223,7 @@ export const makeControl = (p: Platform) => {
         const r = yield* lift(() => p.elementRect(id))
         const how = yield* act(() => p.invoke(id))
         // Only a fallback click moves the cursor; UI Automation patterns don't.
-        if (how === 'clicked') leftAt = { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+        if (how === 'clicked') leave({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) })
         return how
       }),
     setValue: (id: number, text: string): Act<string> => act(() => p.setValue(id, text)),
@@ -241,6 +252,11 @@ export const makeControl = (p: Platform) => {
     /** Forget where we left the cursor (a new user turn, or the user just acted). */
     resetTakeover: () => {
       leftAt = null
+    },
+    /** The user just answered on the card or the overlay: their mouse moves meanwhile and just after aren't a takeover. */
+    answered: () => {
+      leftAt = null
+      graceUntil = Date.now() + ANSWER_GRACE_MS
     },
     /** While the user points at the screen (Point), every action stops as a takeover. */
     hold: (on: boolean) => {

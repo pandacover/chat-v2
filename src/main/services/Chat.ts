@@ -19,7 +19,7 @@ import { CHECKPOINT_PREFIX } from './stuckStore'
 import { SMALL_MODEL } from '@shared/models'
 import { recallModule } from '../agent/recall'
 import { jobNotesBlock, noteModule } from '../agent/notes'
-import { HISTORY_NOTE, type NameOf, type TurnPlan, continueNote, fromBotText, planTurn, transcriptText } from '../agent/history'
+import { HISTORY_NOTE, STEER_NOTE, type NameOf, type TurnPlan, continueNote, fromBotText, planTurn, transcriptText } from '../agent/history'
 import { makeRollover } from './chatRollover'
 import type { ToolModuleFactory } from '../agent/module'
 import { type Gate, decide as decideAccess, ruled } from '../agent/rules'
@@ -100,6 +100,8 @@ type ChatError = DbError | NotFound | InvalidInput
 export const unanswered = (path: ReadonlyArray<{ message: Pick<Message, 'role' | 'post'> }>): boolean => {
   for (let i = path.length - 1; i >= 0; i--) {
     const m = path[i]!.message
+    // A turn the reply running when it came already took in (steering) is answered by that reply.
+    if (m.role === 'user' && m.post?.state === 'steered') continue
     if (m.role === 'user') return true
     if (m.role === 'assistant' && !m.post) return false
   }
@@ -134,7 +136,14 @@ export class Chat extends Context.Service<
      * and answered at once unless a reply is still running there, in which case it is held and
      * answered once that ends. `via` marks it as shown in that conversation (the primary's).
      */
-    readonly queue: (input: { sessionId: string; text: string; from: string; post?: Post | null; via?: string | null; attachmentIds?: readonly string[] }) => Effect.Effect<{ messageId: string; started: boolean }, ChatError>
+    readonly queue: (input: {
+      sessionId: string
+      text: string
+      from: string
+      post?: Post | null
+      via?: string | null
+      attachmentIds?: readonly string[]
+    }) => Effect.Effect<{ messageId: string; started: boolean; steering: boolean }, ChatError>
     /**
      * Answers the turns a thread ends on that nothing answered yet (messages held while a reply ran),
      * all in one reply. Every reply that ends does this for its thread; so does startup.
@@ -262,6 +271,8 @@ export class Chat extends Context.Service<
       // interrupts them all, which marks their messages `interrupted`.
       const generations = yield* FiberMap.make<string>()
       const stopRequested = new Set<string>()
+      /** Bots' turns held for a bot's own thread while a reply runs there, by thread, until that reply takes them in (`steer`). */
+      const inbox = new Map<string, string[]>()
       // Title requests, one per new chat. They outlive the call that sent the first message.
       const titling = yield* FiberMap.make<string>()
       // Memory reads, one per user message. They run beside the reply but one at a time,
@@ -537,7 +548,9 @@ export class Chat extends Context.Service<
               if (!r || r.working === on) return
               r.working = on
               active()
-            }
+            },
+            // A bot's own thread: what other bots send it meanwhile steers this reply.
+            ...(session.kind === 'worker' ? { steer: () => steer(session.id) } : {})
           }
           replySteps.set(assistant.id, hooks.step)
           runningReplies.set(assistant.id, { messageId: assistant.id, sessionId: session.id, botId: bot.id, working: false })
@@ -585,6 +598,8 @@ export class Chat extends Context.Service<
               yield* Effect.forEach(tail, emit, { discard: true }).pipe(Effect.ignore)
               const partial = tail.length > 0
               const stopped = stopRequested.delete(assistant.id)
+              // What it never took in is answered next, in the prompt of the reply that answers it (afterEnd).
+              inbox.delete(assistant.sessionId)
               computerReplies.delete(assistant.id)
               replySteps.delete(assistant.id)
               if (runningReplies.delete(assistant.id)) active()
@@ -788,8 +803,41 @@ export class Chat extends Context.Service<
           hold: busy,
           via: input.via ?? null
         })
-        return { messageId: turn.userId, started: turn.started }
+        // A bot's own thread, mid-reply: the running reply takes the message in at its next tool call.
+        const steering = busy && session.kind === 'worker'
+        if (steering) inbox.set(session.id, [...(inbox.get(session.id) ?? []), turn.userId])
+        return { messageId: turn.userId, started: turn.started, steering }
       })
+
+      /**
+       * Steering: what bots sent a bot's own thread while a reply ran there, for that reply to take
+       * in now (with the result of its next tool call, agent/driver.ts). Each turn taken is marked
+       * steered, so it isn't answered again after the reply; one never taken (the reply called no
+       * more tools) is answered after it, as before.
+       */
+      const steer = (sessionId: string): string | null => {
+        const ids = inbox.get(sessionId)
+        if (!ids?.length) return null
+        inbox.delete(sessionId)
+        const turns = Effect.runSync(
+          db
+            .use((d) => {
+              const names = new Map(d.listBots().map((b) => [b.id, b.name]))
+              const nameOf: NameOf = (id) => (id ? names.get(id) : undefined) ?? 'a bot'
+              return ids.flatMap((id) => {
+                const m = d.getMessage(id)
+                // Gone (a branch was dropped) or already answered some other way.
+                if (!m || m.role !== 'user' || !m.post || m.post.state !== null) return []
+                d.setPostState(id, 'steered')
+                return [fromBotText(m, nameOf)]
+              })
+            })
+            .pipe(Effect.orElseSucceed(() => [] as string[]))
+        )
+        if (turns.length === 0) return null
+        broadcaster.send({ type: 'thread', sessionId })
+        return `${STEER_NOTE}\n${turns.join('\n')}`
+      }
 
       const drain = Effect.fn('Chat.drain')(function* (sessionId: string) {
         const session = yield* db.require('Session', (d) => d.getSession(sessionId))

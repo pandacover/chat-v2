@@ -192,7 +192,9 @@ const make = (o: ComputerUseOptions): ComputerUseApi => {
         if (answer?.approved) return true
         if (answer) shown = `${answer.note}\n\n${detail}`.trim()
       }
-      return yield* interaction.requestApproval(owner, title, shown)
+      // Whatever tool set asked (a command, a browser step, a request between bots): the user
+      // moved the mouse to answer, which isn't taking over.
+      return yield* interaction.requestApproval(owner, title, shown).pipe(Effect.ensuring(Effect.sync(() => control?.answered())))
     })
   // The overlay answers a wait by its id, through the same calls as the chat's card, so both stay in step.
   overlay.onAnswer((a) => {

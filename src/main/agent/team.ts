@@ -160,7 +160,7 @@ export const teamInstructions = (me: Bot, primary: Bot, bots: readonly Bot[], pl
     const chat = place === 'chat'
     return `You lead a team of bots who work for the user. Load the team tools with ${chat ? load([...TOOLS, ...BOT_TOOLS]) : LOAD}.
 - start_job(bot, task, title): opens a new job and hands it the task: to one of your bots, or to yourself (bot "yourself"), when none suits it or you have none. The work runs in the job's own thread, in parallel, while you carry on with the user. Hand off anything that takes steps or will take long, write work included; you don't need to ask the user first. sub_task: true makes it part of the job you are in.
-- message(text, to, thread): posts in a job's shared thread, to one bot or to everyone on it. Naming a bot not on the job brings it in. In your chat with the user, name the job with thread (its job_id).
+- message(text, to, thread): posts in a job's shared thread, to one bot or to everyone on it. Naming a bot not on the job brings it in. In your chat with the user, name the job with thread (its job_id). On a job you handed yourself, everyone includes your own thread there (or name yourself): that is how you correct, steer or restart that work. A bot mid-reply takes the message in at its next step; one that has finished starts on it again.
 - list_jobs(): the open jobs, their bots and where each stands.${
       chat
         ? `
@@ -217,7 +217,7 @@ export const teamModule =
     )
     const message = tool(
       'message',
-      "Posts in a job's shared thread, addressed to one bot or to everyone on the job. Naming a bot not on the job brings it in. The answer arrives as a turn of its own after your reply: don't wait for it.",
+      "Posts in a job's shared thread, addressed to one bot or to everyone on the job (for the primary, everyone includes its own thread on a job it handed itself). Naming a bot not on the job brings it in. A bot that is mid-reply takes it in at its next step; one that has finished starts on it. The answer arrives as a turn of its own after your reply: don't wait for it.",
       {
         text: z.string().describe('The message'),
         to: z.string().optional().describe('The bot it is for, by name, or "everyone" (the default)'),

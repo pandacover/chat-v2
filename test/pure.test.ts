@@ -6,6 +6,7 @@ import { normalizeSettings, DEFAULT_SETTINGS } from '../src/main/services/Settin
 import { classify } from '../src/main/services/Attachments'
 import { cleanTitle } from '../src/main/services/Chat'
 import { clipElements } from '../src/main/agent/browser'
+import { apiErrorOf, failureLine } from '../src/main/agent/driver'
 import { AD_HOSTS, adUrlPatterns } from '../src/shared/blocklist'
 
 const feed = (deltas: string[]) => {
@@ -291,4 +292,19 @@ describe('browser snapshots', () => {
     expect(clipped.split('\n')).toEqual([line(1, true), line(2), line(4), '[1 more elements not listed. Scroll to bring them on screen.]'])
   })
 
+})
+
+describe('tool and API failures', () => {
+  test("a failed tool's step line says why, in one short line", () => {
+    expect(failureLine('<tool_use_error>File does not exist.\n  Did you mean x?</tool_use_error>')).toBe('File does not exist. Did you mean x?')
+    expect(failureLine([{ type: 'text', text: 'Request failed with status code 500' }])).toBe('Request failed with status code 500')
+    expect(failureLine('')).toBeNull()
+    expect(failureLine('x'.repeat(300))!.length).toBe(160)
+  })
+
+  test("an API error's status and message come out of Claude Code's wording", () => {
+    expect(apiErrorOf('API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}')).toEqual({ status: 500, message: 'Internal server error' })
+    expect(apiErrorOf('API Error: 503 upstream connect error')).toEqual({ status: 503, message: 'upstream connect error' })
+    expect(apiErrorOf('Something else')).toBeNull()
+  })
 })

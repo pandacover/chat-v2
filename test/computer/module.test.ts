@@ -21,6 +21,7 @@ import {
   type Waiting
 } from '../../src/main/computer'
 import { cameraHousing } from '../../src/main/computer/port'
+import { ANSWER_GRACE_MS } from '../../src/main/computer/control'
 import { FOLLOW_MS, MODE_SWITCHED, formatElements } from '../../src/main/computer/tools'
 import { disposeAll, harness, sleep, textOf, until } from './fakes'
 
@@ -161,6 +162,39 @@ describe('stopping mid-task', () => {
     expect((await cmd)?.behavior).toBe('allow')
     expect(textOf(await r.tool('click', { x: 60, y: 60 }))).not.toContain('taken over')
   })
+
+  test("the mouse drifting on just after an answer isn't a takeover, nor is answering another tool set's approval", async () => {
+    const h = await harness()
+    const r = await h.reply()
+    await r.tool('look_at_screen')
+    await r.tool('click', { x: 50, y: 50 })
+    // Another tool set's approval (a browser step, a request between bots) on the same card.
+    const asked = h.run(h.cu.ask({ sessionId: r.ctx.sessionId, messageId: r.ctx.messageId }, 'Submit the form', 'example.com'))
+    await until(() => h.cu.waiting()?.kind === 'approval')
+    h.moveMouse(900, 900)
+    await h.run(h.cu.approve(h.cu.waiting()!.id, true))
+    expect(await asked).toBe(true)
+    // The approved action runs at once; the hand that clicked Approve keeps moving.
+    expect(textOf(await r.tool('click', { x: 60, y: 60 }))).not.toContain('taken over')
+    h.moveMouse(700, 300)
+    expect(textOf(await r.tool('click', { x: 80, y: 80 }))).not.toContain('taken over')
+    h.moveMouse(10, 10)
+    expect(textOf(await r.tool('click', { x: 90, y: 90 }))).not.toContain('taken over')
+  })
+
+  test('after the grace, the takeover check is armed again', async () => {
+    const h = await harness()
+    const r = await h.reply()
+    await r.tool('look_at_screen')
+    const approval = r.tool('ask_approval', { action: 'Send it', detail: 'to Bob' })
+    await until(() => h.cu.waiting()?.kind === 'approval')
+    await h.run(h.cu.approve(h.cu.waiting()!.id, true))
+    await approval
+    await sleep(ANSWER_GRACE_MS + 50)
+    await r.tool('click', { x: 50, y: 50 })
+    h.moveMouse(900, 900)
+    expect(textOf(await r.tool('click', { x: 60, y: 60 }))).toContain('they have taken over')
+  }, 10_000)
 
   test('the user moving the mouse pauses the reply and drops the acting frame', async () => {
     const h = await harness()

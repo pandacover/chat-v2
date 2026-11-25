@@ -85,8 +85,14 @@
   {/if}
   {#if postState}
     <div class="mt-2 flex items-center gap-1.5 text-[12.5px] {postState === 'held' ? 'text-danger' : 'text-fg-3'}">
-      <Icon name={postState === 'held' ? 'lock' : postState === 'declined' ? 'x' : 'alert'} size={13} />
-      {postState === 'held' ? 'Waiting for your OK to pass this on' : postState === 'declined' ? 'Not passed on: you declined it' : 'Not passed on: the same request kept bouncing back and forth'}
+      <Icon name={postState === 'held' ? 'lock' : postState === 'declined' ? 'x' : postState === 'steered' ? 'check' : 'alert'} size={13} />
+      {postState === 'held'
+        ? 'Waiting for your OK to pass this on'
+        : postState === 'declined'
+          ? 'Not passed on: you declined it'
+          : postState === 'steered'
+            ? `${botBy(message.post?.to ?? null)?.name ?? 'The bot'} took this in while it was working`
+            : 'Not passed on: the same request kept bouncing back and forth'}
     </div>
   {/if}
 </div>

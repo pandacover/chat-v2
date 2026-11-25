@@ -236,13 +236,20 @@ describe('replies', () => {
       ['rate_limit', "You've hit your limit · resets 5pm"],
       ['billing_error', 'Credit balance is too low'],
       // The SDK can also throw, with no assistant message saying what kind of error it was.
-      ['thrown', 'Claude Code returned an error result: Invalid API key · Fix external API key']
+      ['thrown', 'Claude Code returned an error result: Invalid API key · Fix external API key'],
+      // An API 500 after Claude Code's own retries: said as Anthropic's, not the task's, without the JSON.
+      ['server_error', 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"},"request_id":"req_011abc"}'],
+      // The same with no kind, as Claude Code can send it.
+      ['unknown', 'API Error: 502 {"type":"error","error":{"type":"api_error","message":"Bad gateway"}}']
     ]
     let n = 0
     const t = setup(async function* (t) {
       const [kind, text] = kinds[n++]!
       yield* t.text('Partial ')
       if (kind === 'thrown') throw new Error(text)
+      if (kind === 'server_error')
+        for (let attempt = 1; attempt <= 10; attempt++)
+          yield { type: 'system', subtype: 'api_retry', attempt, max_retries: 10, retry_delay_ms: 1, error_status: 500, error: 'server_error', uuid: 'r', session_id: 's' } as never
       yield* t.apiError(kind!, text!)
     })
     const s = await t.run(newSession)
@@ -257,7 +264,9 @@ describe('replies', () => {
       "Claude Code isn't signed in. Run `claude` in a terminal and sign in with /login, or use an Anthropic API key in Settings. (Not logged in · Please run /login)",
       "You've reached a usage or rate limit. (You've hit your limit · resets 5pm)",
       'Your Anthropic account has a billing problem or no credit left. (Credit balance is too low)',
-      "Claude Code isn't signed in. Run `claude` in a terminal and sign in with /login, or use an Anthropic API key in Settings. (Invalid API key · Fix external API key)"
+      "Claude Code isn't signed in. Run `claude` in a terminal and sign in with /login, or use an Anthropic API key in Settings. (Invalid API key · Fix external API key)",
+      "Claude's API had a server error (500), still failing after 10 retries. That's on Anthropic's side, not a problem with the task or a tool; the work so far is kept, so Continue in a minute. (500: Internal server error)",
+      "Claude's API had a server error (502). That's on Anthropic's side, not a problem with the task or a tool; the work so far is kept, so Continue in a minute. (502: Bad gateway)"
     ])
     // What streamed before the error is kept.
     expect((await t.run(Chat.use((c) => c.view(s.id)))).path[1]!.message).toMatchObject({ status: 'error', content: 'Partial ' })

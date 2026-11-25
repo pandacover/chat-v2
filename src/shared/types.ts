@@ -111,6 +111,8 @@ export interface Message {
  * between bots, or a bot's report. `to` is the bot it is addressed to; null is everyone on the job.
  * held: waiting for the user's OK (a request beyond the asking bot's access); declined: the user
  * said no; stopped: not passed on, because the same request kept bouncing between two bots.
+ * steered: a bot's turn in a bot's own thread that the reply running when it came took in mid-reply
+ * (services/Chat.ts), so nothing answers it again.
  *
  * 'topic' isn't a bot's post: it is the New topic divider in the primary's conversation (an
  * assistant row that answers nothing), where the next reply starts afresh (agent/history.ts).
@@ -120,7 +122,7 @@ export interface Message {
 export interface Post {
   kind: 'task' | 'message' | 'report' | 'topic' | 'rollover'
   to: string | null
-  state: 'held' | 'declined' | 'stopped' | null
+  state: 'held' | 'declined' | 'stopped' | 'steered' | null
 }
 
 /** What a bot is doing, shown on its avatar. */

@@ -177,8 +177,10 @@ export class Team extends Context.Service<
         Effect.gen(function* () {
           const thread = sync((d) => d.workerThread(job.id, to.id, true))
           if (!thread) return null
-          yield* chat.queue({ sessionId: thread.id, text, from: from.id, post: { kind, to: to.id, state: null }, attachmentIds: files })
-          return thread
+          const turn = yield* chat.queue({ sessionId: thread.id, text, from: from.id, post: { kind, to: to.id, state: null }, attachmentIds: files })
+          // Started a reply; reaches the one running there at its next tool call (Chat's steering); or waits for it to end.
+          const state: 'started' | 'steering' | 'held' = turn.started ? 'started' : turn.steering ? 'steering' : 'held'
+          return { id: thread.id, state }
         })
 
       /**
@@ -301,10 +303,18 @@ export class Team extends Context.Service<
               const everyone = !input.to?.trim() || /^(everyone|all|everybody)$/i.test(input.to.trim())
               const to = everyone ? null : findBot(bots, input.to!)
               if (!everyone && !to) return fail(`There is no bot called “${input.to}”. The bots: ${nameList(bots)}.`)
-              if (to?.id === me.id) return fail("That's you.")
+              // The primary's own thread on the job (a job it handed itself), which it steers from its
+              // chat or the shared thread like any worker's: by a message to itself, or to everyone.
+              const ownThread = me.isPrimary && !onlyHere ? sync((d) => d.workerThread(job.id, me.id)) : null
+              if (to?.id === me.id && !ownThread) return fail("That's you.")
               const onJob = sync((d) => d.botsOnJob(job.id)).map((b) => b.botId)
-              // Everyone is the workers on the job; the primary hears a message addressed to it.
-              const recipients = to ? [to] : bots.filter((b) => onJob.includes(b.id) && b.id !== me.id && !b.isPrimary)
+              // Everyone is the workers on the job, and the primary's own thread on it; the primary
+              // hears a message addressed to it.
+              const recipients = to ? [to] : [...(ownThread ? [me] : []), ...bots.filter((b) => onJob.includes(b.id) && b.id !== me.id && !b.isPrimary)]
+              if (recipients.length === 0)
+                return fail(
+                  `No one else is on “${job.title}”, so a message to everyone would reach no one. Name a bot with to to bring it in${me.isPrimary ? ', or hand the work on with start_job' : `, or tell ${primary.name}`}.`
+                )
 
               // The same request bouncing between two bots goes no further.
               if (to && !me.isPrimary && !to.isPrimary && bounced(job, me, to, text, 'message')) {
@@ -342,21 +352,33 @@ export class Team extends Context.Service<
               }
               const brought: string[] = []
               const threads: string[] = []
+              /** What became of the message in each bot's own thread, for the model. */
+              const fates: string[] = []
               for (const b of recipients) {
-                if (b.isPrimary) {
+                const self = b.id === me.id
+                if (b.isPrimary && !self) {
                   threads.push(yield* toPrimaryOn(job, me, ctx.sessionId, text, 'message'))
                   continue
                 }
                 if (!onJob.includes(b.id)) brought.push(b.name)
                 const thread = yield* deliver(job, me, b, text, 'message')
-                if (thread) threads.push(thread.id)
+                if (!thread) continue
+                threads.push(thread.id)
+                const name = self ? 'Your own thread on the job' : b.name
+                fates.push(
+                  thread.state === 'started'
+                    ? `${name} started on it.`
+                    : thread.state === 'steering'
+                      ? `${name} is mid-reply: it gets this with the result of its next tool call and takes it into account then (if it calls none, it answers right after).`
+                      : `${name} is mid-reply: it answers this once that reply ends.`
+                )
               }
-              const asked = recipients.some((b) => !b.isPrimary)
+              const asked = recipients.some((b) => !b.isPrimary || b.id === me.id)
               // A worker that asked another: this reply isn't its report; the answer comes first.
               if (asked && onlyHere) asking.add(ctx.messageId)
               changed(job.threadId, ...threads)
               pushPresence()
-              const who = to ? to.name : 'everyone on the job'
+              const who = to ? (to.id === me.id ? 'your own thread on the job' : to.name) : 'everyone on the job'
               const next = !asked
                 ? ''
                 : !onlyHere
@@ -364,8 +386,8 @@ export class Team extends Context.Service<
                   : ' End your reply here if you need the answer: it arrives as your next turn.'
               return {
                 ok: true,
-                text: `Posted to ${who} in “${job.title}”.${brought.length ? ` ${brought.join(' and ')} joined the job and started on it.` : ''}${next}`,
-                step: { tool: 'team_message', label: `Messaged ${who}`, ok: true, detail: text.slice(0, 120) }
+                text: `Posted to ${who} in “${job.title}”.${brought.length ? ` ${brought.join(' and ')} joined the job.` : ''}${fates.length ? ` ${fates.join(' ')}` : ''}${next}`,
+                step: { tool: 'team_message', label: to?.id === me.id ? `Messaged “${job.title}”` : `Messaged ${who}`, ok: true, detail: text.slice(0, 120) }
               } satisfies TeamResult
             })
           ),
@@ -500,7 +522,7 @@ export class Team extends Context.Service<
               : status === 'paused'
                 ? `${bot.name} paused: ${reply.error ?? 'it seemed stuck.'}${said ? `\n\nSo far:\n${said}` : ''}`
                 : status === 'error'
-                  ? `${bot.name} ran into an error: ${reply.error ?? 'something went wrong.'}`
+                  ? `${bot.name}'s reply stopped on an error: ${reply.error ?? 'something went wrong.'}\n\nIts work so far is kept in its thread. To pick it up, message ${bot.id === requester.id ? 'the job' : bot.name} asking it to carry on: it continues from where it stopped.${said ? `\n\nSo far:\n${said}` : ''}`
                   : `${bot.name} was stopped.${said ? `\n\nSo far:\n${said}` : ''}`
           if (!requester.isPrimary && bounced(job, bot, requester, text, 'report')) {
             changed(job.threadId, sync((d) => d.primarySession().id))

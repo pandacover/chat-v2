@@ -690,7 +690,7 @@ const allToolDefs = (d: ToolDeps) => {
                   : null
             const waiting = d.interaction.teach(d.owner, { rect, instruction: a.instruction, step: a.step, total: a.total })
             const outcome = yield* reread ? Effect.raceFirst(waiting, follow(reread, rect)) : waiting
-            d.control.resetTakeover()
+            d.control.answered()
             yield* d.interaction.clearTeach()
             switch (outcome.kind) {
               case 'done':
@@ -744,7 +744,7 @@ const allToolDefs = (d: ToolDeps) => {
           Effect.gen(function* () {
             d.setActing(false)
             // The user moved the mouse to answer; that isn't taking over.
-            const ok = yield* d.interaction.requestApproval(d.owner, a.action, a.detail).pipe(Effect.ensuring(Effect.sync(() => d.control.resetTakeover())))
+            const ok = yield* d.interaction.requestApproval(d.owner, a.action, a.detail).pipe(Effect.ensuring(Effect.sync(() => d.control.answered())))
             denied = !ok
             return text(ok ? 'Approved. Go ahead.' : "Denied. Don't do it; ask what they'd like instead.")
           }),
