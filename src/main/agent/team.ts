@@ -40,7 +40,10 @@ export interface TeamResult {
 export interface TeamDeps {
   /** The bot running this reply, the primary, every bot, and where the reply runs. */
   readonly who: (ctx: RunContext) => { me: Bot; primary: Bot; bots: Bot[]; place: TeamPlace; connections?: Connections | undefined }
-  readonly startJob: (ctx: RunContext, input: { bot: string; task: string; title?: string | undefined; subTask?: boolean | undefined }) => Promise<TeamResult>
+  readonly startJob: (
+    ctx: RunContext,
+    input: { bot: string; task: string; title?: string | undefined; subTask?: boolean | undefined; mode?: 'do' | 'teach' | undefined }
+  ) => Promise<TeamResult>
   readonly message: (ctx: RunContext, input: { text: string; to?: string | undefined; thread?: string | undefined }, signal: AbortSignal) => Promise<TeamResult>
   readonly listJobs: (ctx: RunContext) => Promise<TeamResult>
   /** A new worker (no `bot`), or changes to the one `bot` names, once the user approves them. */
@@ -170,7 +173,7 @@ export const teamInstructions = (me: Bot, primary: Bot, bots: readonly Bot[], pl
         ? `\nMCP servers the user connected for you: ${mine.join(', ')}. Their tools work in a job's thread, not here: hand yourself a job (bot "yourself") for work that needs them.`
         : ''
     return `You lead a team of bots who work for the user. Load the team tools with ${chat ? load([...TOOLS, ...BOT_TOOLS]) : LOAD}.
-- start_job(bot, task, title): opens a new job and hands it the task: to one of your bots, or to yourself (bot "yourself"), when none suits it or you have none. The work runs in the job's own thread, in parallel, while you carry on with the user. Hand off anything that takes steps or will take long, write work included; you don't need to ask the user first. sub_task: true makes it part of the job you are in.
+- start_job(bot, task, title): opens a new job and hands it the task: to one of your bots, or to yourself (bot "yourself"), when none suits it or you have none. The work runs in the job's own thread, in parallel, while you carry on with the user. Hand off anything that takes steps or will take long, write work included; you don't need to ask the user first. sub_task: true makes it part of the job you are in. mode: "teach" when the user wants to be shown how to do it on their computer, so the thread guides them on screen instead of doing it.
 - message(text, to, thread): posts in a job's shared thread, to one bot or to everyone on it. Naming a bot not on the job brings it in. In your chat with the user, name the job with thread (its job_id). On a job you handed yourself, everyone includes your own thread there (or name yourself): that is how you correct, steer or restart that work. A bot mid-reply takes the message in at its next step; one that has finished starts on it again.
 - list_jobs(): the open jobs, their bots and where each stands.${
       chat
@@ -221,9 +224,15 @@ export const teamModule =
         bot: z.string().describe(`The bot's name, or "yourself" to do the work yourself in the job's own thread`),
         task: z.string().describe("The whole task, self-contained: the job's thread sees nothing else"),
         title: z.string().optional().describe('2 to 6 words naming the job'),
-        sub_task: z.boolean().optional().describe('Make it a sub-task of the job this conversation is in, rather than a job of its own')
+        sub_task: z.boolean().optional().describe('Make it a sub-task of the job this conversation is in, rather than a job of its own'),
+        mode: z
+          .enum(['do', 'teach'])
+          .optional()
+          .describe(
+            'For work on the computer: "teach" when the user wants to be shown how (the thread guides them on screen, step by step, and they do it themselves), "do" when they want it done. Left out, it follows how the user\'s message reads'
+          )
       },
-      (a) => guarded(ctx, () => deps.startJob(ctx, { bot: a.bot, task: a.task, title: a.title, subTask: a.sub_task })),
+      (a) => guarded(ctx, () => deps.startJob(ctx, { bot: a.bot, task: a.task, title: a.title, subTask: a.sub_task, mode: a.mode })),
       { searchHint: 'start_job: delegate, hand off work to a bot or to yourself, open a job, do something that takes steps' }
     )
     const message = tool(

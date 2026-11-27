@@ -17,7 +17,7 @@ import { SettingsStore } from '../src/main/services/SettingsStore'
 import { Agent } from '../src/main/agent/driver'
 import { ComputerUse, noOverlay } from '../src/main/computer'
 import { Browser } from '../src/main/services/Browser'
-import { SUMMARY_INSTRUCTIONS, cleanSummary, jobsBlock, listedJobs } from '../src/main/jobs'
+import { SHOW_ME_NOTE, SUMMARY_INSTRUCTIONS, cleanSummary, jobsBlock, listedJobs } from '../src/main/jobs'
 import { isTopicStart, topicStart } from '../src/main/agent/history'
 import { describeHits, excerpt } from '../src/main/agent/recall'
 import {
@@ -308,9 +308,13 @@ const script: Script = async function* (t) {
       yield t.result()
       return
     }
-    const task = /^do: (.+)$/s.exec(said)?.[1]
+    // "[mode: teach] …" (a show-me the app tagged) is handed off too, its mode left to the app;
+    // "do (teach): …" names the mode.
+    const showMe = /^\[mode: teach\] (.+)$/s.exec(said)?.[1]
+    const named = /^do \((do|teach)\): (.+)$/s.exec(said)
+    const task = /^do: (.+)$/s.exec(said)?.[1] ?? showMe ?? named?.[2]
     if (task) {
-      const r = yield* t.tool('mcp__team__start_job', { bot: 'yourself', task, title: task })
+      const r = yield* t.tool('mcp__team__start_job', { bot: 'yourself', task, title: task, ...(named ? { mode: named[1] } : {}) })
       yield* t.text(`I'm on it. (${toolText(r).slice(0, 40)})`)
       yield t.result()
       return
@@ -453,6 +457,54 @@ describe('talking to the primary bot', () => {
     expect(systemOf(own)).not.toContain('You lead a team')
     // And in the thread doing the work, whose words come back to the chat as its report.
     expect(systemOf(own)).toContain(WRITING_GUIDELINES)
+    await t.runtime.dispose()
+  })
+
+  test('"Show me how" in Tomo\'s chat is tagged teach and handed off; the thread it opens guides, whatever the task says', async () => {
+    const platform = fakePlatform()
+    const t = setup({ titleModel: '', memoryModel: '', systemPrompt: 'Be a fox.' }, platform)
+    await t.d((x) => x.updateBot('tomo', { modules: ['computer'] }))
+    const idle = () => until(async () => (await t.d((x) => [x.primarySession(), ...x.listSessions()].every((s) => x.streamingIds(s.id).length === 0))) && t.doneCount() >= 3)
+    const threadOf = async (jobTitle: string) => {
+      const job = (await t.run(listJobs)).find((j) => j.title === jobTitle)!
+      return (await t.d((x) => x.listSessions().find((s) => s.jobId === job.id && s.kind === 'worker')))!
+    }
+
+    await t.run(send('Show me how to change my profile picture on Telegram'))
+    await idle()
+    const [handOff, work] = replies(t.calls)
+    // Tomo is told what a show-me is, and the message comes tagged.
+    expect(inChat(handOff!)).toBe(true)
+    expect(systemOf(handOff!)).toContain(SHOW_ME_NOTE)
+    expect(handOff!.prompt.at(-1)!.text).toBe('[mode: teach] Show me how to change my profile picture on Telegram')
+    // The thread runs in teach mode though the task is Tomo's words, not the user's.
+    expect(inOwnThread(work!)).toBe(true)
+    expect(work!.prompt.at(-1)!.text).toStartWith('[mode: teach] <from_bot name="Tomo" kind="task">')
+    expect((await threadOf('Show me how to change my profile picture on Telegram')).computerMode).toBe('teach')
+
+    // A task that reads as teaching ("guide the user") but was asked as do work stays do; and
+    // Tomo naming the mode wins over how the user's words read.
+    const before = replies(t.calls).length
+    await t.run(send('do: Guide the user through turning on dark mode'))
+    await until(() => replies(t.calls).length >= before + 3)
+    await idle()
+    expect((await threadOf('Guide the user through turning on dark mode')).computerMode).toBe('do')
+    await t.run(send('do (teach): Turn on night light'))
+    await until(() => replies(t.calls).length >= before + 6)
+    await idle()
+    expect((await threadOf('Turn on night light')).computerMode).toBe('teach')
+    // A plain message in Tomo's chat isn't tagged.
+    expect(replies(t.calls)[before]!.prompt.at(-1)!.text).toBe('do: Guide the user through turning on dark mode')
+    await t.runtime.dispose()
+  })
+
+  test('Tomo\'s chat says nothing of show-me walkthroughs when no bot uses the computer', async () => {
+    const t = setup({ titleModel: '', memoryModel: '', systemPrompt: 'Be a fox.' }, fakePlatform())
+    await t.run(send('Show me how to change my wallpaper'))
+    await t.settle(() => t.doneCount() >= 1)
+    const [first] = replies(t.calls)
+    expect(systemOf(first!)).not.toContain(SHOW_ME_NOTE)
+    expect(first!.prompt.at(-1)!.text).toBe('Show me how to change my wallpaper')
     await t.runtime.dispose()
   })
 

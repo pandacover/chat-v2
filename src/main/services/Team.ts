@@ -30,7 +30,7 @@ import { splitSteps } from '@shared/steps'
 import { RULE_ITEMS } from '@shared/rules'
 import type { Bot, BotPatch, Job, JobDetail, Message, Post, Presence, Session } from '@shared/types'
 import { type DbError, type NotFound, errorMessage } from '../errors'
-import { ComputerUse } from '../computer'
+import { ComputerUse, decideMode } from '../computer'
 import { exceeds } from '../agent/rules'
 import { bouncing } from '../agent/stuck'
 import { userSaid } from '../agent/deputy'
@@ -280,19 +280,31 @@ export class Team extends Context.Service<
               const task = input.task.trim()
               if (!task) return fail('The task is empty.')
               const title = titleFrom(input.title?.trim() || task)
+              // Do it, or show the user how: as the primary says, else as the user's words read. The
+              // thread can't read it from the task, which is the primary's words, not the user's.
+              const userWords = answering.find((m) => !m.authorBotId)?.content
+              const mode = input.mode ?? (userWords ? decideMode(userWords, 'do') : 'do')
               const { job } = sync((d) =>
                 d.createJob({ title, botId: doer.id, threadBotId: me.id, parentJobId: input.subTask ? (ctx.jobId ?? null) : null })
               )
+              sync((d) => {
+                const thread = d.workerThread(job.id, doer.id, true)
+                if (thread) d.updateSession(thread.id, { computerMode: mode })
+              })
               post(job, me, task, { kind: 'task', to: doer.id, state: null })
               const thread = yield* deliver(job, me, doer, task, 'task')
               changed(job.threadId, thread?.id)
               pushPresence()
               const self = doer.id === me.id
+              const teaching =
+                mode === 'teach'
+                  ? ' It shows the user how (mode teach): each step is highlighted on their screen and waits for them to do it, so tell them to follow the highlights, not to wait for a report.'
+                  : ''
               return {
                 ok: true,
                 text: self
-                  ? `Opened the job “${title}” (id ${job.id}) and started on it yourself, in its own thread. Don't do the work here as well, and don't wait or check on it: its report arrives in your conversation with the user as a turn of its own when it is done. Tell the user you're on it and carry on.`
-                  : `Opened the job “${title}” (id ${job.id}) and handed it to ${doer.name}, who has started on it in its own thread. You don't need to wait or check on it: its report arrives in your conversation with the user as a turn of its own when it is done. Tell the user who is on it and carry on.`,
+                  ? `Opened the job “${title}” (id ${job.id}) and started on it yourself, in its own thread.${teaching} Don't do the work here as well, and don't wait or check on it: its report arrives in your conversation with the user as a turn of its own when it is done. Tell the user you're on it and carry on.`
+                  : `Opened the job “${title}” (id ${job.id}) and handed it to ${doer.name}, who has started on it in its own thread.${teaching} You don't need to wait or check on it: its report arrives in your conversation with the user as a turn of its own when it is done. Tell the user who is on it and carry on.`,
                 step: { tool: 'team_start_job', label: self ? `Started “${title}” in its own thread` : `Handed “${title}” to ${doer.name}`, ok: true }
               } satisfies TeamResult
             })
