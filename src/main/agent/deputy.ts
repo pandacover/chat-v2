@@ -20,7 +20,7 @@ export interface DeputyContext {
 }
 
 /** Whether Tomo may answer an approval of this kind at all: never a locked rule's (irreversible actions). */
-export const deputyMayAnswer = (kind: ApprovalKind) => kind === 'team' || !RULE_ITEMS.get(kind)?.locked
+export const deputyMayAnswer = (kind: ApprovalKind) => kind === 'team' || kind === 'mcp' || !RULE_ITEMS.get(kind)?.locked
 
 const WORDS_CHARS = 1500
 const TASK_CHARS = 3000
@@ -34,7 +34,8 @@ Reply with one JSON object and nothing else:
 {"approve": true | false, "why": "one short plain sentence for the user"}`
 
 export const deputyPrompt = (c: DeputyContext, request: { title: string; detail: string; kind: ApprovalKind }) => {
-  const what = request.kind === 'team' ? 'A request to another bot' : (RULE_ITEMS.get(request.kind)?.label ?? request.kind)
+  const what =
+    request.kind === 'team' ? 'A request to another bot' : request.kind === 'mcp' ? 'A tool of an MCP server the user connected' : (RULE_ITEMS.get(request.kind)?.label ?? request.kind)
   return [
     `<user_words>\n${c.words.slice(0, WORDS_CHARS)}\n</user_words>`,
     `<job>\nTitle: ${c.job.title}\nWhere it stands: ${c.job.summary?.trim() || '(not summed up yet)'}\n</job>`,

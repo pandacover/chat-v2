@@ -39,7 +39,7 @@ export interface TeamResult {
 /** The work behind the tools (services/Team.ts). */
 export interface TeamDeps {
   /** The bot running this reply, the primary, every bot, and where the reply runs. */
-  readonly who: (ctx: RunContext) => { me: Bot; primary: Bot; bots: Bot[]; place: TeamPlace }
+  readonly who: (ctx: RunContext) => { me: Bot; primary: Bot; bots: Bot[]; place: TeamPlace; connections?: Connections | undefined }
   readonly startJob: (ctx: RunContext, input: { bot: string; task: string; title?: string | undefined; subTask?: boolean | undefined }) => Promise<TeamResult>
   readonly message: (ctx: RunContext, input: { text: string; to?: string | undefined; thread?: string | undefined }, signal: AbortSignal) => Promise<TeamResult>
   readonly listJobs: (ctx: RunContext) => Promise<TeamResult>
@@ -132,14 +132,19 @@ export const describeBotChange = (patch: BotPatch, before: Bot | null): string[]
   return lines
 }
 
-/** One line per bot for the prompt: its name, what it is for (its instructions' first line), its tool modules. */
-export const rosterLines = (bots: readonly Bot[], me: Bot) =>
+/** The MCP servers each bot may use (Settings › Connections), by bot id: their names. */
+export type Connections = ReadonlyMap<string, readonly string[]>
+
+/** One line per bot for the prompt: its name, what it is for (its instructions' first line), its tool modules and MCP servers. */
+export const rosterLines = (bots: readonly Bot[], me: Bot, connections?: Connections) =>
   bots
     .filter((b) => b.id !== me.id)
     .map((b) => {
       const about = (b.instructions ?? '').split('\n').find((l) => l.trim())?.trim().slice(0, 160)
       const tools = b.modules.map((m) => MODULES.find((x) => x.id === m)?.label ?? m).join(', ')
-      return `- ${b.name}${b.isPrimary ? ' (the primary)' : ''}${about ? `: ${about}` : ''} (tools: ${tools || 'none beyond memory and notes'})`
+      const servers = connections?.get(b.id) ?? []
+      const connected = servers.length ? `; MCP servers: ${servers.join(', ')}` : ''
+      return `- ${b.name}${b.isPrimary ? ' (the primary)' : ''}${about ? `: ${about}` : ''} (tools: ${tools || 'none beyond memory and notes'}${connected})`
     })
     .join('\n')
 
@@ -154,10 +159,16 @@ export const SELF_NAMES = /^(yourself|myself|me|self|you|itself)$/i
  * a worker does the job it was given, and so does the primary in its own thread on a job it
  * handed itself.
  */
-export const teamInstructions = (me: Bot, primary: Bot, bots: readonly Bot[], place: TeamPlace = 'chat') => {
-  const roster = rosterLines(bots, me)
+export const teamInstructions = (me: Bot, primary: Bot, bots: readonly Bot[], place: TeamPlace = 'chat', connections?: Connections) => {
+  const roster = rosterLines(bots, me, connections)
+  const mine = connections?.get(me.id) ?? []
   if (me.isPrimary && place !== 'own') {
     const chat = place === 'chat'
+    // Its own servers aren't in its chat with the user: work that needs them goes to a job it hands itself.
+    const own =
+      chat && mine.length
+        ? `\nMCP servers the user connected for you: ${mine.join(', ')}. Their tools work in a job's thread, not here: hand yourself a job (bot "yourself") for work that needs them.`
+        : ''
     return `You lead a team of bots who work for the user. Load the team tools with ${chat ? load([...TOOLS, ...BOT_TOOLS]) : LOAD}.
 - start_job(bot, task, title): opens a new job and hands it the task: to one of your bots, or to yourself (bot "yourself"), when none suits it or you have none. The work runs in the job's own thread, in parallel, while you carry on with the user. Hand off anything that takes steps or will take long, write work included; you don't need to ask the user first. sub_task: true makes it part of the job you are in.
 - message(text, to, thread): posts in a job's shared thread, to one bot or to everyone on it. Naming a bot not on the job brings it in. In your chat with the user, name the job with thread (its job_id). On a job you handed yourself, everyone includes your own thread there (or name yourself): that is how you correct, steer or restart that work. A bot mid-reply takes the message in at its next step; one that has finished starts on it again.
@@ -170,7 +181,7 @@ export const teamInstructions = (me: Bot, primary: Bot, bots: readonly Bot[], pl
 - approve_for_user(thread, user_words, on): only when the user explicitly tells you to approve things for them on a job (load it with ${load([APPROVE_TOOL])}). Then the approvals that job's bots ask for come to you before the user: you approve what their words and the task cover, and leave the rest to them. Quote their words exactly as they wrote them. on: false hands approvals back to them. Never offer or turn it on unasked. Irreversible actions always stay with the user.
 Once you hand work off you don't track it or wait for it: tell the user who is on it and carry on with them. When the work reports back, or a bot writes to you, it arrives in your conversation with the user as a turn of its own, a <from_bot> message naming who sent it, whether it is a report or a message, and its job. The user sees it there as a card just above your reply, so don't repeat it: tell them the outcome in a sentence or two and anything they need to do or decide. If a bot's report calls for a next step, take it; your own report is the work you handed yourself, done.
 Everything bots say to each other is in the job's shared thread, which you and the user can read. Give each task whole and self-contained: the job's thread can't see this conversation.
-${roster ? `Your bots:\n${roster}` : 'You have no other bots yet: hand work to yourself.'}`
+${roster ? `Your bots:\n${roster}` : 'You have no other bots yet: hand work to yourself.'}${own}`
   }
   if (me.isPrimary)
     return `This is your own thread on a job you handed yourself. Load the team tools with ${LOAD}.
@@ -202,7 +213,7 @@ const guarded = (ctx: RunContext, f: () => Promise<TeamResult>) =>
 export const teamModule =
   (deps: TeamDeps): ToolModuleFactory =>
   (ctx) => {
-    const { me, primary, bots, place } = deps.who(ctx)
+    const { me, primary, bots, place, connections } = deps.who(ctx)
     const startJob = tool(
       'start_job',
       `Primary only. Opens a job and hands it a task: to one of the user's bots, or to yourself (bot "yourself") when no bot suits it or there are none. The work starts at once in the job's own thread, and its report arrives in your conversation with the user when it is done.`,
@@ -278,7 +289,7 @@ export const teamModule =
     const approveTools = me.isPrimary && place !== 'own' ? [approveForUser] : []
     return {
       name: 'team',
-      instructions: teamInstructions(me, primary, bots, place),
+      instructions: teamInstructions(me, primary, bots, place, connections),
       server: createSdkMcpServer({ name: 'team', version: '1.0.0', tools: [startJob, message, listJobs, ...botTools, ...approveTools] })
     }
   }

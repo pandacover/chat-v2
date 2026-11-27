@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte'
   import type { ComputerDoing } from '@shared/computer'
-  import { type Step, isDesktopRun, isMemoryRun, isTeamRun, isVideoRun } from '@shared/steps'
+  import { type Step, isDesktopRun, isMcpRun, isMemoryRun, isTeamRun, isVideoRun, mcpServersOf } from '@shared/steps'
   import { fly, slide } from '@/lib/motion'
   import Icon from './Icon.svelte'
 
@@ -29,6 +29,8 @@
   const memory = $derived(!desktop && isMemoryRun(steps))
   const team = $derived(!desktop && !memory && isTeamRun(steps))
   const video = $derived(!desktop && !memory && !team && isVideoRun(steps))
+  // The user's MCP servers: named, or Connections when a run used several.
+  const mcp = $derived(!desktop && !memory && !team && !video && isMcpRun(steps) ? mcpServersOf(steps) : null)
 
   /**
    * The live tool's step lands a moment before main says the tool is over. From then on the
@@ -113,8 +115,8 @@
 <div class="flex flex-col overflow-hidden rounded-[14px] bg-card shadow-[0_0_0_1px_var(--ring)]">
   <div class="flex h-10 items-center gap-2 px-3.5 text-[13px] text-fg-2">
     <button class="flex h-10 min-w-0 flex-1 items-center gap-2.5 text-left transition-colors hover:text-fg" aria-expanded={open} onclick={() => (toggled = !open)}>
-      <Icon name={desktop ? 'monitor' : memory ? 'brain' : team ? 'chat' : video ? 'video' : 'globe'} size={16} class="shrink-0 text-fg-3" />
-      <span class="shrink-0">{desktop ? 'Computer' : memory ? 'Memory' : team ? 'Bots' : video ? 'Video' : 'Browser'}</span>
+      <Icon name={desktop ? 'monitor' : memory ? 'brain' : team ? 'chat' : video ? 'video' : mcp ? 'plug' : 'globe'} size={16} class="shrink-0 text-fg-3" />
+      <span class="shrink-0">{desktop ? 'Computer' : memory ? 'Memory' : team ? 'Bots' : video ? 'Video' : mcp ? (mcp.length === 1 ? mcp[0] : 'Connections') : 'Browser'}</span>
       <!-- Slot: each new line rolls in from below as the previous one rolls out above. The summary
            (once the reply is over) rolls in the same way. -->
       <span class="ml-1.5 grid h-[1lh] min-w-0 flex-1 overflow-hidden text-[13px] leading-snug" aria-live="polite" data-step-line={shown?.tone === 'live' || shown?.tone === 'quiet' ? 'now' : shown?.tone === 'summary' ? 'summary' : 'last'}>

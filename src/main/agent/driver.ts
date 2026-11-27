@@ -8,7 +8,7 @@
 // resumes the session of the reply it answers (see history.ts).
 import { existsSync, readdirSync, rmSync } from 'node:fs'
 import { join, relative } from 'node:path'
-import type { CanUseTool, HookCallback, HookJSONOutput, Options, SDKAssistantMessageError, SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { CanUseTool, HookCallback, HookJSONOutput, McpServerConfig, McpServerStatus, Options, SDKAssistantMessageError, SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { Context, Layer } from 'effect'
 import type { Step } from '@shared/steps'
 import type { Effort, NewAttachmentInput, Usage } from '@shared/types'
@@ -302,6 +302,62 @@ const permit =
 
 const abortError = () => Object.assign(new Error('The reply was stopped'), { name: 'AbortError' })
 
+/** A query's MCP status request (Query.mcpServerStatus), where the stream has one. */
+type StatusQuery = { mcpServerStatus?: () => Promise<McpServerStatus[]> }
+
+/** The step line for a server of the user's that a reply couldn't reach. */
+export const unreachableStep = (s: Pick<McpServerStatus, 'name' | 'status' | 'error'>): Step => ({
+  tool: 'mcp',
+  label: `Couldn't connect to ${s.name}`,
+  ok: false,
+  detail: s.status === 'needs-auth' ? 'It asks for a browser sign-in, which Tomo can’t do yet: see Settings › Connections' : (s.error?.trim() || 'It failed to connect').slice(0, 160)
+})
+
+/**
+ * Starts the given MCP servers in a Claude Code process that sends no message, so no model is
+ * called, and waits until none is still connecting (or `timeoutMs` passes): how each one went, with
+ * its tools. The process is closed afterwards, which stops the servers it started.
+ */
+export const probeMcp = async (query: QueryFn, options: Options, servers: Record<string, McpServerConfig>, timeoutMs = 45_000, pollMs = 300): Promise<McpServerStatus[]> => {
+  let release = () => {}
+  const held = new Promise<void>((r) => (release = r))
+  const abort = new AbortController()
+  const prompt = (async function* (): AsyncGenerator<SDKUserMessage> {
+    await held
+  })()
+  const q = query({ prompt, options: { ...options, abortController: abort, persistSession: false, tools: [], maxTurns: 1, mcpServers: servers } }) as AsyncIterable<SDKMessage> &
+    StatusQuery & { close?: () => void }
+  let ended: unknown = null
+  const drain = (async () => {
+    try {
+      for await (const _ of q) void _
+    } catch (e) {
+      ended = e
+    }
+    ended ??= new Error('Claude Code ended before the servers connected.')
+  })()
+  try {
+    if (typeof q.mcpServerStatus !== 'function') throw new Error("This version of Claude Code can't report MCP servers.")
+    const until = Date.now() + timeoutMs
+    let last: McpServerStatus[] = []
+    for (;;) {
+      if (ended) throw ended
+      last = await q.mcpServerStatus()
+      if (!last.some((s) => s.status === 'pending') || Date.now() >= until) return last
+      await new Promise((r) => setTimeout(r, pollMs))
+    }
+  } finally {
+    release()
+    abort.abort()
+    try {
+      q.close?.()
+    } catch {
+      // Already closed.
+    }
+    void drain
+  }
+}
+
 export interface AgentApi {
   /** Runs one reply. Aborting `signal` stops it; the promise then rejects with an AbortError. */
   readonly reply: (req: ReplyRequest, hooks: ReplyHooks, signal: AbortSignal) => Promise<ReplyResult>
@@ -315,6 +371,8 @@ export interface AgentApi {
   readonly transcripts: (id: string) => Array<{ path: string; name: string }>
   /** Reads the account's usage meter, without calling a model (see usage/sdk.ts). */
   readonly readUsage: (auth: Auth) => Promise<AccountReading>
+  /** Connects to MCP servers as a reply would, without calling a model: how each went, and its tools. */
+  readonly mcpStatus: (servers: Record<string, McpServerConfig>, timeoutMs?: number) => Promise<McpServerStatus[]>
 }
 
 export const makeAgent = (deps: AgentDeps): AgentApi => {
@@ -382,6 +440,27 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
       }
     }
     const watch = req.watch?.(control) ?? null
+    /**
+     * The user's own servers not known to be up yet. Claude Code connects to them while the reply
+     * starts; one that fails gets a step line, so the user knows why its tools didn't come.
+     */
+    const unsettled = new Set<string>()
+    let checking = false
+    const checkServers = () => {
+      const q = running as StatusQuery | null
+      if (unsettled.size === 0 || checking || typeof q?.mcpServerStatus !== 'function') return
+      checking = true
+      q.mcpServerStatus()
+        .then(async (list) => {
+          for (const s of list) {
+            if (!unsettled.has(s.name) || s.status === 'pending') continue
+            unsettled.delete(s.name)
+            if (s.status === 'failed' || s.status === 'needs-auth') await ctx.step(unreachableStep(s))
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => (checking = false))
+    }
     /** The size of the session after the reply's latest model call, as that call reported it. */
     let lastCall: number | null = null
     /** The reply's pause, if the watch paused it (and the user didn't stop it meanwhile). */
@@ -393,6 +472,7 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
     }
     try {
       for (const make of req.modules) modules.push(make(ctx))
+      for (const m of modules) if (m.external) unsettled.add(m.name)
       const system = [req.instructions, ...modules.map((m) => m.instructions), req.profile]
         .map((s) => s.trim())
         .filter(Boolean)
@@ -467,12 +547,14 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
             // A call went through: retries before it are over.
             else retries = 0
             if (m.error === 'rate_limit') limited('')
+            // A tool call: the text before it is done, so a step line can come now.
+            if (m.message.content.some((b) => b.type === 'tool_use')) checkServers()
             for (const b of m.message.content) {
               if (b.type !== 'tool_use') continue
               if (pendingCalls.size === 0) hooks.tool?.(true)
               pendingCalls.add(b.id)
               watch?.call(b.id, b.name, b.input)
-              const owner = modules.find((x) => x.builtins?.includes(b.name))
+              const owner = modules.find((x) => x.builtins?.includes(b.name) || (x.external && b.name.startsWith(`mcp__${x.name}__`)))
               const step = owner?.stepFor?.(b.name, (b.input ?? {}) as Record<string, unknown>)
               if (step) builtinCalls.set(b.id, step)
             }
@@ -583,6 +665,7 @@ export const makeAgent = (deps: AgentDeps): AgentApi => {
         return [{ path: file, name: `${id}.jsonl` }, ...extra]
       }),
     readUsage: (auth) => probeAccount(deps.query, base(auth)),
+    mcpStatus: (servers, timeoutMs) => probeMcp(deps.query, base({ kind: 'login' }), servers, timeoutMs),
     forget: (ids) => {
       for (const id of ids)
         for (const file of sessionFiles(id)) {

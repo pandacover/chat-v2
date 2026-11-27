@@ -3,7 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { Effect, ManagedRuntime } from 'effect'
 import type { Step } from '@shared/steps'
-import type { RunContext, ToolModule } from '../../src/main/agent/module'
+import { type RunContext, type ToolModule, inProcess } from '../../src/main/agent/module'
 import { ComputerUse, type Mode } from '../../src/main/computer'
 import type { TeachTarget } from '../../src/main/computer/interaction'
 import type { Activity, OverlayAnswer, OverlayPort } from '../../src/main/computer/port'
@@ -139,7 +139,7 @@ export const harness = async (over: Partial<Platform> = {}, opts: { settleMs?: n
     }
     const mod: ToolModule = cu.module(ctx, { mode: () => mode, setMode: (m) => void (mode = m) })
     const [a, b] = InMemoryTransport.createLinkedPair()
-    await mod.server.instance.connect(a)
+    await inProcess(mod).connect(a)
     const client = new Client({ name: 'test', version: '0' })
     await client.connect(b)
     /** The permission check, then the tool itself, as the CLI would run it. */

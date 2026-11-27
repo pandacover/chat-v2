@@ -77,6 +77,16 @@ const api: Api = {
     setAnalysis: (id, analysis) => call('attachments:setAnalysis', id, analysis),
     url: (id) => `attachment://${id}/`
   },
+  mcp: {
+    list: () => call('mcp:list'),
+    create: (input) => call('mcp:create', input),
+    update: (id, input) => call('mcp:update', id, input),
+    remove: (id) => call('mcp:remove', id),
+    import: (text) => call('mcp:import', text),
+    test: (id) => call('mcp:test', id),
+    setBot: (id, botId, on) => call('mcp:setBot', id, botId, on),
+    openFile: () => call('mcp:openFile')
+  },
   settings: {
     get: () => call('settings:get'),
     update: (patch) => call('settings:update', patch),

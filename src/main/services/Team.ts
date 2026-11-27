@@ -24,7 +24,7 @@
 // The primary makes and changes workers too (create_bot, edit_bot), in its chat with the user, and
 // only once the user approves the card that says exactly what the change sets. It never changes
 // itself: that stays the user's, in Settings.
-import { Cause, Context, Effect, Layer } from 'effect'
+import { Cause, Context, Effect, Layer, Option } from 'effect'
 import { parseContent } from '@shared/artifacts'
 import { splitSteps } from '@shared/steps'
 import { RULE_ITEMS } from '@shared/rules'
@@ -35,9 +35,10 @@ import { exceeds } from '../agent/rules'
 import { bouncing } from '../agent/stuck'
 import { userSaid } from '../agent/deputy'
 import type { RunContext } from '../agent/module'
-import { SELF_NAMES, type TeamDeps, type TeamPlace, type TeamResult, botPatchFrom, describeBotChange, teamModule } from '../agent/team'
+import { type Connections, SELF_NAMES, type TeamDeps, type TeamPlace, type TeamResult, botPatchFrom, describeBotChange, teamModule } from '../agent/team'
 import { LIST_OPEN } from '../jobs'
 import { Broadcaster, Chat, titleFrom } from './Chat'
+import { McpStore, serverForBot } from './McpStore'
 import { Db, type DbApi } from './Db'
 
 /** How long a worker shows as done after its last reply. */
@@ -102,6 +103,14 @@ export class Team extends Context.Service<
     Effect.gen(function* () {
       const db = yield* Db
       const chat = yield* Chat
+      // The MCP servers each bot may use, for the roster; optional, so a test without it runs as before.
+      const mcp = Option.getOrNull(yield* Effect.serviceOption(McpStore))
+      const connections = (bots: readonly Bot[]): Connections | undefined => {
+        if (!mcp) return undefined
+        const servers = Effect.runSync(mcp.list.pipe(Effect.orElseSucceed(() => [])))
+        if (servers.length === 0) return undefined
+        return new Map(bots.map((b) => [b.id, servers.filter((s) => serverForBot(s, b.id)).map((s) => s.name)]))
+      }
       const computer = yield* ComputerUse
       const broadcaster = yield* Broadcaster
 
@@ -240,7 +249,8 @@ export class Team extends Context.Service<
           sync((d) => {
             const kind = d.getSession(ctx.sessionId)?.kind
             const place: TeamPlace = kind === 'primary' ? 'chat' : kind === 'worker' ? 'own' : 'thread'
-            return { me: d.botOf(ctx.sessionId), primary: d.primaryBot(), bots: d.listBots(), place }
+            const bots = d.listBots()
+            return { me: d.botOf(ctx.sessionId), primary: d.primaryBot(), bots, place, connections: connections(bots) }
           }),
 
         startJob: (ctx, input) =>

@@ -13,6 +13,9 @@ import { setAppMenu } from './menu'
 import { handleProtocols, registerSchemes } from './protocols'
 import { initUpdater, offerMoveToApplications } from './updater'
 import { AppPaths } from './services/AppPaths'
+import { McpStore } from './services/McpStore'
+import { mcpToolsLayer } from './services/McpTools'
+import { readLoginPath } from './agent/mcp'
 import { Attachments } from './services/Attachments'
 import { shrinkImage } from './images'
 import { Browser } from './services/Browser'
@@ -246,7 +249,9 @@ const makeRuntime = () => {
   const paths = AppPaths.layer(root)
   const db = Db.layer(join(root, 'chat.db'))
   const settings = SettingsStore.layer(cipher).pipe(Layer.provide(paths))
-  const base = Layer.mergeAll(db, settings, paths)
+  // The user's MCP servers (Settings › Connections), their tokens encrypted like API keys.
+  const mcp = McpStore.layer(cipher).pipe(Layer.provide(paths))
+  const base = Layer.mergeAll(db, settings, mcp, paths)
   const providers = Layer.mergeAll(Agent.layer(agentDeps(root)), ElevenLabs.layer, Attachments.layerWith(shrinkImage, probeVideo), Browser.layer(emitBrowser, (id) => webContents.fromId(id))).pipe(
     Layer.provideMerge(base)
   )
@@ -272,7 +277,9 @@ const makeRuntime = () => {
   const videos = videosLayer({ probe: probeVideo, frames: videoFrames }).pipe(Layer.provide(Layer.mergeAll(chat, providers, computer)))
   // The daily memory review (reconciler.ts), when the app is idle.
   const reconciler = Reconciler.layer.pipe(Layer.provide(providers), Layer.provide(Layer.succeed(Broadcaster, broadcaster)))
-  return ManagedRuntime.make(Layer.mergeAll(jobs, team, videos, providers, computer, usage, reconciler))
+  // The user's MCP servers as tool sets of replies (services/McpTools.ts).
+  const mcpTools = mcpToolsLayer.pipe(Layer.provide(Layer.mergeAll(chat, providers, computer)))
+  return ManagedRuntime.make(Layer.mergeAll(jobs, team, videos, mcpTools, providers, computer, usage, reconciler))
 }
 
 let runtime: ManagedRuntime.ManagedRuntime<MainServices | AppPaths, unknown> | null = null
@@ -376,6 +383,8 @@ app.on('web-contents-created', (_event, contents) => {
 })
 
 app.whenReady().then(async () => {
+  // MCP servers started from the Dock or Finder need the login shell's PATH (agent/mcp.ts).
+  void readLoginPath()
   const rt = makeRuntime()
   runtime = rt as typeof runtime
 

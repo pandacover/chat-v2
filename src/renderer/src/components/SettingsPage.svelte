@@ -13,6 +13,7 @@
   import UsageSettings from './UsageSettings.svelte'
   import { meter } from '@/lib/meter.svelte'
   import BotsSettings from './BotsSettings.svelte'
+  import McpSettings from './McpSettings.svelte'
   import BotAvatar from './BotAvatar.svelte'
   import { takeSettingsTab } from '@/lib/settingsNav'
   import { mascotUrl } from './Mascot.svelte'
@@ -25,11 +26,12 @@
   let scrolled = $state(false)
 
   // One tab at a time, picked from the list on the left. Missing the API key it needs, the account comes first.
-  type Tab = 'bots' | 'model' | 'memory' | 'voice' | 'account' | 'usage' | 'appearance' | 'about'
+  type Tab = 'bots' | 'connections' | 'model' | 'memory' | 'voice' | 'account' | 'usage' | 'appearance' | 'about'
   const tabs: Array<{ id: Tab; label: string; icon: IconName }> = [
     { id: 'account', label: 'Account', icon: 'key' },
     { id: 'usage', label: 'Usage', icon: 'gauge' },
     { id: 'bots', label: 'Bots', icon: 'sliders' },
+    { id: 'connections', label: 'Connections', icon: 'plug' },
     { id: 'model', label: 'Model', icon: 'sparkle' },
     { id: 'memory', label: 'Memory', icon: 'brain' },
     { id: 'voice', label: 'Voice', icon: 'mic' },
@@ -104,6 +106,8 @@
 
   // Memory: what the app has learned, as records edited in place. Every change is a new version.
   onMount(() => void app.loadMemory())
+  // Bots and Connections both show the MCP servers.
+  onMount(() => void app.loadMcp())
   let newFact = $state('')
   let editing = $state<number | null>(null)
   let editDraft = $state('')
@@ -434,7 +438,11 @@
       {/if}
 
       {#if tab === 'bots'}
-        <BotsSettings onstatus={(s) => (status = s)} />
+        <BotsSettings onstatus={(s) => (status = s)} onconnections={() => show('connections')} />
+      {/if}
+
+      {#if tab === 'connections'}
+        <McpSettings />
       {/if}
 
       {#if tab === 'model'}

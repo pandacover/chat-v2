@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import * as os from 'node:os'
 import { join } from 'node:path'
 import { BrowserWindow, app, dialog, ipcMain, shell, systemPreferences } from 'electron'
@@ -21,11 +21,14 @@ import { isSensitive } from './memory'
 import { ElevenLabs } from './services/ElevenLabs'
 import { Jobs } from './services/Jobs'
 import { SettingsStore } from './services/SettingsStore'
+import { McpStore } from './services/McpStore'
+import { testServer } from './services/McpTools'
+import type { McpServerInput } from '@shared/mcp'
 import { Usage } from './usage/Usage'
 import { Reconciler } from './services/Reconciler'
 import { Team } from './services/Team'
 
-export type MainServices = Db | Chat | Jobs | Team | Attachments | SettingsStore | Agent | ElevenLabs | Browser | ComputerUse | Usage | Reconciler
+export type MainServices = Db | Chat | Jobs | Team | Attachments | SettingsStore | McpStore | Agent | ElevenLabs | Browser | ComputerUse | Usage | Reconciler
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
@@ -42,6 +45,30 @@ const botPatch = (v: unknown): BotPatch => {
     ...(Array.isArray(p.modules) ? { modules: cleanModules(p.modules) } : {}),
     ...(p.rules && typeof p.rules === 'object' ? { rules: cleanRules(p.rules) } : {})
   }
+}
+
+/** A server from Settings, in the shape the store takes; the store checks the values. */
+const mcpInput = (v: unknown): McpServerInput => {
+  const p = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>
+  const pairs = (x: unknown) =>
+    Array.isArray(x)
+      ? x.flatMap((e) => {
+          const o = (e && typeof e === 'object' ? e : {}) as Record<string, unknown>
+          return typeof o.key === 'string' ? [{ key: o.key, ...(typeof o.value === 'string' ? { value: o.value } : {}) }] : []
+        })
+      : undefined
+  const strs = (x: unknown) => (Array.isArray(x) ? x.filter((a): a is string => typeof a === 'string') : undefined)
+  const input: McpServerInput = {}
+  for (const k of ['name', 'note', 'command', 'url'] as const) if (typeof p[k] === 'string') input[k] = p[k] as string
+  if (typeof p.enabled === 'boolean') input.enabled = p.enabled
+  if (p.transport === 'stdio' || p.transport === 'http' || p.transport === 'sse') input.transport = p.transport
+  if (strs(p.args)) input.args = strs(p.args)!
+  if (pairs(p.env)) input.env = pairs(p.env)!
+  if (pairs(p.headers)) input.headers = pairs(p.headers)!
+  if (p.access === 'allow' || p.access === 'ask' || p.access === 'block') input.access = p.access
+  if (p.toolAccess && typeof p.toolAccess === 'object') input.toolAccess = p.toolAccess as McpServerInput['toolAccess']
+  if (p.bots === 'all' || strs(p.bots)) input.bots = p.bots === 'all' ? 'all' : strs(p.bots)!
+  return input
 }
 
 type Handler = (...args: any[]) => Effect.Effect<unknown, { readonly _tag: string; readonly message: string }, MainServices>
@@ -282,6 +309,25 @@ const handlers: Record<string, Handler> = {
     }),
   'attachments:setAnalysis': (id, analysis: AudioAnalysis) =>
     Db.use((db) => db.use((d) => d.setAnalysis(str(id, 'id'), analysis))),
+
+  'mcp:list': () => McpStore.use((m) => m.list),
+  'mcp:create': (input) => McpStore.use((m) => m.create(mcpInput(input))),
+  'mcp:update': (id, input) => McpStore.use((m) => m.update(str(id, 'id'), mcpInput(input))),
+  'mcp:remove': (id) => McpStore.use((m) => m.remove(str(id, 'id'))),
+  'mcp:import': (text) => McpStore.use((m) => m.importJson(str(text, 'text'))),
+  'mcp:test': (id) => testServer(str(id, 'id')),
+  'mcp:setBot': (id, botId, on) =>
+    Effect.gen(function* () {
+      const bots = yield* (yield* Db).use((d) => d.listBots().map((b) => b.id))
+      return yield* (yield* McpStore).setBot(str(id, 'id'), str(botId, 'botId'), on === true, bots)
+    }),
+  'mcp:openFile': () =>
+    Effect.gen(function* () {
+      const store = yield* McpStore
+      // A file that isn't there yet can't be opened: write the empty list first.
+      if (!existsSync(store.file)) writeFileSync(store.file, JSON.stringify({ servers: [] }, null, 2) + '\n', 'utf8')
+      yield* Effect.promise(() => shell.openPath(store.file))
+    }),
 
   'settings:get': () => SettingsStore.use((s) => s.view),
   'settings:update': (patch: SettingsPatch) =>

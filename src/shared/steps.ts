@@ -75,6 +75,14 @@ export const isTeamRun = (steps: Step[]) => steps.length > 0 && steps.every((s) 
 /** Whether a run of steps only looked at or listened to videos (agent/video.ts). */
 export const isVideoRun = (steps: Step[]) => steps.length > 0 && steps.every((s) => s.tool.startsWith('video'))
 
+/** Whether a run of steps only used MCP servers the user connected (agent/mcp.ts). */
+export const isMcpRun = (steps: Step[]) => steps.length > 0 && steps.every((s) => s.tool === 'mcp')
+
+/** The servers a run of MCP steps used, by name: a call's label starts "<server> · ", a failed connection's ends with it. */
+export const mcpServersOf = (steps: Step[]) => [
+  ...new Set(steps.map((s) => (s.label.includes(' · ') ? s.label.split(' · ')[0]! : s.label.replace(/^Couldn't connect to /, ''))))
+]
+
 const usedWhat = (steps: Step[]) =>
   isDesktopRun(steps)
     ? 'Used the computer'
@@ -84,7 +92,9 @@ const usedWhat = (steps: Step[]) =>
         ? 'Worked with the bots'
         : isVideoRun(steps)
           ? 'Looked at a video'
-          : 'Used the browser'
+          : isMcpRun(steps)
+            ? `Used ${mcpServersOf(steps).join(', ')} (MCP)`
+            : 'Used the browser'
 
 /** History sent back to a model: step lines become one plain-language summary per run. */
 export const summarizeSteps = (content: string): string =>
