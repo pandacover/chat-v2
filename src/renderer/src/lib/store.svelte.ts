@@ -2,6 +2,7 @@ import { SvelteMap, SvelteSet } from 'svelte/reactivity'
 import { parseContentCached, type ArtifactBlock } from '@shared/artifacts'
 import type { ComputerDoing, ComputerMode, ComputerWait } from '@shared/computer'
 import type { UpdateState } from '@shared/types'
+import type { McpServerView } from '@shared/mcp'
 import type {
   Attachment,
   Bot,
@@ -116,6 +117,8 @@ class AppState {
     return this.jobByThread.get(view.session.id) ?? this.jobs.find((j) => j.id === view.session.jobId) ?? null
   })
   settings = $state<SettingsView | null>(null)
+  /** The user's MCP servers (Settings › Connections); loaded when Settings opens. */
+  mcpServers = $state<McpServerView[]>([])
   /** Settings is a modal over the chat; the chat stays mounted so drafts and scroll survive. */
   page = $state<'chat' | 'settings'>('chat')
 
@@ -505,6 +508,18 @@ class AppState {
       if (key !== primary?.session.id && !this.sessions.some((s) => s.id === key)) this.setDraft(key, '')
     // Tomo opens on the primary bot's conversation, where everything is said to it.
     if (primary) this.setView(primary)
+  }
+
+  async loadMcp() {
+    const servers = await this.attempt(() => api.mcp.list())
+    if (servers) this.mcpServers = servers
+  }
+
+  /** Runs a change to the MCP servers and keeps the list it returns; true when it went through. */
+  async changeMcp(f: () => Promise<McpServerView[]>) {
+    const servers = await this.attempt(f)
+    if (servers) this.mcpServers = servers
+    return servers !== undefined
   }
 
   async loadBots() {

@@ -3,11 +3,12 @@ import type { RuleId } from '@shared/rules'
 import type { ScreenRect } from './platform/types'
 
 /**
- * What an approval is for: a call under one of the bot's rules (agent/rules.ts), or a request
- * across bots (team). An approval asked without one (the model's own ask before an irreversible
- * step, a change to a bot) is always the user's.
+ * What an approval is for: a call under one of the bot's rules (agent/rules.ts), a request across
+ * bots (team), or a tool of an MCP server the user connected (mcp, agent/mcp.ts). An approval asked
+ * without one (the model's own ask before an irreversible step, a change to a bot, an MCP tool its
+ * server marks destructive) is always the user's.
  */
-export type ApprovalKind = RuleId | 'team'
+export type ApprovalKind = RuleId | 'team' | 'mcp'
 
 /** An approval Tomo may answer for the user: where it is asked, what it is, and what it is for. */
 export interface DeputyRequest {

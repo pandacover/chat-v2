@@ -9,6 +9,8 @@ export class AppPaths extends Context.Service<
     readonly dbFile: string
     readonly configFile: string
     readonly secretsFile: string
+    /** The custom MCP servers (services/McpStore.ts). */
+    readonly mcpFile: string
     readonly attachmentsDir: string
   }
 >()('chat-v2/AppPaths') {
@@ -21,6 +23,7 @@ export class AppPaths extends Context.Service<
         dbFile: join(root, 'chat.db'),
         configFile: join(root, 'config.json'),
         secretsFile: join(root, 'secrets.json'),
+        mcpFile: join(root, 'mcp.json'),
         attachmentsDir
       })
     })

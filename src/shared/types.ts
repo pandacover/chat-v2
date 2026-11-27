@@ -2,6 +2,7 @@
 import type { ComputerDoing, ComputerMode, ComputerWait } from './computer'
 import type { UsageEvent, UsageShare, UsageView } from './usage'
 import type { ModuleId, Rules } from './rules'
+import type { McpCheck, McpImportResult, McpServerInput, McpServerView } from './mcp'
 
 export type Role = 'root' | 'system' | 'user' | 'assistant'
 
@@ -579,6 +580,21 @@ export interface Api {
     /** Asks where to save a copy of the file and writes it; null when the user cancels. */
     saveAs(id: string, name: string): Promise<string | null>
     url(id: string): string
+  }
+  /** The user's MCP servers (Settings › Connections). Env and header values never come back, only their keys. */
+  mcp: {
+    list(): Promise<McpServerView[]>
+    /** Adds a server; returns every server and the new one's id. */
+    create(input: McpServerInput): Promise<{ servers: McpServerView[]; id: string }>
+    update(id: string, input: McpServerInput): Promise<McpServerView[]>
+    remove(id: string): Promise<McpServerView[]>
+    /** Adds the servers in JSON pasted from a server's instructions ({"mcpServers": {...}}). */
+    import(text: string): Promise<McpImportResult>
+    /** Connects to a saved server as a reply would (no model call), and keeps how it went and its tools. */
+    test(id: string): Promise<{ servers: McpServerView[]; check: McpCheck }>
+    /** Turns one bot's use of a server on or off. */
+    setBot(id: string, botId: string, on: boolean): Promise<McpServerView[]>
+    openFile(): Promise<void>
   }
   settings: {
     get(): Promise<SettingsView>

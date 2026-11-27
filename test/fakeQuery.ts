@@ -2,7 +2,7 @@
 // would, and calls the tool sets' tools for real, through MCP and canUseTool as Claude Code does.
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { McpSdkServerConfigWithInstance, Options, PermissionResult, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { McpSdkServerConfigWithInstance, McpServerStatus, Options, PermissionResult, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { QueryFn } from '../src/main/agent/driver'
@@ -46,6 +46,14 @@ export interface FakeOptions {
    * message (usage/sdk.ts probeAccount); without it, such a query has no usage method.
    */
   usage?: () => unknown | Promise<unknown>
+  /**
+   * Servers Claude Code would start or connect to (no in-process instance: the user's own): how
+   * each one went (Query.mcpServerStatus), and what a call of one of their tools returns.
+   */
+  mcp?: {
+    status?: (servers: Options['mcpServers']) => McpServerStatus[]
+    call?: (server: string, tool: string, args: Record<string, unknown>) => ToolResult
+  }
 }
 
 export const fakeQuery = (script: Script, fakeOptions: FakeOptions = {}) => {
@@ -57,6 +65,8 @@ export const fakeQuery = (script: Script, fakeOptions: FakeOptions = {}) => {
     const q = (async function* (): AsyncGenerator<SDKMessage> {
       if (signal && !signal.aborted) await new Promise((r) => signal.addEventListener('abort', r))
     })()
+    const status = fakeOptions.mcp?.status
+    if (status) Object.assign(q, { mcpServerStatus: async () => status(options.mcpServers), close: () => options.abortController?.abort() })
     if (!fakeOptions.usage) return q
     const usage = fakeOptions.usage
     return Object.assign(q, {
@@ -113,7 +123,10 @@ export const fakeQuery = (script: Script, fakeOptions: FakeOptions = {}) => {
           let result: ToolResult | null = null
           if (permission.behavior === 'allow') {
             const [, server, tool] = /^mcp__([^_]+)__(.+)$/.exec(name) ?? []
-            if (server && tool) result = (await (await clientFor(server)).callTool({ name: tool, arguments: (permission.updatedInput ?? input) as Record<string, unknown> })) as ToolResult
+            const args = (permission.updatedInput ?? input) as Record<string, unknown>
+            const external = server && !('instance' in ((options.mcpServers?.[server] ?? {}) as object))
+            if (server && tool && external && fakeOptions.mcp?.call) result = fakeOptions.mcp.call(server, tool, args)
+            else if (server && tool) result = (await (await clientFor(server)).callTool({ name: tool, arguments: args })) as ToolResult
           }
           const content = result?.content ?? [{ type: 'text', text: permission.behavior === 'deny' ? permission.message : '' }]
           // PostToolUse hooks, as Claude Code runs them for a call that ran: their context rides along
@@ -194,11 +207,13 @@ export const fakeQuery = (script: Script, fakeOptions: FakeOptions = {}) => {
   const query: QueryFn = (params) => {
     if (!params.options.systemPrompt) return probe(params.options)
     const state: State = { ended: false, interrupted: false }
+    const status = fakeOptions.mcp?.status
     return Object.assign(run(params, state), {
       interrupt: async () => {
         interrupts++
         state.interrupted = true
-      }
+      },
+      ...(status ? { mcpServerStatus: async () => status(params.options.mcpServers) } : {})
     })
   }
   /** The same without interrupt(), as a stand-in that can only be aborted. */

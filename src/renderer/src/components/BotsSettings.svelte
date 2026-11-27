@@ -16,7 +16,7 @@
   import Icon from './Icon.svelte'
   import ModelPicker from './ModelPicker.svelte'
 
-  let { onstatus }: { onstatus: (s: 'saving' | 'saved' | 'idle') => void } = $props()
+  let { onstatus, onconnections }: { onstatus: (s: 'saving' | 'saved' | 'idle') => void; onconnections: () => void } = $props()
 
   const efforts: Array<{ id: Effort; label: string; hint: string }> = [
     { id: 'low', label: 'Low', hint: 'Answers quickly and thinks little. Cheapest.' },
@@ -315,6 +315,30 @@
         ></button>
       </div>
     {/each}
+    <!-- The MCP servers the user connected (Settings › Connections); a switch here saves at once. -->
+    {#each app.mcpServers as s (s.id)}
+      {@const on = s.enabled && (s.bots === 'all' || s.bots.includes(selectedId))}
+      <div class="srow" data-bot-mcp={s.name}>
+        <Icon name="plug" size={16} class="shrink-0 text-fg-3" />
+        <div class="l !-ml-2.5">
+          <b class="font-mono !text-[13px]">{s.name}</b>
+          <span>{s.enabled ? s.note || 'An MCP server you connected' : 'Turned off in Connections'}</span>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={on}
+          aria-label={s.name}
+          class="switch"
+          disabled={!s.enabled}
+          onclick={() => app.changeMcp(() => window.api.mcp.setBot(s.id, selectedId, !on))}
+        ></button>
+      </div>
+    {/each}
+    <div class="srow !py-2.5">
+      <span class="text-[12.5px] text-fg-3">{app.mcpServers.length ? 'What each server may do is set in' : 'Tools from other apps and services come from MCP servers, added in'}</span>
+      <button class="-ml-5 inline-flex items-center gap-1 text-[12.5px] text-fg-2 hover:text-fg" data-open-connections onclick={onconnections}>Connections <Icon name="chevronRight" size={12} /></button>
+    </div>
   </div>
 
   <div class="mx-0.5 mt-[22px] mb-1 flex items-baseline gap-2">

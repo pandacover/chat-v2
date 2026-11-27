@@ -4,6 +4,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { Step } from '../src/shared/steps'
 import { browserModule } from '../src/main/agent/browser'
+import { inProcess } from '../src/main/agent/module'
 import { READ_JS, RESULTS_JS, SNAPSHOT_JS, type BrowserApi, type Reading } from '../src/main/services/Browser'
 
 const page = (text: string): Reading => ({ url: 'https://wiki.test/camera', title: 'Camera - Game Wiki', text })
@@ -29,7 +30,7 @@ const connect = async (browser: BrowserApi) => {
   const signal = new AbortController().signal
   const module = browserModule(browser)({ sessionId: 's', messageId: 'm', signal, step: async (s) => void steps.push(s), attach: async () => {} })
   const [a, b] = InMemoryTransport.createLinkedPair()
-  await (module.server.instance as unknown as { connect(t: unknown): Promise<void> }).connect(b)
+  await inProcess(module).connect(b)
   const client = new Client({ name: 'test', version: '1' })
   await client.connect(a)
   const call = async (name: string, args: object) => {

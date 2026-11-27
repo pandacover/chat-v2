@@ -11,7 +11,7 @@ import type { Step } from '../src/shared/steps'
 import { parseMemoryReply, profileBlock } from '../src/main/memory'
 import { MIGRATIONS, makeDb } from '../src/main/services/Db'
 import { MEMORY_RECORDS_MIGRATION, ftsQuery, linkNames } from '../src/main/services/memoryStore'
-import type { RunContext, ToolModule } from '../src/main/agent/module'
+import { type RunContext, type ToolModule, inProcess } from '../src/main/agent/module'
 import { describeHits, recallModule } from '../src/main/agent/recall'
 import { jobNotesBlock, noteModule } from '../src/main/agent/notes'
 
@@ -287,7 +287,7 @@ describe('job notes', () => {
 /** A module's MCP server with a client, as the CLI would call it. */
 const connect = async (mod: ToolModule) => {
   const [a, b] = InMemoryTransport.createLinkedPair()
-  await mod.server.instance.connect(a)
+  await inProcess(mod).connect(a)
   const client = new Client({ name: 'test', version: '0' })
   await client.connect(b)
   return async (name: string, args: Record<string, unknown>) => {
