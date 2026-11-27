@@ -487,14 +487,21 @@ export class Chat extends Context.Service<
             })
           )
           const usesComputer = computerOn(session, bot)
+          // A new reply reads its message for what the user wants; continuing keeps the mode.
+          const asked = partial === null ? lineage.at(-1) : undefined
+          const userAsked = asked?.role === 'user' && !asked.authorBotId ? asked.content : null
           let mode: Mode | null = null
           if (usesComputer) {
-            // A new reply reads its message for what the user wants; continuing keeps the mode.
-            const asked = partial === null ? lineage.at(-1) : undefined
-            mode = asked?.role === 'user' ? decideMode(asked.content, lastMode(session.id)) : lastMode(session.id)
+            // A bot's turn (the task a job's thread is handed) keeps the mode start_job set: its words
+            // are the bot's, not the user's, and "guide the user through it" would read as do.
+            mode = userAsked !== null ? decideMode(userAsked, lastMode(session.id)) : lastMode(session.id)
             saveMode(session.id, mode)
           }
-          const prompt = yield* promptFor(plan, partial, mode, pausedFor)
+          // Tomo's chat has no computer: a "show me how" there is tagged, so it hands off a walkthrough
+          // (start_job, mode teach) instead of writing the steps out.
+          const teamComputer = session.kind === 'primary' && computer.supported && (yield* db.use((d) => d.listBots().some((b) => b.modules.includes('computer'))))
+          const showMe = teamComputer && userAsked !== null && decideMode(userAsked, 'do') === 'teach'
+          const prompt = yield* promptFor(plan, partial, mode ?? (showMe ? 'teach' : null), pausedFor)
           // A job's thread: the bot sees where this job stands and what else the user has going.
           // The primary's own conversation, where it hands work off, sees the job list too.
           const jobs =
@@ -510,7 +517,7 @@ export class Chat extends Context.Service<
             // A worker's own thread: the team tools' section says what it is (agent/team.ts). The
             // primary's own thread on a job it handed itself says so whether or not there are workers.
             session.kind === 'primary'
-              ? chatNote(bot.name)
+              ? chatNote(bot.name, teamComputer)
               : session.kind === 'worker'
                 ? bot.isPrimary
                   ? selfJobNote(bot.name)
